@@ -44,4 +44,5 @@ require("lazy").setup({
 	},
 	{ 'echasnovski/mini.map',    version = '*' },
 	{ 'dstein64/nvim-scrollview' },
+	{ 'tpope/vim-fugitive' },
 })

@@ -9,3 +9,4 @@ vim.o.colorcolumn="80,120"
 vim.o.cursorline=true
 vim.g.fileformat="unix"
 
+require("mini.map").setup() -- File minimap

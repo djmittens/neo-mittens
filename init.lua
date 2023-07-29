@@ -4,6 +4,6 @@ vim.g.mapleader = " " -- Make sure to set `mapleader` before lazy so your mappin
 
 require("neo-mittens.lazy") -- Dependencies
 require("neo-mittens.lsp-config") -- LSP shit
-require("mini.map").setup() -- File minimap
 require("neo-mittens.telescope")
 require("neo-mittens.settings")
+require("mini.map").setup() -- File minimap
