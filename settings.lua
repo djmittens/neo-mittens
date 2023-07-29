@@ -9,4 +9,7 @@ vim.o.colorcolumn="80,120"
 vim.o.cursorline=true
 vim.g.fileformat="unix"
 
+vim.keymap.set("n", "<C-u>", "<C-u>zz")
+vim.keymap.set("n", "<C-d>", "<C-d>zz")
+
 require("mini.map").setup() -- File minimap
