@@ -11,4 +11,4 @@ if not vim.g.vscode then
 end
 
 vim.keymap.set("n", "<leader>y", "\"+y")
-vim.keymap.set("n", "<leader>[", "\"+p")
+vim.keymap.set("n", "<leader>p", "\"+p")
