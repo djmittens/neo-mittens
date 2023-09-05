@@ -10,5 +10,5 @@ if not vim.g.vscode then
 	vim.o.colorcolumn="80,120"
 end
 
-vim.keymap.set("n", "<leader>y", "\"+y")
-vim.keymap.set("n", "<leader>p", "\"+p")
+vim.keymap.set({'n', 'v'}, "<leader>y", "\"+y")
+vim.keymap.set({'n', 'v'}, "<leader>p", "\"+p")
