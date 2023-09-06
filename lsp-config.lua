@@ -6,12 +6,25 @@ lsp.preset({})
 lsp.ensure_installed({
 	'tsserver',
 	'eslint',
+	'lua_ls',
 	--'sumneko_lua',
 	'rust_analyzer',
 	'clangd',
 })
 
 local cmp = require('cmp')
+local cmp_action = require('lsp-zero').cmp_action()
+
+cmp.setup({
+  sources = {
+    {name = 'nvim_lsp'},
+    {name = 'nvim_lua'},
+  },
+  mapping = {
+    ['<C-f>'] = cmp_action.luasnip_jump_forward(),
+    ['<C-b>'] = cmp_action.luasnip_jump_backward(),
+  }
+})
 
 local cmp_select = {behavior =cmp.SelectBehavior.Select}
 local cmp_mappings = lsp.defaults.cmp_mappings({
