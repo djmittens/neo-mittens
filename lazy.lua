@@ -14,7 +14,7 @@ end
 vim.opt.rtp:prepend(lazypath)
 require("lazy").setup({
 	"folke/which-key.nvim",
-	{ "folke/neoconf.nvim",       cmd = "Neoconf" },
+	-- { "folke/neoconf.nvim",       cmd = "Neoconf" },
 	{
 		"nvim-treesitter/nvim-treesitter",
 		build = ":TSUpdate",
