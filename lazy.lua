@@ -23,10 +23,11 @@ require("lazy").setup({
 	{ "ellisonleao/gruvbox.nvim", priority = 1000 },
 	{
 		'nvim-telescope/telescope.nvim',
-		tag = '0.1.2',
-		-- or                              , branch = '0.1.x',
+		-- tag = '0.1.2',
 		dependencies = { 'nvim-lua/plenary.nvim' }
 	},
+	{ 'scalameta/nvim-metals', dependencies = { "nvim-lua/plenary.nvim" } },
+	{ 'mfussenegger/nvim-dap' },
 	{
 		'VonHeikemen/lsp-zero.nvim',
 		branch = 'v2.x',
@@ -49,5 +50,6 @@ require("lazy").setup({
 	},
 	{ 'echasnovski/mini.map',    version = '*' },
 	{ 'dstein64/nvim-scrollview' },
+	{ "airblade/vim-gitgutter" },
 	{ 'tpope/vim-fugitive' },
 })
