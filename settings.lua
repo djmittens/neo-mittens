@@ -9,12 +9,12 @@ if not vim.g.vscode then
 	vim.keymap.set("n", "n", "nzz")
 	vim.keymap.set("n", "N", "Nzz")
 	vim.keymap.set("n", "<leader>e", ":Explore<CR>")
-	vim.keymap.set("n", "<leader>E", ":Sex<CR>")
-	vim.keymap.set("n", "<leader>m", ":marks<CR>")
 	vim.keymap.set("n", "<leader>ct", ":bd term<C-A><CR>")
 
 	vim.keymap.set("n", "<M-o>", ":ClangdSwitchSourceHeader<CR>")
 
+	vim.keymap.set("n", "<leader>E", ":Sex!<CR>")
+	vim.keymap.set("n", "<leader>m", ":marks<CR>")
 	vim.g.fileformat = "unix"
 	vim.o.colorcolumn = "80,120"
 	vim.o.cursorline = true
