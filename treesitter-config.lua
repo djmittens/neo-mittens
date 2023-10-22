@@ -3,7 +3,9 @@
 local configs = require("nvim-treesitter.configs")
 configs.setup {
 	-- Add a language of your choice
-	ensure_installed = { "c", "lua", "vim", "vimdoc", "query", "elixir", "heex",
+	ensure_installed = {
+		"c",
+		"lua", "vim", "vimdoc", "query", "elixir", "heex",
 		"javascript", "thrift", "html", "scala" },
 	sync_install = false,
 	-- ignore_install = { "" }, -- List of parsers to ignore installing
