@@ -12,6 +12,7 @@ if not vim.g.vscode then
 	vim.keymap.set("n", "<leader>ct", ":bd term<C-A><CR>")
 
 	vim.keymap.set("n", "<M-o>", ":ClangdSwitchSourceHeader<CR>")
+	vim.keymap.set("v", "q", ":norm @q<CR>")
 
 	vim.keymap.set("n", "<leader>E", ":Sex!<CR>")
 	vim.keymap.set("n", "<leader>m", ":marks<CR>")
