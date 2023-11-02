@@ -50,6 +50,7 @@ require("lazy").setup({
 	},
 	{ 'echasnovski/mini.map',    version = '*' },
 	{ 'dstein64/nvim-scrollview' },
+	{ "lukas-reineke/indent-blankline.nvim" },
 	{ "airblade/vim-gitgutter" },
 	{ 'tpope/vim-fugitive' },
 })
