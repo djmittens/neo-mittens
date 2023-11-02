@@ -6,6 +6,7 @@ if not vim.g.vscode then
 	require("neo-mittens.lsp-config") -- LSP shit
 	require("neo-mittens.treesitter-config") -- Syntax highlighting shit
 	require("neo-mittens.telescope")
+	require("neo-mittens.indent-config")
 	require("mini.map").setup() -- File minimap
 	vim.cmd.colorscheme("gruvbox")
 end
