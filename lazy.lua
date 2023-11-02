@@ -14,7 +14,7 @@ end
 vim.opt.rtp:prepend(lazypath)
 require("lazy").setup({
 	"folke/which-key.nvim",
-	{ "folke/neoconf.nvim",       cmd = "Neoconf" },
+	-- { "folke/neoconf.nvim",       cmd = "Neoconf" },
 	{
 		"nvim-treesitter/nvim-treesitter",
 		build = ":TSUpdate",
@@ -23,10 +23,11 @@ require("lazy").setup({
 	{ "ellisonleao/gruvbox.nvim", priority = 1000 },
 	{
 		'nvim-telescope/telescope.nvim',
-		tag = '0.1.2',
-		-- or                              , branch = '0.1.x',
+		-- tag = '0.1.2',
 		dependencies = { 'nvim-lua/plenary.nvim' }
 	},
+	{ 'scalameta/nvim-metals', dependencies = { "nvim-lua/plenary.nvim" } },
+	{ 'mfussenegger/nvim-dap' },
 	{
 		'VonHeikemen/lsp-zero.nvim',
 		branch = 'v2.x',
@@ -49,5 +50,7 @@ require("lazy").setup({
 	},
 	{ 'echasnovski/mini.map',    version = '*' },
 	{ 'dstein64/nvim-scrollview' },
+	{ "lukas-reineke/indent-blankline.nvim" },
+	{ "airblade/vim-gitgutter" },
 	{ 'tpope/vim-fugitive' },
 })
