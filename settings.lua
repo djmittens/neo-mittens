@@ -19,7 +19,6 @@ if not vim.g.vscode then
     vim.api.nvim_create_user_command("CopyRelPath", "call setreg('+', expand('%'))", {})
     vim.keymap.set("n", "<leader>fy", ":CopyRelPath<CR>")
 
-    vim.o.fileformat = "unix"
     vim.o.colorcolumn = "80,120"
     vim.o.cursorline = true
     vim.o.relativenumber = true
