@@ -19,12 +19,11 @@ if not vim.g.vscode then
     vim.api.nvim_create_user_command("CopyRelPath", "call setreg('+', expand('%'))", {})
     vim.keymap.set("n", "<leader>fy", ":CopyRelPath<CR>")
 
-    vim.g.fileformat = "unix"
+    vim.o.fileformat = "unix"
     vim.o.colorcolumn = "80,120"
     vim.o.cursorline = true
     vim.o.relativenumber = true
     vim.o.number = true
-    vim.g.netrw_liststyle = 3 -- tree style listings by default
 
     -- indentation settings, weird stuff huh
     vim.o.smartindent = true
@@ -32,6 +31,9 @@ if not vim.g.vscode then
     vim.o.expandtab = true
     vim.o.tabstop = 2
     vim.o.shiftwidth = 2
+
+    -- tree style listings by default
+    vim.g.netrw_liststyle = 3
 end
 
 vim.keymap.set({ 'n', 'v' }, "<leader>y", "\"+y")
