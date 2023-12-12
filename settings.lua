@@ -40,3 +40,7 @@ vim.keymap.set({ 'n', 'v' }, "<leader>p", "\"+p")
 vim.keymap.set("n", "<leader>s", ":w<CR>:so %<CR>")
 vim.keymap.set("", "<leader>w", ":w<CR>")
 vim.keymap.set("", "<leader>x", ":x<CR>")
+
+-- This makes shit transparent so i can see the waifu's in the background
+-- :hi normal guibg=NONE
+vim.cmd.highlight({ "normal", "guibg=NONE" })
