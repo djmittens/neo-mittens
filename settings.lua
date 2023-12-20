@@ -31,13 +31,15 @@ if not vim.g.vscode then
   vim.o.tabstop = 2
   vim.o.shiftwidth = 2
 
-  vim.o.timeoutlen = 250
+  vim.o.timeoutlen = 350
   vim.keymap.set("n", "<leader>o", "o<Esc>")
   vim.keymap.set("n", "<leader>O", "O<Esc>")
 
   -- tree style listings by default
   vim.g.netrw_liststyle = 3
 end
+
+vim.o.wrap = false
 
 vim.keymap.set({ 'n', 'v' }, "<leader>y", "\"+y")
 vim.keymap.set({ 'n', 'v' }, "<leader>p", "\"+p")
@@ -49,3 +51,4 @@ vim.keymap.set("", "<leader>x", ":x<CR>")
 -- This makes shit transparent so i can see the waifu's in the background
 -- :hi normal guibg=NONE
 vim.cmd.highlight({ "normal", "guibg=NONE" })
+vim.cmd.highlight({ "SignColumn", "guibg=NONE" }) -- or you can also set it to darkgrey, for now tho.... its pretty good like this.
