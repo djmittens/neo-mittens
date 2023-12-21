@@ -8,8 +8,8 @@ require('gitsigns').setup({
     untracked    = { text = '┆' },
   },
   signcolumn                   = true,  -- Toggle with `:Gitsigns toggle_signs`
-  numhl                        = false, -- Toggle with `:Gitsigns toggle_numhl`
-  linehl                       = false, -- Toggle with `:Gitsigns toggle_linehl`
+  numhl                        = true, -- Toggle with `:Gitsigns toggle_numhl`
+  linehl                       = false , -- Toggle with `:Gitsigns toggle_linehl`
   word_diff                    = false, -- Toggle with `:Gitsigns toggle_word_diff`
   watch_gitdir                 = {
     follow_files = true
@@ -19,7 +19,7 @@ require('gitsigns').setup({
   current_line_blame_opts      = {
     virt_text = true,
     virt_text_pos = 'eol', -- 'eol' | 'overlay' | 'right_align'
-    delay = 1000,
+    delay = 100,
     ignore_whitespace = false,
     virt_text_priority = 100,
   },
