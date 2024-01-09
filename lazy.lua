@@ -28,6 +28,7 @@ require("lazy").setup({
   },
   { 'scalameta/nvim-metals',    dependencies = { "nvim-lua/plenary.nvim" } },
   { 'mfussenegger/nvim-dap' },
+  { 'rcarriga/nvim-dap-ui' },
   {
     'VonHeikemen/lsp-zero.nvim',
     branch = 'v2.x',

@@ -1,6 +1,6 @@
 -- lets do some lsp shit
 local lsp = require('lsp-zero')
--- lsp.preset("recommdended")
+-- lsp.preset("recomdended")
 lsp.preset({})
 
 lsp.ensure_installed({
