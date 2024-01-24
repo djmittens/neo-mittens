@@ -31,12 +31,12 @@ if not vim.g.vscode then
   vim.o.tabstop = 2
   vim.o.shiftwidth = 2
 
-  vim.o.timeoutlen = 350
+  vim.o.timeoutlen = 1000
   vim.keymap.set("n", "<leader>o", "o<Esc>")
   vim.keymap.set("n", "<leader>O", "O<Esc>")
 
   -- tree style listings by default
-  vim.g.netrw_liststyle = 3
+  vim.g.netrw_liststyle = 1
 end
 
 vim.o.wrap = false
