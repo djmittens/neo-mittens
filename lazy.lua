@@ -56,4 +56,5 @@ require("lazy").setup({
   { "lewis6991/gitsigns.nvim" },
   { 'tpope/vim-fugitive' },
   { 'tpope/vim-rhubarb' },
+  { 'rmagatti/auto-session' },
 })

@@ -36,7 +36,7 @@ if not vim.g.vscode then
   vim.keymap.set("n", "<leader>O", "O<Esc>")
 
   -- tree style listings by default
-  vim.g.netrw_liststyle = 3
+  vim.g.netrw_liststyle = 0
 end
 
 vim.o.wrap = false
@@ -45,6 +45,7 @@ vim.keymap.set({ 'n', 'v' }, "<leader>y", "\"+y")
 vim.keymap.set({ 'n', 'v' }, "<leader>p", "\"+p")
 vim.keymap.set("n", "<leader>s", ":w<CR>:so %<CR>")
 vim.keymap.set("", "<leader>w", ":w<CR>")
+vim.keymap.set("", "<leader>wa", ":wa<CR>")
 vim.keymap.set("", "<leader>x", ":x<CR>")
 
 

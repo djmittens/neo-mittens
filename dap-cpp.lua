@@ -19,7 +19,7 @@ dap.adapters.codelldb = {
   port = "${port}",
   executable = {
     -- CHANGE THIS to your path!
-    command = vim.fn.expand('$HOME/bin/cpplldb/adapter/codelldb'),
+    command = vim.fn.expand('$HOME/bin/codelldb/adapter/codelldb'),
     args = {"--port", "${port}"},
 
     -- On windows you may have to uncomment this:
@@ -32,10 +32,11 @@ dap.configurations.cpp = {
     name = "Launch file",
     type = "codelldb",
     request = "launch",
-    program = function()
-      return vim.fn.input('Path to executable: ', vim.fn.getcwd() .. '/', 'file')
-    end,
-    cwd = '${workspaceFolder}',
+    -- program = function()
+    --   return vim.fn.input('Path to executable: ', vim.fn.getcwd() .. '/', 'file')
+    -- end,
+    program = vim.fn.getcwd() .. "/build/bin/hello-opengl",
+   cwd = '${workspaceFolder}',
     stopOnEntry = false,
   },
 }

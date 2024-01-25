@@ -10,6 +10,7 @@ if not vim.g.vscode then
   require("neo-mittens.term-config")
   require("neo-mittens.gitsigns")
   require("neo-mittens.dap-cpp")
+  require("neo-mittens.auto-session-config")
   require("mini.map").setup() -- File minimapA
   vim.cmd.colorscheme("gruvbox")
 end
