@@ -49,10 +49,9 @@ require("lazy").setup({
       { 'L3MON4D3/LuaSnip' },
     }
   },
-  { 'echasnovski/mini.map',               version = '*' },
+  -- { 'echasnovski/mini.map',               version = '*' },
   { 'dstein64/nvim-scrollview' },
   { "lukas-reineke/indent-blankline.nvim" },
-  -- { "airblade/vim-gitgutter" },
   { "lewis6991/gitsigns.nvim" },
   { 'tpope/vim-fugitive' },
   { 'tpope/vim-rhubarb' },
