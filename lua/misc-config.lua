@@ -43,6 +43,8 @@ vim.keymap.set("n", "<leader>O", "O<Esc>")
 
 -- tree style listings by default
 vim.g.netrw_liststyle = 3
+vim.o.splitright = true
+vim.o.signcolumn = 'number'
 
 vim.o.wrap = false
 

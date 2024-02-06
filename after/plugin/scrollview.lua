@@ -3,5 +3,5 @@ require('scrollview').setup({
   current_only = false,
   base = 'right',
   signs_on_startup = {'all'},
-  diagnostics_severities = {vim.diagnostic.severity.WARN}
+  diagnostics_severities = {vim.diagnostic.severity.HINT}
 })
