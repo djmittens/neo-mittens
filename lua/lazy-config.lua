@@ -13,22 +13,13 @@ end
 
 vim.opt.rtp:prepend(lazypath)
 require("lazy").setup({
-  "folke/which-key.nvim",
-  -- { "folke/neoconf.nvim",       cmd = "Neoconf" },
-  {
-    "nvim-treesitter/nvim-treesitter",
-    build = ":TSUpdate",
-  },
   "folke/neodev.nvim",
-  { "ellisonleao/gruvbox.nvim", priority = 1000 },
   {
     'nvim-telescope/telescope.nvim',
     -- tag = '0.1.2',
     dependencies = { 'nvim-lua/plenary.nvim' }
   },
-  { 'scalameta/nvim-metals',    dependencies = { "nvim-lua/plenary.nvim" } },
-  { 'mfussenegger/nvim-dap' },
-  { 'rcarriga/nvim-dap-ui' },
+  -- LSP
   {
     'VonHeikemen/lsp-zero.nvim',
     branch = 'v2.x',
@@ -49,12 +40,24 @@ require("lazy").setup({
       { 'L3MON4D3/LuaSnip' },
     }
   },
-  -- { 'echasnovski/mini.map',               version = '*' },
+  { 'scalameta/nvim-metals',    dependencies = { "nvim-lua/plenary.nvim" } },
+  {
+    "nvim-treesitter/nvim-treesitter",
+    build = ":TSUpdate",
+  },
+  -- Session Management
+  { 'rmagatti/auto-session' },
+  -- Random bullshit
+  { "folke/which-key.nvim" },
   { "mbbill/undotree" },
   { 'dstein64/nvim-scrollview' },
   { "lukas-reineke/indent-blankline.nvim" },
+  { "ellisonleao/gruvbox.nvim", priority = 1000 },
+  -- Git Support
   { "lewis6991/gitsigns.nvim" },
   { 'tpope/vim-fugitive' },
   { 'tpope/vim-rhubarb' },
-  { 'rmagatti/auto-session' },
+  -- Debugger Support
+  { 'mfussenegger/nvim-dap' },
+  { 'rcarriga/nvim-dap-ui' },
 })

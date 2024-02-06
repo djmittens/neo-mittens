@@ -1,3 +1,8 @@
+-- IMPORTANT: make sure to setup neodev BEFORE lspconfig
+require("neodev").setup({
+  -- add any options here, or leave empty to use the default settings
+})
+
 -- lets do some lsp shit
 local lsp = require('lsp-zero')
 -- lsp.preset("recomdended")
