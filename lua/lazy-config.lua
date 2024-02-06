@@ -50,6 +50,7 @@ require("lazy").setup({
     }
   },
   -- { 'echasnovski/mini.map',               version = '*' },
+  { "mbbill/undotree" },
   { 'dstein64/nvim-scrollview' },
   { "lukas-reineke/indent-blankline.nvim" },
   { "lewis6991/gitsigns.nvim" },
