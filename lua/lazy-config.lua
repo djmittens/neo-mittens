@@ -13,13 +13,8 @@ end
 
 vim.opt.rtp:prepend(lazypath)
 require("lazy").setup({
-  "folke/neodev.nvim",
-  {
-    'nvim-telescope/telescope.nvim',
-    -- tag = '0.1.2',
-    dependencies = { 'nvim-lua/plenary.nvim' }
-  },
   -- LSP
+  { "folke/neodev.nvim" },
   {
     'VonHeikemen/lsp-zero.nvim',
     branch = 'v2.x',
@@ -47,6 +42,11 @@ require("lazy").setup({
   },
   -- Session Management
   { 'rmagatti/auto-session' },
+  {
+    'nvim-telescope/telescope.nvim',
+    -- tag = '0.1.2',
+    dependencies = { 'nvim-lua/plenary.nvim' }
+  },
   -- Random bullshit
   { "folke/which-key.nvim" },
   { "mbbill/undotree" },
