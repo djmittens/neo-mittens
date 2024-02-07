@@ -40,15 +40,17 @@ require("lazy").setup({
     "nvim-treesitter/nvim-treesitter",
     build = ":TSUpdate",
   },
+  { 'mfussenegger/nvim-treehopper' },
+  { 'smoka7/hop.nvim' },
   -- Session Management
-  { 'rmagatti/auto-session' },
+  -- { 'rmagatti/auto-session' },
   {
     'nvim-telescope/telescope.nvim',
     -- tag = '0.1.2',
     dependencies = { 'nvim-lua/plenary.nvim' }
   },
   -- Random bullshit
-  { "folke/which-key.nvim" },
+  -- { "folke/which-key.nvim" },
   { "mbbill/undotree" },
   { 'dstein64/nvim-scrollview' },
   { "lukas-reineke/indent-blankline.nvim" },

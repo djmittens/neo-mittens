@@ -1,4 +1,4 @@
-  require("auto-session").setup {
-    log_level = "error",
-    auto_session_suppress_dirs = { "~/", "~/src", "~/Downloads", "/"},
-  }
+  -- require("auto-session").setup {
+  --   log_level = "error",
+  --   auto_session_suppress_dirs = { "~/", "~/src", "~/Downloads", "/"},
+  -- }
