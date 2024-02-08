@@ -27,7 +27,6 @@ vim.keymap.set("n", "<leader>fy", ":CopyRelPath<CR>")
 
 vim.o.colorcolumn = "80,120"
 vim.o.cursorline = true
-vim.o.relativenumber = true
 vim.o.number = true
 
 -- indentation settings, weird stuff huh
@@ -42,13 +41,27 @@ vim.keymap.set("n", "<leader>o", "o<Esc>")
 vim.keymap.set("n", "<leader>O", "O<Esc>")
 
 -- tree style listings by default
-vim.g.netrw_liststyle = 1
+vim.g.netrw_liststyle = 0
 vim.o.splitright = true
 -- vim.o.signcolumn = 'number'
 
 vim.o.wrap = false
 
+-- So i dont kill my wrist
+vim.keymap.set("i", "jj", "<ESC>")
+
 -- This makes shit transparent so i can see the waifu's in the background
 -- :hi normal guibg=NONE
 vim.cmd.highlight({ "normal", "guibg=NONE" })
 vim.cmd.highlight({ "SignColumn", "guibg=NONE" }) -- or you can also set it to darkgrey, for now tho.... its pretty good like this.
+
+-- Relative line number settings
+vim.o.relativenumber = true
+vim.api.nvim_create_autocmd({ 'InsertEnter' }, {
+  pattern = { "*.*" },
+  command = "set nornu",
+})
+vim.api.nvim_create_autocmd({ 'InsertLeavePre' }, {
+  pattern = { "*.*" },
+  command = "set rnu",
+})
