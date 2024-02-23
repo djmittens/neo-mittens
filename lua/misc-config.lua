@@ -43,6 +43,8 @@ vim.keymap.set("n", "<leader>O", "O<Esc>")
 -- tree style listings by default
 vim.g.netrw_liststyle = 0
 vim.o.splitright = true
+vim.o.ignorecase = true
+vim.o.smartcase = true
 -- vim.o.signcolumn = 'number'
 
 vim.o.wrap = false
@@ -65,3 +67,18 @@ vim.api.nvim_create_autocmd({ 'InsertLeavePre' }, {
   pattern = { "*.*" },
   command = "set rnu",
 })
+
+
+-- Function to get the current git branch name
+local function get_git_branch()
+  return vim.fn.systemlist('git rev-parse --abbrev-ref HEAD')[1]
+end
+
+-- Function to insert TODO with the current git branch name
+local function insert_todo()
+  -- Construct TODO text with the git branch name
+  -- Insert TODO text below the cursor position
+  vim.api.nvim_put({ 'TODO(' .. get_git_branch() .. '): ' }, '', true, true)
+end
+
+vim.keymap.set('i', '<M-t>', function() insert_todo() end, { noremap = true, silent = true })

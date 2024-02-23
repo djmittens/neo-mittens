@@ -41,7 +41,7 @@ require("lazy").setup({
     build = ":TSUpdate",
   },
   -- { 'mfussenegger/nvim-treehopper' },
-  { 'smoka7/hop.nvim' },
+  -- { 'smoka7/hop.nvim' },
   -- Session Management
   -- { 'rmagatti/auto-session' },
   {
