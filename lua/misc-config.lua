@@ -20,6 +20,7 @@ vim.keymap.set({ 'n', 'v' }, "<leader>p", "\"+p")
 vim.keymap.set("n", "<leader>s", ":w<CR>:so %<CR>")
 vim.keymap.set("", "<leader>w", ":w<CR>")
 vim.keymap.set("", "<leader>x", ":x<CR>")
+vim.keymap.set("", "<leader>n", ":noh<CR>")
 
 -- Copy relative file path
 vim.api.nvim_create_user_command("CopyRelPath", "call setreg('+', expand('%'))", {})
@@ -81,4 +82,4 @@ local function insert_todo()
   vim.api.nvim_put({ 'TODO(' .. get_git_branch() .. '): ' }, '', true, true)
 end
 
-vim.keymap.set('i', '<M-t>', function() insert_todo() end, { noremap = true, silent = true })
+vim.keymap.set({'i', 'n'}, '<M-t>', function() insert_todo() end, { noremap = true, silent = true })
