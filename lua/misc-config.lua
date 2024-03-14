@@ -24,7 +24,7 @@ vim.keymap.set("", "<leader>n", ":noh<CR>")
 
 -- Copy relative file path
 vim.api.nvim_create_user_command("CopyRelPath", "call setreg('+', expand('%'))", {})
-vim.keymap.set("n", "<leader>fy", ":CopyRelPath<CR>")
+vim.keymap.set("n", "<leader>yp", ":CopyRelPath<CR>")
 
 vim.o.colorcolumn = "80,120"
 vim.o.cursorline = true
