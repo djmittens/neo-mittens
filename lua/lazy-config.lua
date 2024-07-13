@@ -60,6 +60,7 @@ require("lazy").setup({
   { 'tpope/vim-fugitive' },
   { 'tpope/vim-rhubarb' },
   -- Debugger Support
-  { 'mfussenegger/nvim-dap' },
-  { 'rcarriga/nvim-dap-ui' },
+  { 'mfussenegger/nvim-dap', dependencies = { "nvim-neotest/nvim-nio" }},
+  { 'rcarriga/nvim-dap-ui'},
+
 })
