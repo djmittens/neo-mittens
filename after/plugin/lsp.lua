@@ -51,30 +51,36 @@ lsp.set_preferences({
   sign_icons = {}
 })
 
+cmp.setup({
+  -- For some reason this config only is available here and stuff, not part of lsp setup
+  window = {
+    documentation = cmp.config.window.bordered(),
+    completion = cmp.config.window.bordered(),
+  },
+})
+
 lsp.setup_nvim_cmp({
   completion = {
-    keyword_length = 100
+    keyword_length = 1
   },
   --mapping = cmp_mappings
   snippet = {
     expand = function(args)
       -- vim.fn["vsnip#anonymous"](args.body)     -- For `vsnip` users.
-      require('luasnip').lsp_expand(args.body) -- For `luasnip` users.
-      -- require'snippy'.expand_snippet(args.body) -- For `snippy` users.
-      -- vim.fn["UltiSnips#Anon"](args.body) -- For `ultisnips` users.
-      -- vim.snippet.expand(args.body) -- For native neovim snippets (Neovim v0.10+)
+      luasnip.lsp_expand(args.body) -- For `luasnip` users.
     end,
   },
   sources = {
+    { name = 'luasnip' }, -- For luasnip users.
     { name = 'nvim_lsp' },
     { name = 'nvim_lua' },
-    { name = 'luasnip', max_item_count = 100 }, -- For luasnip users.
   },
   mapping = {
     ['<C-p>'] = cmp.mapping.select_prev_item(cmp_select),
     ['<C-n>'] = cmp.mapping.select_next_item(cmp_select),
     ['<C-e>'] = cmp.mapping.abort(),
     ['<C-y>'] = cmp.mapping.confirm({ select = true }),
+    ['<CR>'] = cmp.mapping.confirm({select = false}),
     ['<C-f>'] = cmp.mapping(function(fallback)
       if luasnip.jumpable(1) then
         luasnip.jump(1)
@@ -127,7 +133,6 @@ lsp.setup_nvim_cmp({
       return vim_item
     end
   },
-
 })
 
 lsp.on_attach(function(client, bufnr)

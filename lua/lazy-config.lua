@@ -25,8 +25,8 @@ require("lazy").setup({
       },
     },
   },
-  { "Bilal2453/luvit-meta", lazy = true }, -- optional `vim.uv` typings
-  {                                        -- optional completion source for require statements and module annotations
+  { "Bilal2453/luvit-meta",  lazy = true }, -- optional `vim.uv` typings
+  {                                         -- optional completion source for require statements and module annotations
     "hrsh7th/nvim-cmp",
     opts = function(_, opts)
       opts.sources = opts.sources or {}
@@ -53,10 +53,18 @@ require("lazy").setup({
       -- Autocompletion
       { 'hrsh7th/nvim-cmp' },
       { 'hrsh7th/cmp-nvim-lsp' },
-      { 'L3MON4D3/LuaSnip' },
+      {
+        'L3MON4D3/LuaSnip',
+        dependencies = { 'rafamadriz/friendly-snippets' },
+        config = function()
+          require('luasnip.loaders.from_vscode').lazy_load({})
+        end
+
+      },
+      { 'saadparwaiz1/cmp_luasnip', },
     }
   },
-  { 'scalameta/nvim-metals',              dependencies = { "nvim-lua/plenary.nvim" } },
+  { 'scalameta/nvim-metals', dependencies = { "nvim-lua/plenary.nvim" } },
   {
     "nvim-treesitter/nvim-treesitter",
     build = ":TSUpdate",
