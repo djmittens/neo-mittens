@@ -14,7 +14,28 @@ end
 vim.opt.rtp:prepend(lazypath)
 require("lazy").setup({
   -- LSP
-  { "folke/neodev.nvim" },
+  {
+    "folke/lazydev.nvim",
+    ft = "lua", -- only load on lua files
+    opts = {
+      library = {
+        -- See the configuration section for more details
+        -- Load luvit types when the `vim.uv` word is found
+        { path = "luvit-meta/library", words = { "vim%.uv" } },
+      },
+    },
+  },
+  { "Bilal2453/luvit-meta", lazy = true }, -- optional `vim.uv` typings
+  {                                        -- optional completion source for require statements and module annotations
+    "hrsh7th/nvim-cmp",
+    opts = function(_, opts)
+      opts.sources = opts.sources or {}
+      table.insert(opts.sources, {
+        name = "lazydev",
+        group_index = 0, -- set group index to 0 to skip loading LuaLS completions
+      })
+    end,
+  },
   {
     'VonHeikemen/lsp-zero.nvim',
     branch = 'v2.x',
@@ -35,7 +56,7 @@ require("lazy").setup({
       { 'L3MON4D3/LuaSnip' },
     }
   },
-  { 'scalameta/nvim-metals',    dependencies = { "nvim-lua/plenary.nvim" } },
+  { 'scalameta/nvim-metals',              dependencies = { "nvim-lua/plenary.nvim" } },
   {
     "nvim-treesitter/nvim-treesitter",
     build = ":TSUpdate",
@@ -54,13 +75,13 @@ require("lazy").setup({
   { "mbbill/undotree" },
   { 'dstein64/nvim-scrollview' },
   { "lukas-reineke/indent-blankline.nvim" },
-  { "ellisonleao/gruvbox.nvim", priority = 1000 },
+  { "ellisonleao/gruvbox.nvim",           priority = 1000 },
   -- Git Support
   { "lewis6991/gitsigns.nvim" },
   { 'tpope/vim-fugitive' },
   { 'tpope/vim-rhubarb' },
   -- Debugger Support
-  { 'mfussenegger/nvim-dap', dependencies = { "nvim-neotest/nvim-nio" }},
-  { 'rcarriga/nvim-dap-ui'},
+  { 'mfussenegger/nvim-dap',              dependencies = { "nvim-neotest/nvim-nio" } },
+  { 'rcarriga/nvim-dap-ui' },
 
 })
