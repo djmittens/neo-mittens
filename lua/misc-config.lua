@@ -83,3 +83,12 @@ local function insert_todo()
 end
 
 vim.keymap.set({'i', 'n'}, '<M-t>', function() insert_todo() end, { noremap = true, silent = true })
+
+
+vim.filetype.add({
+	extension = {
+		thrift = "thrift",
+		sbt = "scala",
+    tf = "hcl",
+	}
+})
