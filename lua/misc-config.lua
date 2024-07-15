@@ -22,6 +22,10 @@ vim.keymap.set("", "<leader>w", ":w<CR>")
 vim.keymap.set("", "<leader>x", ":x<CR>")
 vim.keymap.set("", "<leader>n", ":noh<CR>")
 
+-- Navigating quickfix list n stuff
+vim.keymap.set("", "]q", ":cn<CR>")
+vim.keymap.set("", "[q", ":cp<CR>")
+
 -- Copy relative file path
 vim.api.nvim_create_user_command("CopyRelPath", "call setreg('+', expand('%'))", {})
 vim.keymap.set("n", "<leader>yp", ":CopyRelPath<CR>")
@@ -83,3 +87,5 @@ local function insert_todo()
 end
 
 vim.keymap.set({'i', 'n'}, '<M-t>', function() insert_todo() end, { noremap = true, silent = true })
+
+vim.o.grepprg = 'rg --vimgrep --hidden --glob "!.git"'
