@@ -26,6 +26,9 @@ vim.keymap.set("", "<leader>n", ":noh<CR>")
 vim.keymap.set("", "]q", ":cn<CR>")
 vim.keymap.set("", "[q", ":cp<CR>")
 
+-- Check the current files changes against whats on the file system, before storing
+vim.api.nvim_create_user_command("Fdiff", "w !diff % -", {})
+
 -- Copy relative file path
 vim.api.nvim_create_user_command("CopyRelPath", "call setreg('+', expand('%'))", {})
 vim.keymap.set("n", "<leader>yp", ":CopyRelPath<CR>")
@@ -61,6 +64,7 @@ vim.keymap.set("i", "jj", "<ESC>")
 -- :hi normal guibg=NONE
 vim.cmd.highlight({ "normal", "guibg=NONE" })
 vim.cmd.highlight({ "SignColumn", "guibg=NONE" }) -- or you can also set it to darkgrey, for now tho.... its pretty good like this.
+vim.cmd.highlight({ "FloatBorder", "guibg=NONE" }) -- this is a hack for some themes, for telescope and so on
 
 -- Relative line number settings
 vim.o.relativenumber = true
@@ -89,3 +93,11 @@ end
 vim.keymap.set({'i', 'n'}, '<M-t>', function() insert_todo() end, { noremap = true, silent = true })
 
 vim.o.grepprg = 'rg --vimgrep --hidden --glob "!.git"'
+
+vim.filetype.add({
+	extension = {
+		thrift = "thrift",
+		sbt = "scala",
+    tf = "hcl",
+	}
+})
