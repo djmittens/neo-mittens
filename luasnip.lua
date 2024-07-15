@@ -1,1 +1,1 @@
--- require("neo-mittens.snips.cpp")
+require("neo-mittens.snips.cpp")

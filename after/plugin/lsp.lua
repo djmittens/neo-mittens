@@ -82,14 +82,24 @@ lsp.setup_nvim_cmp({
     ['<C-y>'] = cmp.mapping.confirm({ select = true }),
     ['<CR>'] = cmp.mapping.confirm({select = false}),
     ['<C-f>'] = cmp.mapping(function(fallback)
-      if luasnip.jumpable(1) then
+      if cmp.visible() then
+        cmp.select_next_item({
+          behavior = cmp.SelectBehavior.Select,
+          count = 10
+        })
+      elseif luasnip.jumpable(1) then
         luasnip.jump(1)
       else
         fallback()
       end
     end, { 'i', 's' }),
     ['<C-b>'] = cmp.mapping(function(fallback)
-      if luasnip.jumpable(-1) then
+      if cmp.visible() then
+        cmp.select_next_item({
+          behavior = cmp.SelectBehavior.Select,
+          count = -10
+        })
+      elseif luasnip.jumpable(-1) then
         luasnip.jump(-1)
       else
         fallback()
