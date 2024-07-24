@@ -127,7 +127,7 @@ lsp.setup_nvim_cmp({
     end, { 'i', 's' }),
   },
   formatting = {
-    fields = { 'abbr', 'kind', 'menu' },
+    fields = { 'kind',  'abbr', 'menu' },
     expandable_indicator = true,
     format = function(entry, vim_item)
       -- Kind icons
