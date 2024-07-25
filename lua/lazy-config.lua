@@ -69,10 +69,6 @@ require("lazy").setup({
     "nvim-treesitter/nvim-treesitter",
     build = ":TSUpdate",
   },
-  -- { 'mfussenegger/nvim-treehopper' },
-  -- { 'smoka7/hop.nvim' },
-  -- Session Management
-  -- { 'rmagatti/auto-session' },
   {
     'nvim-telescope/telescope.nvim',
     -- tag = '0.1.2',

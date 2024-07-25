@@ -43,7 +43,7 @@ vim.o.autoindent = true
 vim.o.expandtab = true
 vim.o.tabstop = 2
 vim.o.shiftwidth = 2
-vim.o.timeoutlen = 350
+vim.o.timeoutlen = 650
 
 vim.keymap.set("n", "<leader>o", "o<Esc>")
 vim.keymap.set("n", "<leader>O", "O<Esc>")
@@ -63,7 +63,7 @@ vim.keymap.set("i", "jj", "<ESC>")
 -- This makes shit transparent so i can see the waifu's in the background
 -- :hi normal guibg=NONE
 vim.cmd.highlight({ "normal", "guibg=NONE" })
-vim.cmd.highlight({ "SignColumn", "guibg=NONE" }) -- or you can also set it to darkgrey, for now tho.... its pretty good like this.
+vim.cmd.highlight({ "SignColumn", "guibg=NONE" })  -- or you can also set it to darkgrey, for now tho.... its pretty good like this.
 vim.cmd.highlight({ "FloatBorder", "guibg=NONE" }) -- this is a hack for some themes, for telescope and so on
 
 -- Relative line number settings
@@ -90,14 +90,37 @@ local function insert_todo()
   vim.api.nvim_put({ 'TODO(' .. get_git_branch() .. '): ' }, '', true, true)
 end
 
-vim.keymap.set({'i', 'n'}, '<M-t>', function() insert_todo() end, { noremap = true, silent = true })
+vim.keymap.set({ 'i', 'n' }, '<M-t>', function() insert_todo() end, { noremap = true, silent = true })
 
 vim.o.grepprg = 'rg --vimgrep --hidden --glob "!.git"'
 
 vim.filetype.add({
-	extension = {
-		thrift = "thrift",
-		sbt = "scala",
+  extension = {
+    thrift = "thrift",
+    sbt = "scala",
     tf = "hcl",
-	}
+  }
 })
+
+-- Highlighting lines in the editor, this is useful for marking up big files, or code reviews
+--
+--
+vim.api.nvim_set_hl(0, "LineHighlight", {
+  ctermbg = "green",
+  background = "green",
+})
+
+local function highlight_visual_lines()
+  vim.cmd(vim.api.nvim_replace_termcodes("normal! <Esc>", true, false, true)) -- hack to quit visual mode. probably better way of doing this
+  for line = vim.fn.line("'<"), vim.fn.line("'>") do
+    vim.fn.matchadd('LineHighlight', '\\%' .. line .. 'l')
+  end
+end
+
+local function highlight_current_line()
+  vim.fn.matchadd('linehighlight', '\\%' .. vim.fn.line("v") .. 'l')
+end
+
+vim.keymap.set({'v'}, '<leader>l', function() highlight_visual_lines() end, { noremap = true, silent = true })
+vim.keymap.set({ 'n' }, '<leader>l', function() highlight_current_line() end, { noremap = true, silent = false })
+vim.keymap.set({ 'n' }, '<leader>c', function() vim.fn.clearmatches() end, { noremap = true, silent = true })
