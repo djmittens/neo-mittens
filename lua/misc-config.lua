@@ -122,16 +122,20 @@ end
 local function highlight_lines(group)
   if vim.fn.mode() == 'v' or vim.fn.mode() == 'V' then
     vim.cmd(vim.api.nvim_replace_termcodes("normal! <esc>", true, false, true)) -- hack to quit visual mode. probably better way of doing this
-    for line = vim.fn.line("'<"), vim.fn.line("'>") do
-      vim.fn.matchadd(group, '\\%' .. line .. 'l')
-    end
+    -- Wish this worked but it always higlights the last selection when it changes
+    -- its hilarious, but not what i need
+    -- vim.fn.matchadd(group, "\\%>'<\\_.*\\%'>")
+    vim.fn.matchadd(group, "\\%>" .. (vim.fn.line("'<") - 1 ) .. "l\\%<" .. (vim.fn.line("'>") + 1) .. "l")
   else
     vim.fn.matchadd(group, '\\%' .. vim.fn.line("v") .. 'l')
   end
 end
 
 
-vim.keymap.set({ 'v', 'n' }, '<leader>l', function() highlight_lines("LineHighlightPurple") end, { noremap = true, silent = false })
-vim.keymap.set({ 'v', 'n' }, '<leader>lg', function() highlight_lines("LineHighlightGreen") end, { noremap = true, silent = false })
-vim.keymap.set({ 'v', 'n' }, '<leader>ly', function() highlight_lines("LineHighlightYellow") end, { noremap = true, silent = false })
+vim.keymap.set({ 'v', 'n' }, '<leader>l', function() highlight_lines("LineHighlightGreen") end,
+  { noremap = true, silent = false })
+vim.keymap.set({ 'v', 'n' }, '<leader>lg', function() highlight_lines("LineHighlightPurple") end,
+  { noremap = true, silent = false })
+vim.keymap.set({ 'v', 'n' }, '<leader>ly', function() highlight_lines("LineHighlightYellow") end,
+  { noremap = true, silent = false })
 vim.keymap.set({ 'n' }, '<leader>c', function() vim.fn.clearmatches() end, { noremap = true, silent = true })
