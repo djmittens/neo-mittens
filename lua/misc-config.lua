@@ -104,23 +104,34 @@ vim.filetype.add({
 
 -- Highlighting lines in the editor, this is useful for marking up big files, or code reviews
 --
---
-vim.api.nvim_set_hl(0, "LineHighlight", {
-  ctermbg = "green",
-  background = "green",
-})
 
-local function highlight_visual_lines()
-  vim.cmd(vim.api.nvim_replace_termcodes("normal! <Esc>", true, false, true)) -- hack to quit visual mode. probably better way of doing this
-  for line = vim.fn.line("'<"), vim.fn.line("'>") do
-    vim.fn.matchadd('LineHighlight', '\\%' .. line .. 'l')
+local hl_groups = {
+  LineHighlightPurple = "purple",
+  LineHighlightYellow = "yellow",
+  LineHighlightGreen = "green",
+}
+
+for g, c in pairs(hl_groups) do
+  vim.api.nvim_set_hl(0, g, {
+    ctermbg = "green",
+    background = c,
+  })
+end
+
+
+local function highlight_lines(group)
+  if vim.fn.mode() == 'v' or vim.fn.mode() == 'V' then
+    vim.cmd(vim.api.nvim_replace_termcodes("normal! <esc>", true, false, true)) -- hack to quit visual mode. probably better way of doing this
+    for line = vim.fn.line("'<"), vim.fn.line("'>") do
+      vim.fn.matchadd(group, '\\%' .. line .. 'l')
+    end
+  else
+    vim.fn.matchadd(group, '\\%' .. vim.fn.line("v") .. 'l')
   end
 end
 
-local function highlight_current_line()
-  vim.fn.matchadd('linehighlight', '\\%' .. vim.fn.line("v") .. 'l')
-end
 
-vim.keymap.set({'v'}, '<leader>l', function() highlight_visual_lines() end, { noremap = true, silent = true })
-vim.keymap.set({ 'n' }, '<leader>l', function() highlight_current_line() end, { noremap = true, silent = false })
+vim.keymap.set({ 'v', 'n' }, '<leader>l', function() highlight_lines("LineHighlightPurple") end, { noremap = true, silent = false })
+vim.keymap.set({ 'v', 'n' }, '<leader>lg', function() highlight_lines("LineHighlightGreen") end, { noremap = true, silent = false })
+vim.keymap.set({ 'v', 'n' }, '<leader>ly', function() highlight_lines("LineHighlightYellow") end, { noremap = true, silent = false })
 vim.keymap.set({ 'n' }, '<leader>c', function() vim.fn.clearmatches() end, { noremap = true, silent = true })
