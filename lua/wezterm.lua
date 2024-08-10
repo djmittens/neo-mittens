@@ -17,7 +17,7 @@ config.use_fancy_tab_bar            = false
 
 local hsb = {
   -- Darken the background image
-  brightness = 0.08,
+  brightness = 0.05,
 
   -- You can adjust the hue by scaling its value.
   -- a multiplier of 1.0 leaves the value unchanged.
