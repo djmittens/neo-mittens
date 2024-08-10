@@ -8,3 +8,5 @@ nvidia-settings --assign CurrentMetaMode="DP-4: 7680x2160_60 -7680+0 {ForceCompo
 
 # Re-enable your compositor
 # picom -f --config ~/.config/picom/picom.conf --experimental-backends &
+#
+./workspace-switcher.py stardeck

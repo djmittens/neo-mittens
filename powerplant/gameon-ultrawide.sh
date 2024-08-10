@@ -8,3 +8,4 @@ nvidia-settings --assign CurrentMetaMode="DP-4: 5120x1440_240 -5120+0 {ForceComp
 
 #Disable 2º screen
 xrandr --output HDMI-0 --off
+./workspace-switcher.py none
