@@ -8,6 +8,7 @@ metals_config.settings = {
   showImplicitArguments = true,
   bloopSbtAlreadyInstalled = true, -- Bloop, ofcourse is not installed, so dont do it !!!
   enableSemanticHighlighting = true,  -- Disable this if there are problems, still experimental
+  verboseCompilation = true,
   excludedPackages = { "akka.actor.typed.javadsl", "com.github.swagger.akka.javadsl" },
 }
 

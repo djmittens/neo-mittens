@@ -149,8 +149,18 @@ lsp.on_attach(function(client, bufnr)
   lsp.default_keymaps({ buffer = bufnr })
   local opts = { buffer = bufnr, remap = false }
 
+  local function on_list(options)
+    vim.fn.setloclist(0, {}, ' ', options)
+    vim.cmd.lfirst()
+  end
   vim.keymap.set("n", "gd", function()
-    vim.lsp.buf.definition({ reuse_win = true })
+    vim.lsp.buf.definition({on_list=on_list, loclist=true, reuse_win = true })
+    -- vim.lsp.buf.implementation
+    vim.cmd("norm zz")
+  end, opts)
+  vim.keymap.set("n", "gi", function()
+    vim.lsp.buf.implementation({on_list=on_list, loclist=true, reuse_win = true })
+    -- vim.lsp.buf.implementation
     vim.cmd("norm zz")
   end, opts)
   vim.keymap.set("n", "K", function() vim.lsp.buf.hover() end, opts)

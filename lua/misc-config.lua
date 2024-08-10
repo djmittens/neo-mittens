@@ -106,14 +106,14 @@ vim.filetype.add({
 --
 
 local hl_groups = {
-  LineHighlightPurple = "purple",
-  LineHighlightYellow = "yellow",
+  LineHighlightPurple = "darkmagenta",
+  LineHighlightCyan = "darkcyan",
   LineHighlightGreen = "green",
 }
 
 for g, c in pairs(hl_groups) do
   vim.api.nvim_set_hl(0, g, {
-    ctermbg = "green",
+    ctermbg = c,
     background = c,
   })
 end
@@ -132,10 +132,10 @@ local function highlight_lines(group)
 end
 
 
-vim.keymap.set({ 'v', 'n' }, '<leader>l', function() highlight_lines("LineHighlightGreen") end,
+vim.keymap.set({ 'v', 'n' }, '<leader>h', function() highlight_lines("LineHighlightPurple") end,
   { noremap = true, silent = false })
-vim.keymap.set({ 'v', 'n' }, '<leader>lg', function() highlight_lines("LineHighlightPurple") end,
+vim.keymap.set({ 'v', 'n' }, '<leader>hg', function() highlight_lines("LineHighlightGreen") end,
   { noremap = true, silent = false })
-vim.keymap.set({ 'v', 'n' }, '<leader>ly', function() highlight_lines("LineHighlightYellow") end,
+vim.keymap.set({ 'v', 'n' }, '<leader>hc', function() highlight_lines("LineHighlightCyan") end,
   { noremap = true, silent = false })
 vim.keymap.set({ 'n' }, '<leader>c', function() vim.fn.clearmatches() end, { noremap = true, silent = true })
