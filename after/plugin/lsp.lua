@@ -80,7 +80,7 @@ lsp.setup_nvim_cmp({
     ['<C-n>'] = cmp.mapping.select_next_item(cmp_select),
     ['<C-e>'] = cmp.mapping.abort(),
     ['<C-y>'] = cmp.mapping.confirm({ select = true }),
-    ['<CR>'] = cmp.mapping.confirm({select = false}),
+    ['<CR>'] = cmp.mapping.confirm({ select = false }),
     ['<C-f>'] = cmp.mapping(function(fallback)
       if cmp.visible() then
         cmp.select_next_item({
@@ -127,7 +127,7 @@ lsp.setup_nvim_cmp({
     end, { 'i', 's' }),
   },
   formatting = {
-    fields = { 'kind',  'abbr', 'menu' },
+    fields = { 'kind', 'abbr', 'menu' },
     expandable_indicator = true,
     format = function(entry, vim_item)
       -- Kind icons
@@ -154,10 +154,14 @@ lsp.on_attach(function(client, bufnr)
     vim.cmd("norm zz")
   end, opts)
   vim.keymap.set("n", "K", function() vim.lsp.buf.hover() end, opts)
-  vim.keymap.set("n", "<leader>vws", function() vim.lsp.buf.workspace_symbol() end, opts)
+  vim.keymap.set("n", "<leader>vs", function() vim.lsp.buf.workspace_symbol() end, opts)
   vim.keymap.set("n", "<leader>vi", function() vim.lsp.buf.implementation() end, opts)
+  vim.keymap.set("n", "<leader>vo", function() vim.lsp.buf.outgoing_calls() end, opts)
+  vim.keymap.set("n", "<leader>vt", function() vim.lsp.buf.type_definition() end, opts)
+  vim.keymap.set("n", "<leader>vts", function() vim.lsp.buf.typehierarchy("subtypes") end, opts)
+  vim.keymap.set("n", "<leader>vtr", function() vim.lsp.buf.typehierarchy("supertypes") end, opts)
   vim.keymap.set("n", "<leader>vd", function() vim.diagnostic.open_float() end, opts)
-  vim.keymap.set("n", "[d", function()
+  vim.keymap.set("n", "[d", function(k)
     vim.diagnostic.goto_next({ float = false })
     vim.cmd("norm zz")
   end, opts)
@@ -165,16 +169,15 @@ lsp.on_attach(function(client, bufnr)
     vim.diagnostic.goto_prev({ float = false })
     vim.cmd("norm zz")
   end, opts)
-  vim.keymap.set({ "n", "v" }, "<leader>vca", function() vim.lsp.buf.code_action() end, opts)
-  vim.keymap.set("n", "<leader>vrr", function() vim.lsp.buf.references() end, opts)
+  vim.keymap.set({ "n", "v" }, "<leader>va", function() vim.lsp.buf.code_action({apply = true}) end, opts)
+  vim.keymap.set("n", "<leader>vr", function() vim.lsp.buf.references() end, opts)
   -- vim.keymap.set("n", "<leader>vrn", function() vim.lsp.buf.rename() end, opts)
   vim.keymap.set("n", "<F2>", function() vim.lsp.buf.rename() end, opts)
   vim.keymap.set("i", "<C-h>", function() vim.lsp.buf.signature_help() end, opts)
 
   --
   -- - [x] (LSP)   Format source on <A-S-F>
-  vim.keymap.set({ "n", "v" }, "<A-S-f>", ":LspZeroFormat<CR>")
-  --
+  vim.keymap.set({ "n", "v" }, "<A-S-f>", function() vim.lsp.buf.format() end, opts)
 end)
 
 require('lspconfig').lua_ls.setup(lsp.nvim_lua_ls())
