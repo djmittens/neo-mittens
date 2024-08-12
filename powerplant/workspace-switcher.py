@@ -15,8 +15,7 @@ def xrandr(*args):
     return str(res.stdout, "utf8")
 
 monitors = re.findall(r"\s\d\:\s([^\s]+)\s.+", xrandr("--listactivemonitors"))
-mon, width_px, height_px = re.findall(r"(\w+)\sconnected\sprimary\s(\w+)x(\w+)\+", xrandr())[0]
-
+mon, width_px, height_px = re.findall(r"(\S+)\sconnected\sprimary\s(\w+)x(\w+)\+", xrandr())[0]
 
 if __name__ == "__main__":
     print(mon, width_px, height_px)

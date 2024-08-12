@@ -1,4 +1,5 @@
 #!/bin/bash
+SCRIPT_DIR=$( cd -- "$( dirname -- "${BASH_SOURCE[0]}" )" &> /dev/null && pwd )
 
 # Disable compositor
 pkill -9 picom
@@ -8,4 +9,4 @@ nvidia-settings --assign CurrentMetaMode="DP-4: 5120x1440_240 -5120+0 {ForceComp
 
 #Disable 2º screen
 xrandr --output HDMI-0 --off
-./workspace-switcher.py none
+$SCRIPT_DIR/workspace-switcher.py none
