@@ -13,6 +13,9 @@ local math                          = require 'math'
 config.color_scheme                 = 'GruvboxDark'
 config.hide_tab_bar_if_only_one_tab = true
 config.use_fancy_tab_bar            = false
+-- config.front_end                    = 'WebGpu'
+-- config.webgpu_power_preference      = "HighPerformance"
+-- config.enable_wayland               = false
 
 
 local hsb = {
