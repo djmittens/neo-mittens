@@ -229,3 +229,9 @@ local function cycle_quote_style()
   -- vim.api.nvim_win_set_cursor(0, {row, right_pos + 1})
 end
 vim.keymap.set({ 'n' }, '<C-q>', function() cycle_quote_style() end, { noremap = true, silent = true })
+
+
+-- Create an alias for helpgrep as hg
+vim.api.nvim_create_user_command('Hg', function(opts)
+ vim.cmd("helpgrep " .. table.concat(opts.fargs, " "))
+end, { nargs = "+" })
