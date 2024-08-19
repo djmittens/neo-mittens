@@ -229,3 +229,44 @@ local function cycle_quote_style()
   -- vim.api.nvim_win_set_cursor(0, {row, right_pos + 1})
 end
 vim.keymap.set({ 'n' }, '<C-q>', function() cycle_quote_style() end, { noremap = true, silent = true })
+
+-- Function to move cursor to the first entry in netrw
+local function go_to_first_entry()
+  -- Make sure we are in the netrw window
+  -- if vim.bo.filetype ~= "netrw" then
+  --   return
+  -- end
+
+  -- Switch to the netrw window
+  -- vim.cmd("wincmd w")
+
+  -- Get the total lines in the buffer
+  local total_lines = vim.api.nvim_buf_line_count(0)
+  for line_num = 3, total_lines do -- Start from 3 to skip `../` and `.` 
+    local line = vim.fn.getline(line_num)
+    -- Search for linenum 
+    if line:match("^./$") then
+      vim.fn.cursor(line_num + 1, 1)
+      break
+    end
+
+  end
+
+  -- Iterate over lines to find the first entry after `../` and `.`
+  -- for line_num = 3, total_lines do -- Start from 3 to skip `../` and `.` 
+  --   local line = vim.fn.getline(line_num)
+  --   
+  --   -- Check if the line is not empty and doesn't start with `..` or `.` 
+  --   -- Here we just look for non-empty lines for a simple check
+  --   if line ~= "" and not (line:match("^%s*%.") or line:match("^%s*%..")) then
+  --     vim.fn.cursor(line_num, 1)
+  --     break
+  --   end
+  -- end
+end
+
+-- Set up an autocommand to run the function when entering netrw
+vim.api.nvim_create_autocmd("FileType", {
+  pattern = "netrw",
+  callback = go_to_first_entry,
+})
