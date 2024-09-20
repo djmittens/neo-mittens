@@ -95,5 +95,15 @@ require("lazy").setup({
   -- Debugger Support
   { 'mfussenegger/nvim-dap',              dependencies = { "nvim-neotest/nvim-nio" } },
   { 'rcarriga/nvim-dap-ui' },
-
+  -- Status line mostly for scala support
+  {
+    'nvim-lualine/lualine.nvim',
+    dependencies = { 'nvim-tree/nvim-web-devicons' }
+  },
+  {
+    "j-hui/fidget.nvim",
+    opts = {
+      -- options
+    },
+  },
 })

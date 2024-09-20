@@ -168,6 +168,7 @@ lsp.on_attach(function(client, bufnr)
   vim.keymap.set("n", "<leader>vi", function() vim.lsp.buf.implementation() end, opts)
   vim.keymap.set("n", "<leader>vo", function() vim.lsp.buf.outgoing_calls() end, opts)
   vim.keymap.set("n", "<leader>vt", function() vim.lsp.buf.type_definition() end, opts)
+  vim.keymap.set("n", "<leader>vt", function() vim.lsp.buf.type_declaration() end, opts)
   vim.keymap.set("n", "<leader>vts", function() vim.lsp.buf.typehierarchy("subtypes") end, opts)
   vim.keymap.set("n", "<leader>vtr", function() vim.lsp.buf.typehierarchy("supertypes") end, opts)
   vim.keymap.set("n", "<leader>vd", function() vim.diagnostic.open_float() end, opts)
@@ -188,6 +189,8 @@ lsp.on_attach(function(client, bufnr)
   --
   -- - [x] (LSP)   Format source on <A-S-F>
   vim.keymap.set({ "n", "v" }, "<A-S-f>", function() vim.lsp.buf.format() end, opts)
+
+  vim.keymap.set({ "n" }, "<leader>r", function() vim.lsp.codelens.run() end, opts)
 end)
 
 require('lspconfig').lua_ls.setup(lsp.nvim_lua_ls())

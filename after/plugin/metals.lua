@@ -5,7 +5,13 @@ vim.keymap.set("n", "<leader>fmt", function() require("metals.tvp").toggle_tree_
 
 -- Example of settings
 metals_config.settings = {
+  defaultBspToBuildTool = true, -- So that we can have sbt by default instead of bloop
   showImplicitArguments = true,
+  showImplicitConversionsAndClasses = true,
+  showInferredType = true,
+  superMethodLensesEnabled = true,
+  -- useGlobalExecutable = false, -- For when i finally decide to fork metals
+  -- metalsBinaryPath = '',
   bloopSbtAlreadyInstalled = true, -- Bloop, ofcourse is not installed, so dont do it !!!
   enableSemanticHighlighting = true,  -- Disable this if there are problems, still experimental
   verboseCompilation = true,
@@ -17,7 +23,7 @@ metals_config.settings = {
 -- you *have* to have a setting to display this in your statusline or else
 -- you'll not see any messages from metals. There is more info in the help
 -- docs about this
--- metals_config.init_options.statusBarProvider = "on"
+metals_config.init_options.statusBarProvider = "on"
 
 -- Example if you are using cmp how to make sure the correct capabilities for snippets are set
 metals_config.capabilities = require("cmp_nvim_lsp").default_capabilities()
@@ -37,7 +43,7 @@ metals_config.on_attach = function(client, bufnr)
   require("metals").setup_dap()
 end
 
--- Autocmd that will actually be in charging of starting the whole thing
+-- Autocmd that will actually be in charge of starting the whole thing
 local nvim_metals_group = vim.api.nvim_create_augroup("nvim-metals", { clear = true })
 
 vim.api.nvim_create_autocmd("FileType", {

@@ -1,3 +1,10 @@
+-- Git config in general
+-- TODO(main): maybe move this out into fugitive.lua?
+--
+
+-- highlight DiffAdd ctermbg=green guibg=blue
+vim.api.nvim_command("highlight DiffAdd ctermbg=green guibg=blue")
+
 require('gitsigns').setup({
   signs                        = {
     add          = { text = '│' },
