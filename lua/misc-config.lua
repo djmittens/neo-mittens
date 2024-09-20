@@ -234,7 +234,7 @@ vim.keymap.set({ 'n' }, '<C-q>', function() cycle_quote_style() end, { noremap =
 local function go_to_first_entry()
   -- Get the total lines in the buffer
   local total_lines = vim.api.nvim_buf_line_count(0)
-  for line_num = 1, total_lines do 
+  for line_num = 1, total_lines do
     local line = vim.fn.getline(line_num)
     -- Search for linenum 
     if line:match("^./$") then
