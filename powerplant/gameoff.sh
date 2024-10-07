@@ -12,3 +12,5 @@ nvidia-settings --assign CurrentMetaMode="DP-4: 7680x2160_60 +0+0 {ForceComposit
 # picom -f --config ~/.config/picom/picom.conf --experimental-backends &
 #
 $SCRIPT_DIR/workspace-switcher.py stardeck
+sleep 1
+nitrogen --restore
