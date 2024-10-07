@@ -190,7 +190,7 @@ lsp.on_attach(function(client, bufnr)
   -- - [x] (LSP)   Format source on <A-S-F>
   vim.keymap.set({ "n", "v" }, "<A-S-f>", function() vim.lsp.buf.format() end, opts)
 
-  vim.keymap.set({ "n" }, "<leader>r", function() vim.lsp.codelens.run() end, opts)
+  -- vim.keymap.set({ "n" }, "<leader>r", function() vim.lsp.codelens.run() end, opts)
 end)
 
 require('lspconfig').lua_ls.setup(lsp.nvim_lua_ls())
