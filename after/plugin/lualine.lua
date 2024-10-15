@@ -58,15 +58,15 @@ local config = {
     lualine_c = {},
     lualine_x = {},
   },
-  inactive_sections = {
-    -- these are to remove the defaults
-    lualine_a = {},
-    lualine_b = {},
-    lualine_y = {},
-    lualine_z = {},
-    lualine_c = {},
-    lualine_x = {},
-  },
+  -- inactive_sections = {
+  --   -- these are to remove the defaults
+  --   lualine_a = {},
+  --   lualine_b = {},
+  --   lualine_y = {},
+  --   lualine_z = {},
+  --   lualine_c = {},
+  --   lualine_x = {},
+  -- },
 }
 
 -- Inserts a component in lualine_c at left section
@@ -243,6 +243,9 @@ ins_right {
   color = { fg = colors.blue },
   padding = { left = 1 },
 }
+
+-- Make inactive window same as active status
+config.inactive_sections = config.sections
 
 -- Now don't forget to initialize lualine
 lualine.setup(config)
