@@ -78,6 +78,18 @@ require("lazy").setup({
         defaults = {
           layout_strategy = 'flex',
           layout_config = { height = 0.95 },
+          vimgrep_arguments = {
+            'rg',
+            '--color=never',
+            '--no-heading',
+            '--with-filename',
+            '--line-number',
+            '--column',
+            '--smart-case',
+            '--pre',
+            '--glob',
+            -- 'unzip -p' -- or 'bsdtar -Oxf'
+          },
         },
       }
     end,

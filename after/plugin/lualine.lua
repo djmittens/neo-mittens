@@ -245,7 +245,7 @@ ins_right {
 }
 
 -- Make inactive window same as active status
-config.inactive_sections = config.sections
+-- config.inactive_sections = config.sections
 
 -- Now don't forget to initialize lualine
 lualine.setup(config)

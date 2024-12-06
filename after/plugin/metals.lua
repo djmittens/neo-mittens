@@ -1,7 +1,19 @@
 local metals_config = require("metals").bare_config()
 
-vim.keymap.set("n", "<leader>fm", function() require("telescope").extensions.metals.commands() end , {})
-vim.keymap.set("n", "<leader>fmt", function() require("metals.tvp").toggle_tree_view() end , {})
+vim.keymap.set("n", "<leader>fm", function() require("telescope").extensions.metals.commands() end, {})
+vim.keymap.set("n", "<leader>fmt", function() require("metals.tvp").toggle_tree_view() end, {})
+
+local builtin = require('telescope.builtin')
+vim.keymap.set('n', '<leader>fp', function()
+  builtin.find_files({
+    search_dirs = {
+      '~/.cache/coursier',
+      '~/.ivy2',
+    },
+    search_file = '*-sources.jar',
+  })
+end, {})
+
 
 -- Example of settings
 metals_config.settings = {
@@ -12,8 +24,8 @@ metals_config.settings = {
   superMethodLensesEnabled = true,
   -- useGlobalExecutable = false, -- For when i finally decide to fork metals
   -- metalsBinaryPath = '',
-  bloopSbtAlreadyInstalled = true, -- Bloop, ofcourse is not installed, so dont do it !!!
-  enableSemanticHighlighting = true,  -- Disable this if there are problems, still experimental
+  bloopSbtAlreadyInstalled = true,   -- Bloop, ofcourse is not installed, so dont do it !!!
+  enableSemanticHighlighting = true, -- Disable this if there are problems, still experimental
   verboseCompilation = true,
   excludedPackages = { "akka.actor.typed.javadsl", "com.github.swagger.akka.javadsl" },
 }
@@ -29,14 +41,14 @@ metals_config.init_options.statusBarProvider = "on"
 metals_config.capabilities = require("cmp_nvim_lsp").default_capabilities()
 
 metals_config.tvp.icons = {
-      enabled = true,
+  enabled = true,
 }
 
 vim.filetype.add({
-	extension = {
-		thrift = "thrift",
-		sbt = "scala"
-	}
+  extension = {
+    thrift = "thrift",
+    sbt = "scala"
+  }
 })
 
 metals_config.on_attach = function(client, bufnr)
