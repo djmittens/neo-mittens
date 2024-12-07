@@ -5,12 +5,23 @@ vim.keymap.set("n", "<leader>fmt", function() require("metals.tvp").toggle_tree_
 
 local builtin = require('telescope.builtin')
 vim.keymap.set('n', '<leader>fp', function()
-  builtin.find_files({
+  builtin.live_grep({
     search_dirs = {
       '~/.cache/coursier',
       '~/.ivy2',
     },
-    search_file = '*-sources.jar',
+    glob_pattern = '*-sources.jar',
+    find_command = {
+      "rga",
+      "--color=never",
+      "--no-heading",
+      "--line-number",
+      "--column",
+      "--smart-case",
+      "--hidden",       -- Include hidden files
+      -- "--trim",
+      --            "--glob", "*.java", -- Adjust glob for file types
+    }
   })
 end, {})
 
