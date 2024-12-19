@@ -70,11 +70,11 @@ vim.cmd.highlight({ "FloatBorder", "guibg=NONE" }) -- this is a hack for some th
 vim.o.relativenumber = true
 vim.api.nvim_create_autocmd({ 'InsertEnter' }, {
   pattern = { "*.*" },
-  command = "set nornu",
+  command = "set nornu | set number",
 })
 vim.api.nvim_create_autocmd({ 'InsertLeavePre' }, {
   pattern = { "*.*" },
-  command = "set rnu",
+  command = "set number | set rnu",
 })
 
 

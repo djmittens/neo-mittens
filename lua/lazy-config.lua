@@ -72,14 +72,34 @@ require("lazy").setup({
   {
     'nvim-telescope/telescope.nvim',
     -- tag = '0.1.2',
-    dependencies = { 'nvim-lua/plenary.nvim' },
+    dependencies = { 'nvim-lua/plenary.nvim', { 'nvim-telescope/telescope-fzf-native.nvim', build = 'cmake -S. -Bbuild -DCMAKE_BUILD_TYPE=Release && cmake --build build --config Release' } },
     config = function()
       require('telescope').setup {
         defaults = {
           layout_strategy = 'flex',
           layout_config = { height = 0.95 },
+          vimgrep_arguments = {
+            "rga",
+            "--color=never",
+            "--no-heading",
+            "--line-number",
+            "--column",
+            "--smart-case",
+            "--hidden", -- Include hidden files
+            "--trim",
+            --            "--glob", "*.java", -- Adjust glob for file types
+          },
+        },
+        extensions = {
+          fzf = { -- Optional FZF extension for faster sorting
+            fuzzy = true,
+            override_generic_sorter = true,
+            override_file_sorter = true,
+            case_mode = "smart_case",
+          },
         },
       }
+      require('telescope').load_extension("fzf") -- Optional: load fzf for better performance
     end,
   },
   -- Random bullshit
@@ -106,4 +126,22 @@ require("lazy").setup({
       -- options
     },
   },
+  -- SQL support ugh... better than nothing i guess in case i need to sql things up
+  {
+    'kristijanhusak/vim-dadbod-ui',
+    dependencies = {
+      { 'tpope/vim-dadbod',                     lazy = true },
+      { 'kristijanhusak/vim-dadbod-completion', ft = { 'sql', 'mysql', 'plsql' }, lazy = true }, -- Optional
+    },
+    cmd = {
+      'DBUI',
+      'DBUIToggle',
+      'DBUIAddConnection',
+      'DBUIFindBuffer',
+    },
+    init = function()
+      -- Your DBUI configuration
+      vim.g.db_ui_use_nerd_fonts = 1
+    end,
+  }
 })
