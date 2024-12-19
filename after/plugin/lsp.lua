@@ -146,19 +146,19 @@ lsp.setup_nvim_cmp({
 })
 
 lsp.on_attach(function(client, bufnr)
-  lsp.default_keymaps({ buffer = bufnr })
+  -- lsp.default_keymaps({ buffer = bufnr })
   local opts = { buffer = bufnr, remap = false }
 
   local function on_list(options)
     vim.fn.setloclist(0, {}, ' ', options)
     vim.cmd.lfirst()
   end
-  vim.keymap.set("n", "gd", function()
+  vim.keymap.set("n", "<leader>d", function()
     vim.lsp.buf.definition({on_list=on_list, loclist=true, reuse_win = true })
     -- vim.lsp.buf.implementation
     vim.cmd("norm zz")
   end, opts)
-  vim.keymap.set("n", "gi", function()
+  vim.keymap.set("n", "<leader>i", function()
     vim.lsp.buf.implementation({on_list=on_list, loclist=true, reuse_win = true })
     -- vim.lsp.buf.implementation
     vim.cmd("norm zz")
@@ -168,7 +168,7 @@ lsp.on_attach(function(client, bufnr)
   vim.keymap.set("n", "<leader>vi", function() vim.lsp.buf.implementation() end, opts)
   vim.keymap.set("n", "<leader>vo", function() vim.lsp.buf.outgoing_calls() end, opts)
   vim.keymap.set("n", "<leader>vt", function() vim.lsp.buf.type_definition() end, opts)
-  vim.keymap.set("n", "<leader>vt", function() vim.lsp.buf.type_declaration() end, opts)
+  -- vim.keymap.set("n", "<leader>vt", function() vim.lsp.buf.type_declaration() end, opts)
   vim.keymap.set("n", "<leader>vts", function() vim.lsp.buf.typehierarchy("subtypes") end, opts)
   vim.keymap.set("n", "<leader>vtr", function() vim.lsp.buf.typehierarchy("supertypes") end, opts)
   vim.keymap.set("n", "<leader>vd", function() vim.diagnostic.open_float() end, opts)

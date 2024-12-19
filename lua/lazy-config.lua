@@ -103,17 +103,32 @@ require("lazy").setup({
     end,
   },
   -- Random bullshit
-  -- { "folke/which-key.nvim" },
-  { "mbbill/undotree" },
-  { 'dstein64/nvim-scrollview' },
-  { "lukas-reineke/indent-blankline.nvim" },
-  { "ellisonleao/gruvbox.nvim",           priority = 1000 },
+  -- { "folke/which-key.nvim" }, -- Havent needed this in a long time
+  { "mbbill/undotree" }, -- Havent figured out how to use this effectively yet. Maybe not worth having it around
+  { 'dstein64/nvim-scrollview' }, -- Code map on the right , might be useful for marks and errors
+  { "lukas-reineke/indent-blankline.nvim" }, -- rainbow guides for nesting. kinda useful
+  { "ellisonleao/gruvbox.nvim",           priority = 1000 }, -- My theme
+  -- LLM stuff
+  -- { "zbirenbaum/copilot.lua" }, -- Turning this off as its just autocomplete
+  {
+    "robitx/gp.nvim",
+    config = function()
+      local conf = {
+        -- For customization, refer to Install > Configuration in the Documentation/Readme
+        openai_api_key = { "op", "item", "get",  "OpenAI", "--field", "credential", "--reveal" }
+      }
+      require("gp").setup(conf)
+
+      -- Setup shortcuts here (see Usage > Shortcuts in the Documentation/Readme)
+    end,
+  },
+
   -- Git Support
   { "lewis6991/gitsigns.nvim" },
   { 'tpope/vim-fugitive' },
   { 'tpope/vim-rhubarb' },
   -- Debugger Support
-  { 'mfussenegger/nvim-dap',              dependencies = { "nvim-neotest/nvim-nio" } },
+  { 'mfussenegger/nvim-dap',  dependencies = { "nvim-neotest/nvim-nio" } },
   { 'rcarriga/nvim-dap-ui' },
   -- Status line mostly for scala support
   {
