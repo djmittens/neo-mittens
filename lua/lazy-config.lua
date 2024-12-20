@@ -118,7 +118,8 @@ require("lazy").setup({
   { "lewis6991/gitsigns.nvim" },
   { 'tpope/vim-fugitive' },
   { 'tpope/vim-rhubarb' },
-  -- Debugger Support
+
+  -- Debugger Support -- is this even a good idea? maybe for scala...
   { 'mfussenegger/nvim-dap',  dependencies = { "nvim-neotest/nvim-nio" } },
   { 'rcarriga/nvim-dap-ui' },
   -- Status line mostly for scala support

@@ -5,17 +5,7 @@ local lspconfig = require('lspconfig')
 
 -- lsp.preset("recomdended")
 vim.opt.signcolumn = 'yes'
--- lsp.preset({})
 
--- lsp.ensure_installed({
---   'lua_ls',
---   'clangd',
---   'ts_ls',
---   -- 'eslint',
---   --'sumneko_lua',
---   --'rust_analyzer',
--- })
---
 -- Add cmp_nvim_lsp capabilities settings to lspconfig
 -- This should be executed before you configure any language server
 local lspconfig_defaults = lspconfig.util.default_config

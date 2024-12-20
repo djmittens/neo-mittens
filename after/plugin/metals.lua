@@ -1,5 +1,3 @@
-local metals_config = require("metals").bare_config()
-
 vim.keymap.set("n", "<leader>fm", function() require("telescope").extensions.metals.commands() end, {})
 vim.keymap.set("n", "<leader>fmt", function() require("metals.tvp").toggle_tree_view() end, {})
 
@@ -26,6 +24,7 @@ vim.keymap.set('n', '<leader>fp', function()
 end, {})
 
 
+local metals_config = require("metals").bare_config()
 -- Example of settings
 metals_config.settings = {
   defaultBspToBuildTool = true, -- So that we can have sbt by default instead of bloop
