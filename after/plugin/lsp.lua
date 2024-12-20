@@ -1,21 +1,88 @@
 -- lets do some lsp shit
-local lsp = require('lsp-zero')
-local luasnip = require('luasnip')
+-- local lsp = require('lsp-zero')
+local lspconfig = require('lspconfig')
+
 
 -- lsp.preset("recomdended")
-lsp.preset({})
+vim.opt.signcolumn = 'yes'
+-- lsp.preset({})
 
-lsp.ensure_installed({
-  'lua_ls',
-  'clangd',
-  'ts_ls',
-  -- 'eslint',
-  --'sumneko_lua',
-  --'rust_analyzer',
+-- lsp.ensure_installed({
+--   'lua_ls',
+--   'clangd',
+--   'ts_ls',
+--   -- 'eslint',
+--   --'sumneko_lua',
+--   --'rust_analyzer',
+-- })
+--
+-- Add cmp_nvim_lsp capabilities settings to lspconfig
+-- This should be executed before you configure any language server
+local lspconfig_defaults = lspconfig.util.default_config
+lspconfig_defaults.capabilities = vim.tbl_deep_extend(
+  'force',
+  lspconfig_defaults.capabilities,
+  require('cmp_nvim_lsp').default_capabilities()
+)
+
+
+require('mason').setup({})
+require('mason-lspconfig').setup({
+  ensure_isntalled = {
+    'lua_ls',
+    'clangd',
+    'ts_ls',
+    'rust_analyzer',
+    'typescript',
+  },
+  handlers = {
+    function(server_name)
+      require('lspconfig')[server_name].setup({})
+    end,
+  }
+})
+
+
+-- This is where you enable features that only work
+-- if there is a language server active in the file
+vim.api.nvim_create_autocmd('LspAttach', {
+  desc = 'LSP actions',
+  callback = function(event)
+    local opts = { buffer = event.buf }
+
+    vim.keymap.set('n', 'K', function() vim.lsp.buf.hover() end, opts)
+    vim.keymap.set('n', 'gd', function() vim.lsp.buf.definition() end, opts)
+    vim.keymap.set('n', 'gD', function() vim.lsp.buf.declaration() end, opts)
+    vim.keymap.set('n', 'gi', function() vim.lsp.buf.implementation() end, opts)
+    vim.keymap.set('n', 'go', function() vim.lsp.buf.type_definition() end, opts)
+    vim.keymap.set('n', 'gr', function() vim.lsp.buf.references() end, opts)
+    vim.keymap.set('n', 'gs', function() vim.lsp.buf.signature_help() end, opts)
+    vim.keymap.set('n', '<F2>', function() vim.lsp.buf.rename() end, opts)
+    vim.keymap.set({ 'n', 'x' }, '<F3>', function() vim.lsp.buf.format({ async = true }) end, opts)
+    vim.keymap.set('n', '<F4>', function() vim.lsp.buf.code_action() end, opts)
+    vim.keymap.set({ "n", "v" }, "<leader>va", function() vim.lsp.buf.code_action({ apply = true }) end, opts)
+
+    -- diagnostics hotkeys
+    vim.keymap.set("n", "[d", function(k)
+      vim.diagnostic.goto_next({ float = false })
+      vim.cmd("norm zz")
+    end, opts)
+    vim.keymap.set("n", "]d", function()
+      vim.diagnostic.goto_prev({ float = false })
+      vim.cmd("norm zz")
+    end, opts)
+    -- - [x] (LSP)   Format source on <A-S-F>
+    vim.keymap.set({ "n", "v" }, "<A-S-f>", function() vim.lsp.buf.format() end, opts)
+    -- workspace symbols
+    vim.keymap.set("n", "<leader>vs", function() vim.lsp.buf.workspace_symbol() end, opts)
+    -- type navigations or something do i even need these?
+    vim.keymap.set("n", "<leader>vts", function() vim.lsp.buf.typehierarchy("subtypes") end, opts)
+    vim.keymap.set("n", "<leader>vtr", function() vim.lsp.buf.typehierarchy("supertypes") end, opts)
+    vim.keymap.set("n", "<leader>vd", function() vim.diagnostic.open_float() end, opts)
+  end,
 })
 
 local cmp = require('cmp')
-local cmp_action = require('lsp-zero').cmp_action()
 
 local kind_icons = {
   Text = "",
@@ -47,19 +114,17 @@ local kind_icons = {
 
 local cmp_select = { behavior = cmp.SelectBehavior.Select }
 
-lsp.set_preferences({
-  sign_icons = {}
-})
+-- lsp.set_preferences({
+--   sign_icons = {}
+-- })
 
+local luasnip = require('luasnip')
 cmp.setup({
   -- For some reason this config only is available here and stuff, not part of lsp setup
   window = {
     documentation = cmp.config.window.bordered(),
     completion = cmp.config.window.bordered(),
   },
-})
-
-lsp.setup_nvim_cmp({
   completion = {
     keyword_length = 1
   },
@@ -144,54 +209,3 @@ lsp.setup_nvim_cmp({
     end
   },
 })
-
-lsp.on_attach(function(client, bufnr)
-  -- lsp.default_keymaps({ buffer = bufnr })
-  local opts = { buffer = bufnr, remap = false }
-
-  local function on_list(options)
-    vim.fn.setloclist(0, {}, ' ', options)
-    vim.cmd.lfirst()
-  end
-  vim.keymap.set("n", "<leader>d", function()
-    vim.lsp.buf.definition({on_list=on_list, loclist=true, reuse_win = true })
-    -- vim.lsp.buf.implementation
-    vim.cmd("norm zz")
-  end, opts)
-  vim.keymap.set("n", "<leader>i", function()
-    vim.lsp.buf.implementation({on_list=on_list, loclist=true, reuse_win = true })
-    -- vim.lsp.buf.implementation
-    vim.cmd("norm zz")
-  end, opts)
-  vim.keymap.set("n", "K", function() vim.lsp.buf.hover() end, opts)
-  vim.keymap.set("n", "<leader>vs", function() vim.lsp.buf.workspace_symbol() end, opts)
-  vim.keymap.set("n", "<leader>vi", function() vim.lsp.buf.implementation() end, opts)
-  vim.keymap.set("n", "<leader>vo", function() vim.lsp.buf.outgoing_calls() end, opts)
-  vim.keymap.set("n", "<leader>vt", function() vim.lsp.buf.type_definition() end, opts)
-  -- vim.keymap.set("n", "<leader>vt", function() vim.lsp.buf.type_declaration() end, opts)
-  vim.keymap.set("n", "<leader>vts", function() vim.lsp.buf.typehierarchy("subtypes") end, opts)
-  vim.keymap.set("n", "<leader>vtr", function() vim.lsp.buf.typehierarchy("supertypes") end, opts)
-  vim.keymap.set("n", "<leader>vd", function() vim.diagnostic.open_float() end, opts)
-  vim.keymap.set("n", "[d", function(k)
-    vim.diagnostic.goto_next({ float = false })
-    vim.cmd("norm zz")
-  end, opts)
-  vim.keymap.set("n", "]d", function()
-    vim.diagnostic.goto_prev({ float = false })
-    vim.cmd("norm zz")
-  end, opts)
-  vim.keymap.set({ "n", "v" }, "<leader>va", function() vim.lsp.buf.code_action({apply = true}) end, opts)
-  vim.keymap.set("n", "<leader>vr", function() vim.lsp.buf.references() end, opts)
-  -- vim.keymap.set("n", "<leader>vrn", function() vim.lsp.buf.rename() end, opts)
-  vim.keymap.set("n", "<F2>", function() vim.lsp.buf.rename() end, opts)
-  vim.keymap.set("i", "<C-h>", function() vim.lsp.buf.signature_help() end, opts)
-
-  --
-  -- - [x] (LSP)   Format source on <A-S-F>
-  vim.keymap.set({ "n", "v" }, "<A-S-f>", function() vim.lsp.buf.format() end, opts)
-
-  -- vim.keymap.set({ "n" }, "<leader>r", function() vim.lsp.codelens.run() end, opts)
-end)
-
-require('lspconfig').lua_ls.setup(lsp.nvim_lua_ls())
-lsp.setup()

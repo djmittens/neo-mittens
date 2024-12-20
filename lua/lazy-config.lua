@@ -25,8 +25,8 @@ require("lazy").setup({
       },
     },
   },
-  { "Bilal2453/luvit-meta",  lazy = true }, -- optional `vim.uv` typings
-  {                                         -- optional completion source for require statements and module annotations
+  { "Bilal2453/luvit-meta", lazy = true }, -- optional `vim.uv` typings
+  {                                        -- optional completion source for require statements and module annotations
     "hrsh7th/nvim-cmp",
     opts = function(_, opts)
       opts.sources = opts.sources or {}
@@ -36,35 +36,26 @@ require("lazy").setup({
       })
     end,
   },
+  { 'neovim/nvim-lspconfig' },
+  { 'hrsh7th/nvim-cmp' },
+  { 'hrsh7th/cmp-nvim-lsp' },
   {
-    'VonHeikemen/lsp-zero.nvim',
-    branch = 'v2.x',
-    dependencies = {
-      -- LSP Support
-      { 'neovim/nvim-lspconfig' },
-      {
-        'williamboman/mason.nvim',
-        build = function()
-          pcall(vim.cmd, 'MasonUpdate')
-        end,
-      },
-      { 'williamboman/mason-lspconfig.nvim' },
+    'L3MON4D3/LuaSnip',
+    dependencies = { 'rafamadriz/friendly-snippets' },
+    config = function()
+      require('luasnip.loaders.from_vscode').lazy_load({})
+    end
 
-      -- Autocompletion
-      { 'hrsh7th/nvim-cmp' },
-      { 'hrsh7th/cmp-nvim-lsp' },
-      {
-        'L3MON4D3/LuaSnip',
-        dependencies = { 'rafamadriz/friendly-snippets' },
-        config = function()
-          require('luasnip.loaders.from_vscode').lazy_load({})
-        end
-
-      },
-      { 'saadparwaiz1/cmp_luasnip', },
-    }
   },
-  { 'scalameta/nvim-metals', dependencies = { "nvim-lua/plenary.nvim" } },
+  {
+    'williamboman/mason.nvim',
+    build = function()
+      pcall(vim.cmd, 'MasonUpdate')
+    end,
+  },
+  { 'williamboman/mason-lspconfig.nvim' },
+  { 'saadparwaiz1/cmp_luasnip', },
+  { 'scalameta/nvim-metals',            dependencies = { "nvim-lua/plenary.nvim" } },
   {
     "nvim-treesitter/nvim-treesitter",
     build = ":TSUpdate",
@@ -104,9 +95,9 @@ require("lazy").setup({
   },
   -- Random bullshit
   -- { "folke/which-key.nvim" }, -- Havent needed this in a long time
-  { "mbbill/undotree" }, -- Havent figured out how to use this effectively yet. Maybe not worth having it around
-  { 'dstein64/nvim-scrollview' }, -- Code map on the right , might be useful for marks and errors
-  { "lukas-reineke/indent-blankline.nvim" }, -- rainbow guides for nesting. kinda useful
+  { "mbbill/undotree" },                                     -- Havent figured out how to use this effectively yet. Maybe not worth having it around
+  { 'dstein64/nvim-scrollview' },                            -- Code map on the right , might be useful for marks and errors
+  { "lukas-reineke/indent-blankline.nvim" },                 -- rainbow guides for nesting. kinda useful
   { "ellisonleao/gruvbox.nvim",           priority = 1000 }, -- My theme
   -- LLM stuff
   -- { "zbirenbaum/copilot.lua" }, -- Turning this off as its just autocomplete
@@ -115,7 +106,7 @@ require("lazy").setup({
     config = function()
       local conf = {
         -- For customization, refer to Install > Configuration in the Documentation/Readme
-        openai_api_key = { "op", "item", "get",  "OpenAI", "--field", "credential", "--reveal" }
+        openai_api_key = { "op", "item", "get", "OpenAI", "--field", "credential", "--reveal" }
       }
       require("gp").setup(conf)
 
