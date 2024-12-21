@@ -112,7 +112,6 @@ local function make_entry(line)
   -- We need to be careful with splitting because file paths can contain ':'
   -- We'll assume jarPath and internalPath have no embedded newlines.
   -- A robust approach: split by ':' from the right.
-  
   local parts = {}
   for p in string.gmatch(line, "[^:]+") do
     table.insert(parts, p)

@@ -159,20 +159,26 @@ ins_left {
   color = { fg = colors.magenta, gui = 'bold' },
 }
 
-ins_left { 'location' }
-
-ins_left { 'progress', color = { fg = colors.fg, gui = 'bold' } }
-
 ins_left {
-  'diagnostics',
-  sources = { 'nvim_diagnostic' },
-  symbols = { error = ' ', warn = ' ', info = ' ' },
-  diagnostics_color = {
-    error = { fg = colors.red },
-    warn = { fg = colors.yellow },
-    info = { fg = colors.cyan },
-  },
+  'fileformat',
+  fmt = string.upper,
+  icons_enabled = true, -- I think icons are cool but Eviline doesn't have them. sigh
+  color = { fg = colors.green, gui = 'bold' },
 }
+ins_left {
+  function()
+    return require("nvim-treesitter").statusline({
+      indicator_size = 100,
+      type_patterns = { "class", "function", "method" },
+      separator = " -> ",
+    })
+  end,
+}
+
+-- ins_left { 'location' }
+
+-- ins_left { 'progress', color = { fg = colors.fg, gui = 'bold' } }
+
 
 -- Insert mid section. You can make any number of sections in neovim :)
 -- for lualine it's any number greater then 2
@@ -183,40 +189,45 @@ ins_left {
 }
 
 ins_right {
-  -- Lsp server name .
-  function()
-    local msg = 'No Active Lsp'
-    local buf_ft = vim.api.nvim_buf_get_option(0, 'filetype')
-    local clients = vim.lsp.get_active_clients()
-    if next(clients) == nil then
-      return msg
-    end
-    for _, client in ipairs(clients) do
-      local filetypes = client.config.filetypes
-      if filetypes and vim.fn.index(filetypes, buf_ft) ~= -1 then
-        return client.name
-      end
-    end
-    return msg
-  end,
-  icon = ' LSP:',
-  color = { fg = '#ffffff', gui = 'bold' },
+  'diagnostics',
+  sources = { 'nvim_diagnostic' },
+  symbols = { error = ' ', warn = ' ', info = ' ' },
+  diagnostics_color = {
+    error = { fg = colors.red },
+    warn = { fg = colors.yellow },
+    info = { fg = colors.cyan },
+  },
 }
+
+-- ins_right {
+--   -- Lsp server name .
+--   function()
+--     local msg = 'No Active Lsp'
+--     local buf_ft = vim.api.nvim_buf_get_option(0, 'filetype')
+--     local clients = vim.lsp.get_active_clients()
+--     if next(clients) == nil then
+--       return msg
+--     end
+--     for _, client in ipairs(clients) do
+--       local filetypes = client.config.filetypes
+--       if filetypes and vim.fn.index(filetypes, buf_ft) ~= -1 then
+--         return client.name
+--       end
+--     end
+--     return msg
+--   end,
+--   icon = ' LSP:',
+--   color = { fg = '#ffffff', gui = 'bold' },
+-- }
 
 -- Add components to right sections
-ins_right {
-  'o:encoding',       -- option component same as &encoding in viml
-  fmt = string.upper, -- I'm not sure why it's upper case either ;)
-  cond = conditions.hide_in_width,
-  color = { fg = colors.green, gui = 'bold' },
-}
+-- ins_right {
+--   'o:encoding',       -- option component same as &encoding in viml
+--   fmt = string.upper, -- I'm not sure why it's upper case either ;)
+--   cond = conditions.hide_in_width,
+--   color = { fg = colors.green, gui = 'bold' },
+-- }
 
-ins_right {
-  'fileformat',
-  fmt = string.upper,
-  icons_enabled = true, -- I think icons are cool but Eviline doesn't have them. sigh
-  color = { fg = colors.green, gui = 'bold' },
-}
 
 ins_right {
   'branch',
