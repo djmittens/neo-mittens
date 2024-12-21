@@ -114,8 +114,8 @@ ins_left {
 
 ins_left {
   'filetype',
-  colored = true,    -- Displays filetype icon in color if set to true
-  icon_only = false, -- Display only an icon for filetype
+  colored = true,   -- Displays filetype icon in color if set to true
+  icon_only = true, -- Display only an icon for filetype
   icon = { align = 'left' },
   color = function()
     -- auto change color according to neovims mode
@@ -147,32 +147,34 @@ ins_left {
   -- Icon string ^ in table is ignored in filetype component
 }
 
-ins_left {
-  -- filesize component
-  'filesize',
-  cond = conditions.buffer_not_empty,
-}
+-- ins_left {
+--   'fileformat',
+--   fmt = string.upper,
+--   icons_enabled = true, -- I think icons are cool but Eviline doesn't have them. sigh
+--   color = { fg = colors.green, gui = 'bold' },
+-- }
+
+-- ins_left {
+--   -- filesize component
+--   'filesize',
+--   cond = conditions.buffer_not_empty,
+-- }
 
 ins_left {
   'filename',
+  path = 1,
   cond = conditions.buffer_not_empty,
   color = { fg = colors.magenta, gui = 'bold' },
-}
-
-ins_left {
-  'fileformat',
-  fmt = string.upper,
-  icons_enabled = true, -- I think icons are cool but Eviline doesn't have them. sigh
-  color = { fg = colors.green, gui = 'bold' },
 }
 ins_left {
   function()
     return require("nvim-treesitter").statusline({
       indicator_size = 100,
-      type_patterns = { "class", "function", "method" },
-      separator = " -> ",
+      type_patterns = { "class", "function", "method", "struct" },
+      separator = "",
     })
   end,
+  color = { fg = '#a6e22e', gui = 'bold' },
 }
 
 -- ins_left { 'location' }
