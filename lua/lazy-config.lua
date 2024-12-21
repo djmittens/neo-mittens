@@ -14,19 +14,7 @@ end
 vim.opt.rtp:prepend(lazypath)
 require("lazy").setup({
   -- LSP
-  {
-    "folke/lazydev.nvim",
-    ft = "lua", -- only load on lua files
-    opts = {
-      library = {
-        -- See the configuration section for more details
-        -- Load luvit types when the `vim.uv` word is found
-        { path = "luvit-meta/library", words = { "vim%.uv" } },
-      },
-    },
-  },
-  { "Bilal2453/luvit-meta", lazy = true }, -- optional `vim.uv` typings
-  {                                        -- optional completion source for require statements and module annotations
+  { -- optional completion source for require statements and module annotations
     "hrsh7th/nvim-cmp",
     opts = function(_, opts)
       opts.sources = opts.sources or {}
@@ -35,9 +23,24 @@ require("lazy").setup({
         group_index = 0, -- set group index to 0 to skip loading LuaLS completions
       })
     end,
+    dependencies = {
+      {
+        "folke/lazydev.nvim",
+        ft = "lua", -- only load on lua files
+        opts = {
+          library = {
+            -- See the configuration section for more details
+            -- Load luvit types when the `vim.uv` word is found
+            { path = "luvit-meta/library", words = { "vim%.uv" } },
+          },
+        },
+        dependencies = {
+          { "Bilal2453/luvit-meta", lazy = true }, -- optional `vim.uv` typings
+        }
+      },
+    }
   },
   { 'neovim/nvim-lspconfig' },
-  { 'hrsh7th/nvim-cmp' },
   { 'hrsh7th/cmp-nvim-lsp' },
   {
     'L3MON4D3/LuaSnip',
@@ -63,7 +66,11 @@ require("lazy").setup({
   {
     'nvim-telescope/telescope.nvim',
     -- tag = '0.1.2',
-    dependencies = { 'nvim-lua/plenary.nvim', { 'nvim-telescope/telescope-fzf-native.nvim', build = 'cmake -S. -Bbuild -DCMAKE_BUILD_TYPE=Release && cmake --build build --config Release' } },
+    dependencies = { 'nvim-lua/plenary.nvim',
+      {
+        'nvim-telescope/telescope-fzf-native.nvim',
+        build = 'cmake -S. -Bbuild -DCMAKE_BUILD_TYPE=Release && cmake --build build --config Release'
+      } },
     config = function()
       require('telescope').setup {
         defaults = {
@@ -115,13 +122,14 @@ require("lazy").setup({
   },
 
   -- Git Support
-  { "lewis6991/gitsigns.nvim" },
-  { 'tpope/vim-fugitive' },
-  { 'tpope/vim-rhubarb' },
+  { "lewis6991/gitsigns.nvim" }, -- Gutter help for git changes, very useful for comparing code
+  { 'tpope/vim-fugitive' }, -- This is the greatest git plugin for vim
+  { 'tpope/vim-rhubarb' }, -- Extension for fugitive specifically for github, eg open stuff in browsers
 
   -- Debugger Support -- is this even a good idea? maybe for scala...
-  { 'mfussenegger/nvim-dap',  dependencies = { "nvim-neotest/nvim-nio" } },
-  { 'rcarriga/nvim-dap-ui' },
+  { 'mfussenegger/nvim-dap',  dependencies = { "nvim-neotest/nvim-nio" } }, -- debugging adapter for a protocol
+  { 'rcarriga/nvim-dap-ui' }, -- UI for debugging with the adapter. this is very situational
+
   -- Status line mostly for scala support
   {
     'nvim-lualine/lualine.nvim',
@@ -133,6 +141,7 @@ require("lazy").setup({
       -- options
     },
   },
+
   -- SQL support ugh... better than nothing i guess in case i need to sql things up
   {
     'kristijanhusak/vim-dadbod-ui',
