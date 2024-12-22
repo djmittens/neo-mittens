@@ -163,7 +163,7 @@ ins_left {
 ins_left {
   'filename',
   path = 1,
-  cond = conditions.buffer_not_empty,
+  -- cond = conditions.buffer_not_empty,
   color = { fg = colors.magenta, gui = 'bold' },
 }
 ins_left {
@@ -172,7 +172,7 @@ ins_left {
       indicator_size = 100,
       type_patterns = { "class", "function", "method", "struct" },
       separator = "",
-    })
+    }) or ' '
   end,
   color = { fg = '#a6e22e', gui = 'bold' },
 }
