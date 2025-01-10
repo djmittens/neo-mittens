@@ -102,10 +102,21 @@ require("lazy").setup({
   },
   -- Random bullshit
   -- { "folke/which-key.nvim" }, -- Havent needed this in a long time
-  { "mbbill/undotree" },                                     -- Havent figured out how to use this effectively yet. Maybe not worth having it around
-  { 'dstein64/nvim-scrollview' },                            -- Code map on the right , might be useful for marks and errors
-  { "lukas-reineke/indent-blankline.nvim" },                 -- rainbow guides for nesting. kinda useful
-  { "ellisonleao/gruvbox.nvim",           priority = 1000 }, -- My theme
+  { "mbbill/undotree" },                     -- Havent figured out how to use this effectively yet. Maybe not worth having it around
+  { 'dstein64/nvim-scrollview' },            -- Code map on the right , might be useful for marks and errors
+  { "lukas-reineke/indent-blankline.nvim" }, -- rainbow guides for nesting. kinda useful
+  {
+    "nvim-tree/nvim-tree.lua",
+    version = "*",
+    lazy = false,
+    dependencies = {
+      "nvim-tree/nvim-web-devicons",
+    },
+    config = function()
+      require("nvim-tree").setup {}
+    end,
+  },
+  { "ellisonleao/gruvbox.nvim", priority = 1000 }, -- My theme
   -- LLM stuff
   -- { "zbirenbaum/copilot.lua" }, -- Turning this off as its just autocomplete
   {
@@ -123,12 +134,12 @@ require("lazy").setup({
 
   -- Git Support
   { "lewis6991/gitsigns.nvim" }, -- Gutter help for git changes, very useful for comparing code
-  { 'tpope/vim-fugitive' }, -- This is the greatest git plugin for vim
-  { 'tpope/vim-rhubarb' }, -- Extension for fugitive specifically for github, eg open stuff in browsers
+  { 'tpope/vim-fugitive' },      -- This is the greatest git plugin for vim
+  { 'tpope/vim-rhubarb' },       -- Extension for fugitive specifically for github, eg open stuff in browsers
 
   -- Debugger Support -- is this even a good idea? maybe for scala...
-  { 'mfussenegger/nvim-dap',  dependencies = { "nvim-neotest/nvim-nio" } }, -- debugging adapter for a protocol
-  { 'rcarriga/nvim-dap-ui' }, -- UI for debugging with the adapter. this is very situational
+  { 'mfussenegger/nvim-dap',    dependencies = { "nvim-neotest/nvim-nio" } }, -- debugging adapter for a protocol
+  { 'rcarriga/nvim-dap-ui' },                                                 -- UI for debugging with the adapter. this is very situational
 
   -- Status line mostly for scala support
   {

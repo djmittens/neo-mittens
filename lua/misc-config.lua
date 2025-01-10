@@ -12,8 +12,6 @@ vim.keymap.set("n", "N", "Nzz")
 vim.keymap.set("n", "<leader>ct", ":bd term<C-A><CR>")
 vim.keymap.set("n", "<M-o>", ":ClangdSwitchSourceHeader<CR>")
 vim.keymap.set("v", "q", ":norm @q<CR>")
-vim.keymap.set("n", "<leader>e", ":Explore<CR>")
-vim.keymap.set("n", "<leader>E", ":Sex!<CR>")
 vim.keymap.set("n", "<leader>m", ":marks<CR>")
 vim.keymap.set({ 'n', 'v' }, "<leader>y", "\"+y")
 vim.keymap.set({ 'n', 'v' }, "<leader>p", "\"+p")
@@ -21,6 +19,14 @@ vim.keymap.set("n", "<leader>s", ":w<CR>:so %<CR>")
 vim.keymap.set("", "<leader>w", ":w<CR>")
 vim.keymap.set("", "<leader>x", ":x<CR>")
 vim.keymap.set("", "<leader>n", ":noh<CR>")
+
+-- NetRW config
+-- Disabling in favor of nvim-tree
+-- vim.keymap.set("n", "<leader>e", ":Explore<CR>")
+-- vim.keymap.set("n", "<leader>E", ":Sex!<CR>")
+
+-- Lua-Tree config
+vim.keymap.set("n", "<leader>e", function() require("nvim-tree.api").tree.open({ find_file = true }) end, {})
 
 -- Navigating quickfix list n stuff
 vim.keymap.set("", "]q", ":cn<CR>")
@@ -151,9 +157,9 @@ vim.keymap.set({ 'n' }, '<leader><C-q>', function() surround_last_edit('"') end,
 
 -- List of quote patterns to cycle through
 local quote_patterns = {
-  {left = "'", right = "'"},
-  {left = '"', right = '"'},
-  {left = "`", right = "`"},
+  { left = "'", right = "'" },
+  { left = '"', right = '"' },
+  { left = "`", right = "`" },
   --{left = "<", right = ">"}
 }
 
@@ -224,7 +230,8 @@ local function cycle_quote_style()
   local new_right_quote = quote_patterns[next_quote_index].right
 
   -- Replace the text with the new quotes
-  local new_line = line:sub(1, left_pos - 1) .. new_left_quote .. line:sub(left_pos + 1, right_pos - 1) .. new_right_quote .. line:sub(right_pos + 1)
+  local new_line = line:sub(1, left_pos - 1) ..
+  new_left_quote .. line:sub(left_pos + 1, right_pos - 1) .. new_right_quote .. line:sub(right_pos + 1)
   vim.api.nvim_set_current_line(new_line)
   -- vim.api.nvim_win_set_cursor(0, {row, right_pos + 1})
 end
@@ -235,14 +242,14 @@ vim.keymap.set({ 'n' }, '<C-q>', function() cycle_quote_style() end, { noremap =
 --   -- Get the total lines in the buffer
 --   local total_lines = vim.api.nvim_buf_line_count(0)
 --   for line_num, line in pairs(vim.fn.getline(line_num, total_lines - 1)) do
---     -- Search for linenum 
+--     -- Search for linenum
 --     if line:match("^./$") then
 --       vim.fn.cursor(line_num + 1, 1)
 --       break
 --     end
 --   end
 -- end
--- 
+--
 -- -- Set up an autocommand to run the function when entering netrw
 -- vim.api.nvim_create_autocmd("FileType", {
 --   pattern = "netrw",
@@ -251,5 +258,5 @@ vim.keymap.set({ 'n' }, '<C-q>', function() cycle_quote_style() end, { noremap =
 
 -- Create an alias for helpgrep as Hg
 vim.api.nvim_create_user_command('Hg', function(opts)
- vim.cmd("helpgrep " .. table.concat(opts.fargs, " "))
+  vim.cmd("helpgrep " .. table.concat(opts.fargs, " "))
 end, { nargs = "+" })
