@@ -48,7 +48,6 @@ require("lazy").setup({
     config = function()
       require('luasnip.loaders.from_vscode').lazy_load({})
     end
-
   },
   {
     'williamboman/mason.nvim',
@@ -114,10 +113,19 @@ require("lazy").setup({
     },
     config = function()
       require("nvim-tree").setup {
+        on_attach = function(buffnr)
+          local api = require("nvim-tree.api")
+          api.config.mappings.default_on_attach(buffnr)
+          vim.keymap.set("n", "<CR>", api.node.open.replace_tree_buffer,
+            { buffer = buffnr, noremap = true, silent = true, nowait = true })
+        end,
         renderer = {
           group_empty = true
         }
+
       }
+      vim.keymap.set("n", "<leader>e",
+        function() require("nvim-tree.api").tree.open({ current_window = true, find_file = true }) end, {})
     end,
   },
   { "ellisonleao/gruvbox.nvim", priority = 1000 }, -- My theme

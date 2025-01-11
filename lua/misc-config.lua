@@ -25,9 +25,6 @@ vim.keymap.set("", "<leader>n", ":noh<CR>")
 -- vim.keymap.set("n", "<leader>e", ":Explore<CR>")
 -- vim.keymap.set("n", "<leader>E", ":Sex!<CR>")
 
--- Lua-Tree config
-vim.keymap.set("n", "<leader>e", function() require("nvim-tree.api").tree.open({ find_file = true }) end, {})
-
 -- Navigating quickfix list n stuff
 vim.keymap.set("", "]q", ":cn<CR>")
 vim.keymap.set("", "[q", ":cp<CR>")
