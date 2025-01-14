@@ -105,29 +105,38 @@ require("lazy").setup({
   { 'dstein64/nvim-scrollview' },            -- Code map on the right , might be useful for marks and errors
   { "lukas-reineke/indent-blankline.nvim" }, -- rainbow guides for nesting. kinda useful
   {
-    "nvim-tree/nvim-tree.lua",
-    version = "*",
-    lazy = false,
-    dependencies = {
-      "nvim-tree/nvim-web-devicons",
-    },
-    config = function()
-      require("nvim-tree").setup {
-        on_attach = function(buffnr)
-          local api = require("nvim-tree.api")
-          api.config.mappings.default_on_attach(buffnr)
-          vim.keymap.set("n", "<CR>", api.node.open.replace_tree_buffer,
-            { buffer = buffnr, noremap = true, silent = true, nowait = true })
-        end,
-        renderer = {
-          group_empty = true
-        }
-
-      }
-      vim.keymap.set("n", "<leader>e",
-        function() require("nvim-tree.api").tree.open({ current_window = true, find_file = true }) end, {})
-    end,
+    'stevearc/oil.nvim',
+    ---@module 'oil'
+    ---@type oil.SetupOpts
+    opts = {},
+    -- Optional dependencies
+    -- dependencies = { { "echasnovski/mini.icons", opts = {} } },
+    dependencies = { "nvim-tree/nvim-web-devicons" }, -- use if prefer nvim-web-devicons
   },
+  -- {
+  --   "nvim-tree/nvim-tree.lua",
+  --   version = "*",
+  --   lazy = false,
+  --   dependencies = {
+  --     "nvim-tree/nvim-web-devicons",
+  --   },
+  --   config = function()
+  --     require("nvim-tree").setup {
+  --       on_attach = function(buffnr)
+  --         local api = require("nvim-tree.api")
+  --         api.config.mappings.default_on_attach(buffnr)
+  --         vim.keymap.set("n", "<CR>", api.node.open.replace_tree_buffer,
+  --           { buffer = buffnr, noremap = true, silent = true, nowait = true })
+  --       end,
+  --       renderer = {
+  --         group_empty = true
+  --       }
+
+  --     }
+  --     vim.keymap.set("n", "<leader>e",
+  --       function() require("nvim-tree.api").tree.open({ current_window = true, find_file = true }) end, {})
+  --   end,
+  -- },
   {
     'Bekaboo/dropbar.nvim',
     -- optional, but required for fuzzy finder support
