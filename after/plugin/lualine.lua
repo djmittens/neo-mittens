@@ -166,16 +166,17 @@ ins_left {
   -- cond = conditions.buffer_not_empty,
   color = { fg = colors.magenta, gui = 'bold' },
 }
-ins_left {
-  function()
-    return require("nvim-treesitter").statusline({
-      indicator_size = 100,
-      type_patterns = { "class", "function", "method", "struct" },
-      separator = "",
-    }) or ' '
-  end,
-  color = { fg = '#a6e22e', gui = 'bold' },
-}
+
+-- ins_left {
+--   function()
+--     return require("nvim-treesitter").statusline({
+--       indicator_size = 100,
+--       type_patterns = { "class", "function", "method", "struct" },
+--       separator = "",
+--     }) or ' '
+--   end,
+--   color = { fg = '#a6e22e', gui = 'bold' },
+-- }
 
 -- ins_left { 'location' }
 

@@ -105,28 +105,51 @@ require("lazy").setup({
   { 'dstein64/nvim-scrollview' },            -- Code map on the right , might be useful for marks and errors
   { "lukas-reineke/indent-blankline.nvim" }, -- rainbow guides for nesting. kinda useful
   {
-    "nvim-tree/nvim-tree.lua",
-    version = "*",
-    lazy = false,
+    'stevearc/oil.nvim',
+    ---@module 'oil'
+    ---@type oil.SetupOpts
+    opts = {},
+    -- Optional dependencies
+    -- dependencies = { { "echasnovski/mini.icons", opts = {} } },
+    dependencies = { "nvim-tree/nvim-web-devicons" }, -- use if prefer nvim-web-devicons
+  },
+  -- {
+  --   "nvim-tree/nvim-tree.lua",
+  --   version = "*",
+  --   lazy = false,
+  --   dependencies = {
+  --     "nvim-tree/nvim-web-devicons",
+  --   },
+  --   config = function()
+  --     require("nvim-tree").setup {
+  --       on_attach = function(buffnr)
+  --         local api = require("nvim-tree.api")
+  --         api.config.mappings.default_on_attach(buffnr)
+  --         vim.keymap.set("n", "<CR>", api.node.open.replace_tree_buffer,
+  --           { buffer = buffnr, noremap = true, silent = true, nowait = true })
+  --       end,
+  --       renderer = {
+  --         group_empty = true
+  --       }
+
+  --     }
+  --     vim.keymap.set("n", "<leader>e",
+  --       function() require("nvim-tree.api").tree.open({ current_window = true, find_file = true }) end, {})
+  --   end,
+  -- },
+  {
+    'Bekaboo/dropbar.nvim',
+    -- optional, but required for fuzzy finder support
     dependencies = {
-      "nvim-tree/nvim-web-devicons",
+      'nvim-telescope/telescope-fzf-native.nvim',
+      build = 'make'
     },
     config = function()
-      require("nvim-tree").setup {
-        on_attach = function(buffnr)
-          local api = require("nvim-tree.api")
-          api.config.mappings.default_on_attach(buffnr)
-          vim.keymap.set("n", "<CR>", api.node.open.replace_tree_buffer,
-            { buffer = buffnr, noremap = true, silent = true, nowait = true })
-        end,
-        renderer = {
-          group_empty = true
-        }
-
-      }
-      vim.keymap.set("n", "<leader>e",
-        function() require("nvim-tree.api").tree.open({ current_window = true, find_file = true }) end, {})
-    end,
+      local dropbar_api = require('dropbar.api')
+      vim.keymap.set('n', '<Leader>;', dropbar_api.pick, { desc = 'Pick symbols in winbar' })
+      vim.keymap.set('n', '[;', dropbar_api.goto_context_start, { desc = 'Go to start of current context' })
+      vim.keymap.set('n', '];', dropbar_api.select_next_context, { desc = 'Select next context' })
+    end
   },
   { "ellisonleao/gruvbox.nvim", priority = 1000 }, -- My theme
   -- LLM stuff
