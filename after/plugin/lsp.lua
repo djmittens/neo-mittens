@@ -24,6 +24,7 @@ require('mason-lspconfig').setup({
     'ts_ls',
     'rust_analyzer',
     'typescript',
+    'neocmake',
   },
   handlers = {
     function(server_name)
