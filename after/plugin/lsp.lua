@@ -116,8 +116,10 @@ cmp.setup({
     completion = cmp.config.window.bordered(),
   },
   completion = {
-    keyword_length = 1
+    keyword_length = 1,
+    autocomplete = false, -- basically only complete manually
   },
+  preselect = cmp.PreselectMode.Item,
   --mapping = cmp_mappings
   snippet = {
     expand = function(args)
@@ -134,32 +136,40 @@ cmp.setup({
     ['<C-p>'] = cmp.mapping.select_prev_item(cmp_select),
     ['<C-n>'] = cmp.mapping.select_next_item(cmp_select),
     ['<C-e>'] = cmp.mapping.abort(),
+
+    ['<C-s>'] = cmp.mapping.complete({
+      config = {
+        sources = {
+          { name = 'luasnip' }
+        }
+      }
+    }),
+    ['<C-l>'] = cmp.mapping.complete({
+      config = {
+        sources = {
+          { name = 'nvim_lsp' },
+          { name = 'buffer' }
+        }
+      }
+    }),
+
     ['<C-y>'] = cmp.mapping.confirm({ select = true }),
     ['<CR>'] = cmp.mapping.confirm({ select = false }),
-    -- ['<C-f>'] = cmp.mapping(function(fallback)
-    --   if cmp.visible() then
-    --     cmp.select_next_item({
-    --       behavior = cmp.SelectBehavior.Select,
-    --       count = 10
-    --     })
-    --   elseif luasnip.jumpable(1) then
-    --     luasnip.jump(1)
-    --   else
-    --     fallback()
-    --   end
-    -- end, { 'i', 's' }),
-    -- ['<C-b>'] = cmp.mapping(function(fallback)
-    --   if cmp.visible() then
-    --     cmp.select_next_item({
-    --       behavior = cmp.SelectBehavior.Select,
-    --       count = -10
-    --     })
-    --   elseif luasnip.jumpable(-1) then
-    --     luasnip.jump(-1)
-    --   else
-    --     fallback()
-    --   end
-    -- end, { 'i', 's' }),
+
+    ['<C-f>'] = cmp.mapping(function(fallback)
+      if luasnip.jumpable(1) then
+        luasnip.jump(1)
+      else
+        fallback()
+      end
+    end, { 'i', 's' }),
+    ['<C-b>'] = cmp.mapping(function(fallback)
+      if luasnip.jumpable(-1) then
+        luasnip.jump(-1)
+      else
+        fallback()
+      end
+    end, { 'i', 's' }),
     ['<C-u>'] = cmp.mapping.scroll_docs(-4),
     ['<C-d>'] = cmp.mapping.scroll_docs(4),
     ['<Tab>'] = cmp.mapping(function(fallback)

@@ -25,6 +25,12 @@ vim.keymap.set("", "<leader>n", ":noh<CR>")
 -- vim.keymap.set("n", "<leader>e", ":Explore<CR>")
 -- vim.keymap.set("n", "<leader>E", ":Sex!<CR>")
 
+vim.filetype.add({
+  extension = {
+    valk = "racket"
+  }
+})
+
 -- Navigating quickfix list n stuff
 vim.keymap.set("", "]q", ":cn<CR>")
 vim.keymap.set("", "[q", ":cp<CR>")
