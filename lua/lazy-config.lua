@@ -68,7 +68,8 @@ require("lazy").setup({
     dependencies = { 'nvim-lua/plenary.nvim',
       {
         'nvim-telescope/telescope-fzf-native.nvim',
-        build = 'cmake -S. -Bbuild -DCMAKE_BUILD_TYPE=Release && cmake --build build --config Release'
+        build =
+        'cmake -S. -Bbuild -DCMAKE_BUILD_TYPE=Release && cmake --build build --config Release'
       } },
     config = function()
       require('telescope').setup {
@@ -113,9 +114,13 @@ require("lazy").setup({
     -- dependencies = { { "echasnovski/mini.icons", opts = {} } },
     dependencies = { "nvim-tree/nvim-web-devicons" }, -- use if prefer nvim-web-devicons
   },
+  { 'echasnovski/mini.pairs',     version = '*', config = function() require('mini.pairs').setup() end },
+  { 'echasnovski/mini.surround',  version = '*', config = function() require('mini.surround').setup() end },
+  { 'echasnovski/mini.comment',   version = '*', config = function() require('mini.comment').setup() end },
+  { 'echasnovski/mini.splitjoin', version = '*', config = function() require('mini.splitjoin').setup() end },
+  { 'echasnovski/mini.operators', version = '*', config = function() require('mini.operators').setup({ replace = { prefix = 'cr' } }) end },
   -- {
-  --   "nvim-tree/nvim-tree.lua",
-  --   version = "*",
+  --   "nvim-tree/nvim-tree.lua", version = "*",
   --   lazy = false,
   --   dependencies = {
   --     "nvim-tree/nvim-web-devicons",
