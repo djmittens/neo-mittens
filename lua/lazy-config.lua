@@ -130,7 +130,7 @@ require("lazy").setup({
         on_attach = function(buffnr)
           local api = require("nvim-tree.api")
           api.config.mappings.default_on_attach(buffnr)
-          vim.keymap.set("n", "<CR>", api.node.open.replace_tree_buffer,
+          vim.keymap.set("n", "<CR>", api.node.open.edit,
             { buffer = buffnr, noremap = true, silent = true, nowait = true })
         end,
         renderer = {
