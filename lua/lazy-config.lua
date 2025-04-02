@@ -120,7 +120,8 @@ require("lazy").setup({
   { 'echasnovski/mini.splitjoin', version = '*', config = function() require('mini.splitjoin').setup() end },
   { 'echasnovski/mini.operators', version = '*', config = function() require('mini.operators').setup({ replace = { prefix = 'cr' } }) end },
   {
-    "nvim-tree/nvim-tree.lua", version = "*",
+    "nvim-tree/nvim-tree.lua",
+    version = "*",
     lazy = false,
     dependencies = {
       "nvim-tree/nvim-web-devicons",
@@ -142,20 +143,21 @@ require("lazy").setup({
         function() require("nvim-tree.api").tree.toggle({ find_file = true }) end, {})
     end,
   },
-  {
-    'Bekaboo/dropbar.nvim',
-    -- optional, but required for fuzzy finder support
-    dependencies = {
-      'nvim-telescope/telescope-fzf-native.nvim',
-      build = 'make'
-    },
-    config = function()
-      local dropbar_api = require('dropbar.api')
-      vim.keymap.set('n', '<Leader>;', dropbar_api.pick, { desc = 'Pick symbols in winbar' })
-      vim.keymap.set('n', '[;', dropbar_api.goto_context_start, { desc = 'Go to start of current context' })
-      vim.keymap.set('n', '];', dropbar_api.select_next_context, { desc = 'Select next context' })
-    end
-  },
+  -- Disabling this, as i havent found a good use for it yet... maybe ill miss it and turn it back on later
+  -- {
+  --   'Bekaboo/dropbar.nvim',
+  --   -- optional, but required for fuzzy finder support
+  --   dependencies = {
+  --     'nvim-telescope/telescope-fzf-native.nvim',
+  --     build = 'make'
+  --   },
+  --   config = function()
+  --     local dropbar_api = require('dropbar.api')
+  --     vim.keymap.set('n', '<Leader>;', dropbar_api.pick, { desc = 'Pick symbols in winbar' })
+  --     vim.keymap.set('n', '[;', dropbar_api.goto_context_start, { desc = 'Go to start of current context' })
+  --     vim.keymap.set('n', '];', dropbar_api.select_next_context, { desc = 'Select next context' })
+  --   end
+  -- },
   { "ellisonleao/gruvbox.nvim", priority = 1000 }, -- My theme
   -- LLM stuff
   -- { "zbirenbaum/copilot.lua" }, -- Turning this off as its just autocomplete
@@ -174,11 +176,27 @@ require("lazy").setup({
 
   -- Git Support
   { "lewis6991/gitsigns.nvim" }, -- Gutter help for git changes, very useful for comparing code
-  { 'tpope/vim-fugitive' },      -- This is the greatest git plugin for vim
-  { 'tpope/vim-rhubarb' },       -- Extension for fugitive specifically for github, eg open stuff in browsers
+
+  {
+    "NeogitOrg/neogit",
+    dependencies = {
+      "nvim-lua/plenary.nvim", -- required
+      "sindrets/diffview.nvim", -- optional - Diff integration
+
+      -- Only one of these is needed.
+      "nvim-telescope/telescope.nvim", -- optional
+      -- "ibhagwan/fzf-lua",            -- optional
+      -- "echasnovski/mini.pick",       -- optional
+    },
+    config = function()
+      vim.keymap.set({ 'n', 'v' }, "<leader>g", ":Neogit kind=floating<CR>")
+    end,
+  },
+  -- { 'tpope/vim-fugitive' },      -- This is the greatest git plugin for vim
+  -- { 'tpope/vim-rhubarb' },       -- Extension for fugitive specifically for github, eg open stuff in browsers
 
   -- Debugger Support -- is this even a good idea? maybe for scala...
-  { 'mfussenegger/nvim-dap',    dependencies = { "nvim-neotest/nvim-nio" } }, -- debugging adapter for a protocol
+  { 'mfussenegger/nvim-dap', dependencies = { "nvim-neotest/nvim-nio" } },    -- debugging adapter for a protocol
   { 'rcarriga/nvim-dap-ui' },                                                 -- UI for debugging with the adapter. this is very situational
 
   -- Status line mostly for scala support
