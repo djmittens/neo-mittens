@@ -240,24 +240,6 @@ local function cycle_quote_style()
 end
 vim.keymap.set({ 'n' }, '<C-q>', function() cycle_quote_style() end, { noremap = true, silent = true })
 
--- Function to move cursor to the first entry in netrw
--- local function go_to_first_entry()
---   -- Get the total lines in the buffer
---   local total_lines = vim.api.nvim_buf_line_count(0)
---   for line_num, line in pairs(vim.fn.getline(line_num, total_lines - 1)) do
---     -- Search for linenum
---     if line:match("^./$") then
---       vim.fn.cursor(line_num + 1, 1)
---       break
---     end
---   end
--- end
---
--- -- Set up an autocommand to run the function when entering netrw
--- vim.api.nvim_create_autocmd("FileType", {
---   pattern = "netrw",
---   callback = go_to_first_entry,
--- })
 
 -- Create an alias for helpgrep as Hg
 vim.api.nvim_create_user_command('Hg', function(opts)
