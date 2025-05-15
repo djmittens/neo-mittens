@@ -245,3 +245,14 @@ vim.keymap.set({ 'n' }, '<C-q>', function() cycle_quote_style() end, { noremap =
 vim.api.nvim_create_user_command('Hg', function(opts)
   vim.cmd("helpgrep " .. table.concat(opts.fargs, " "))
 end, { nargs = "+" })
+
+-- if vim.g.neovide then
+--   -- Helper function for transparency formatting
+--   local alpha = function()
+--     return string.format("%x", math.floor((255 * vim.g.transparency) or 0.8))
+--   end
+--   -- g:neovide_opacity should be 0 if you want to unify transparency of content and title bar.
+--   vim.g.neovide_opacity = 0.0
+--   vim.g.transparency = 1
+--   vim.g.neovide_background_color = "#0f1117" .. alpha()
+-- end

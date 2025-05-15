@@ -27,15 +27,16 @@ end, {})
 local metals_config = require("metals").bare_config()
 -- Example of settings
 metals_config.settings = {
-  defaultBspToBuildTool = true, -- So that we can have sbt by default instead of bloop
+ -- So that we can have sbt by default instead of bloop
+  defaultBspToBuildTool = false,
   showImplicitArguments = true,
   showImplicitConversionsAndClasses = true,
   showInferredType = true,
   superMethodLensesEnabled = true,
   -- useGlobalExecutable = false, -- For when i finally decide to fork metals
   -- metalsBinaryPath = '',
-  bloopSbtAlreadyInstalled = true,   -- Bloop, ofcourse is not installed, so dont do it !!!
-  enableSemanticHighlighting = true, -- Disable this if there are problems, still experimental
+  bloopSbtAlreadyInstalled = false,   -- Bloop, ofcourse is not installed, so dont do it !!!
+  enableSemanticHighlighting = false, -- Disable this if there are problems, still experimental
   verboseCompilation = true,
   excludedPackages = { "akka.actor.typed.javadsl", "com.github.swagger.akka.javadsl" },
 }

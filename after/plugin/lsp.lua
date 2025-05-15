@@ -30,8 +30,24 @@ require('mason-lspconfig').setup({
     function(server_name)
       require('lspconfig')[server_name].setup({})
     end,
+    ["clangd"] = function()
+      require('lspconfig').clangd.setup({
+        cmd = {
+          "clangd",
+          "--clang-tidy",
+          "--fallback-style=Google", -- Optional, set your preferred formatting style
+          "--background-index",
+          "--completion-style=detailed",
+          "--header-insertion=iwyu",
+        },
+        init_options = {
+          clangdFileStatus = true,
+        },
+      })
+    end,
   }
 })
+
 
 
 -- This is where you enable features that only work
