@@ -1,6 +1,6 @@
 -- treesitter-config.lua
-
 local configs = require("nvim-treesitter.configs")
+
 configs.setup {
   -- Add a language of your choice
   ensure_installed = {
@@ -26,4 +26,13 @@ configs.setup {
       node_decremental  = "J",
     },
   },
+}
+
+require('nvim-treesitter.parsers').get_parser_configs().stacktrace = {
+  install_info = {
+    url = "https://github.com/Tudyx/tree-sitter-log/",
+    files = {"src/parser.c"},
+    branch = "main"
+  },
+  filetype = "log"
 }
