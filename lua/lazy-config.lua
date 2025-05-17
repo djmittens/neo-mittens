@@ -102,9 +102,21 @@ require("lazy").setup({
   },
   -- Random bullshit
   -- { "folke/which-key.nvim" }, -- Havent needed this in a long time
+
+
+  {
+    "ThePrimeagen/harpoon",
+    branch = "harpoon2",
+    dependencies = { "nvim-lua/plenary.nvim" }
+  },
   { "mbbill/undotree" },                     -- Havent figured out how to use this effectively yet. Maybe not worth having it around
   { 'dstein64/nvim-scrollview' },            -- Code map on the right , might be useful for marks and errors
   { "lukas-reineke/indent-blankline.nvim" }, -- rainbow guides for nesting. kinda useful
+  {
+    "Fildo7525/pretty_hover",
+    event = "LspAttach",
+    opts = {}
+  },
   {
     'stevearc/oil.nvim',
     ---@module 'oil'
@@ -114,35 +126,35 @@ require("lazy").setup({
     -- dependencies = { { "echasnovski/mini.icons", opts = {} } },
     dependencies = { "nvim-tree/nvim-web-devicons" }, -- use if prefer nvim-web-devicons
   },
-  { 'echasnovski/mini.pairs',     version = '*', config = function() require('mini.pairs').setup() end },
-  { 'echasnovski/mini.surround',  version = '*', config = function() require('mini.surround').setup() end },
-  { 'echasnovski/mini.comment',   version = '*', config = function() require('mini.comment').setup() end },
-  { 'echasnovski/mini.splitjoin', version = '*', config = function() require('mini.splitjoin').setup() end },
-  { 'echasnovski/mini.operators', version = '*', config = function() require('mini.operators').setup({ replace = { prefix = 'cr' } }) end },
-  {
-    "nvim-tree/nvim-tree.lua",
-    version = "*",
-    lazy = false,
-    dependencies = {
-      "nvim-tree/nvim-web-devicons",
-    },
-    config = function()
-      require("nvim-tree").setup {
-        on_attach = function(buffnr)
-          local api = require("nvim-tree.api")
-          api.config.mappings.default_on_attach(buffnr)
-          vim.keymap.set("n", "<CR>", api.node.open.edit,
-            { buffer = buffnr, noremap = true, silent = true, nowait = true })
-        end,
-        renderer = {
-          group_empty = true
-        }
-
-      }
-      vim.keymap.set("n", "<leader>e",
-        function() require("nvim-tree.api").tree.toggle({ find_file = true }) end, {})
-    end,
-  },
+  { 'echasnovski/mini.pairs',     version = '*',  config = function() require('mini.pairs').setup() end },
+  { 'echasnovski/mini.surround',  version = '*',  config = function() require('mini.surround').setup() end },
+  { 'echasnovski/mini.comment',   version = '*',  config = function() require('mini.comment').setup() end },
+  { 'echasnovski/mini.splitjoin', version = '*',  config = function() require('mini.splitjoin').setup() end },
+  { 'echasnovski/mini.operators', version = '*',  config = function() require('mini.operators').setup({ replace = { prefix = 'cr' } }) end },
+  -- {
+  --   "nvim-tree/nvim-tree.lua",
+  --   version = "*",
+  --   lazy = false,
+  --   dependencies = {
+  --     "nvim-tree/nvim-web-devicons",
+  --   },
+  --   config = function()
+  --     require("nvim-tree").setup {
+  --       on_attach = function(buffnr)
+  --         local api = require("nvim-tree.api")
+  --         api.config.mappings.default_on_attach(buffnr)
+  --         vim.keymap.set("n", "<CR>", api.node.open.edit,
+  --           { buffer = buffnr, noremap = true, silent = true, nowait = true })
+  --       end,
+  --       renderer = {
+  --         group_empty = true
+  --       }
+  --
+  --     }
+  --     vim.keymap.set("n", "<leader>e",
+  --       function() require("nvim-tree.api").tree.toggle({ find_file = true }) end, {})
+  --   end,
+  -- },
   -- Disabling this, as i havent found a good use for it yet... maybe ill miss it and turn it back on later
   -- {
   --   'Bekaboo/dropbar.nvim',
@@ -158,7 +170,7 @@ require("lazy").setup({
   --     vim.keymap.set('n', '];', dropbar_api.select_next_context, { desc = 'Select next context' })
   --   end
   -- },
-  { "ellisonleao/gruvbox.nvim", priority = 1000 }, -- My theme
+  { "ellisonleao/gruvbox.nvim",   priority = 1000 }, -- My theme
   -- LLM stuff
   -- { "zbirenbaum/copilot.lua" }, -- Turning this off as its just autocomplete
   {
@@ -180,7 +192,7 @@ require("lazy").setup({
   {
     "NeogitOrg/neogit",
     dependencies = {
-      "nvim-lua/plenary.nvim", -- required
+      "nvim-lua/plenary.nvim",  -- required
       "sindrets/diffview.nvim", -- optional - Diff integration
 
       -- Only one of these is needed.
@@ -189,15 +201,21 @@ require("lazy").setup({
       -- "echasnovski/mini.pick",       -- optional
     },
     config = function()
-      vim.keymap.set({ 'n', 'v' }, "<leader>g", ":Neogit kind=floating<CR>")
+      local neogit = require("neogit")
+      neogit.setup ({
+        integrations = {
+          diffview = true
+        }
+      })
+      vim.keymap.set({ 'n', 'v' }, "<leader>g", ":Neogit<CR>")
     end,
   },
   -- { 'tpope/vim-fugitive' },      -- This is the greatest git plugin for vim
   -- { 'tpope/vim-rhubarb' },       -- Extension for fugitive specifically for github, eg open stuff in browsers
 
   -- Debugger Support -- is this even a good idea? maybe for scala...
-  { 'mfussenegger/nvim-dap', dependencies = { "nvim-neotest/nvim-nio" } },    -- debugging adapter for a protocol
-  { 'rcarriga/nvim-dap-ui' },                                                 -- UI for debugging with the adapter. this is very situational
+  { 'mfussenegger/nvim-dap',  dependencies = { "nvim-neotest/nvim-nio" } }, -- debugging adapter for a protocol
+  { 'rcarriga/nvim-dap-ui' },                                               -- UI for debugging with the adapter. this is very situational
 
   -- Status line mostly for scala support
   {

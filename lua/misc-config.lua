@@ -234,7 +234,7 @@ local function cycle_quote_style()
 
   -- Replace the text with the new quotes
   local new_line = line:sub(1, left_pos - 1) ..
-  new_left_quote .. line:sub(left_pos + 1, right_pos - 1) .. new_right_quote .. line:sub(right_pos + 1)
+      new_left_quote .. line:sub(left_pos + 1, right_pos - 1) .. new_right_quote .. line:sub(right_pos + 1)
   vim.api.nvim_set_current_line(new_line)
   -- vim.api.nvim_win_set_cursor(0, {row, right_pos + 1})
 end
@@ -245,3 +245,8 @@ vim.keymap.set({ 'n' }, '<C-q>', function() cycle_quote_style() end, { noremap =
 vim.api.nvim_create_user_command('Hg', function(opts)
   vim.cmd("helpgrep " .. table.concat(opts.fargs, " "))
 end, { nargs = "+" })
+
+if vim.g.neovide then
+  -- Put anything you want to happen only in Neovide here
+  vim.g.neovide_normal_opacity = 0.8
+end
