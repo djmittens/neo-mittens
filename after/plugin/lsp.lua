@@ -16,41 +16,28 @@ lspconfig_defaults.capabilities = vim.tbl_deep_extend(
 )
 
 
-require('mason').setup({})
-require('mason-lspconfig').setup({
-  ensure_isntalled = {
-    'lua_ls',
-    'clangd',
-    'ts_ls',
-    'rust_analyzer',
-    'typescript',
-    'neocmake',
-  },
-  handlers = {
-    function(server_name)
-      require('lspconfig')[server_name].setup({})
-    end,
-    ["clangd"] = function()
-      require('lspconfig').clangd.setup({
-        cmd = {
-          "clangd",
-          "--clang-tidy",
-          "--fallback-style=Google", -- Optional, set your preferred formatting style
-          "--background-index",
-          "--completion-style=detailed",
-          "--header-insertion=iwyu",
-        },
-        init_options = {
-          clangdFileStatus = true,
-        },
-      })
-    end,
-  }
-})
+local mason_lspconfig = require('mason-lspconfig')
 
-lspconfig.clangd.setup ({
-  cmd = {"clangd", "--clang-tidy"}
-})
+-- Configure handlers after Mason installs them
+for _, server in ipairs(mason_lspconfig.get_installed_servers()) do
+  if server == "clangd" then
+    lspconfig.clangd.setup({
+      cmd = {
+        "clangd",
+        "--clang-tidy",
+        "--fallback-style=Google",
+        "--background-index",
+        "--completion-style=detailed",
+        "--header-insertion=iwyu",
+      },
+      init_options = {
+        clangdFileStatus = true,
+      },
+    })
+  else
+    lspconfig[server].setup({})
+  end
+end
 
 
 -- This is where you enable features that only work
