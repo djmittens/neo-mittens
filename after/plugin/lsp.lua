@@ -61,11 +61,20 @@ vim.api.nvim_create_autocmd('LspAttach', {
 
     -- diagnostics hotkeys
     vim.keymap.set("n", "[d", function(k)
-      vim.diagnostic.goto_next({ float = false })
+      vim.diagnostic.jump({
+        float = true,
+        _highest = true,
+        count = -1,
+      })
       vim.cmd("norm zz")
     end, opts)
     vim.keymap.set("n", "]d", function()
-      vim.diagnostic.goto_prev({ float = false })
+      -- vim.diagnostic.goto_prev({ float = false })
+      vim.diagnostic.jump({
+        float = true,
+        _highest = true,
+        count = 1,
+      })
       vim.cmd("norm zz")
     end, opts)
     -- - [x] (LSP)   Format source on <A-S-F>
