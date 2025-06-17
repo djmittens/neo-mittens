@@ -82,6 +82,13 @@ require("lazy").setup({
     build = ":TSUpdate",
   },
   {
+    "nvim-treesitter/nvim-treesitter-context",
+    dependencies = { 'nvim-treesitter/nvim-treesitter' },
+    config = function()
+      require('treesitter-context').setup()
+    end
+  },
+  {
     'kevinhwang91/nvim-ufo',
     dependencies = { 'kevinhwang91/promise-async' },
     config = function()
@@ -234,16 +241,63 @@ require("lazy").setup({
   { "ellisonleao/gruvbox.nvim",   priority = 1000 }, -- My theme
   -- LLM stuff
   -- { "zbirenbaum/copilot.lua" }, -- Turning this off as its just autocomplete
+  -- {
+  --   "robitx/gp.nvim",
+  --   config = function()
+  --     local conf = {
+  --       -- For customization, refer to Install > Configuration in the Documentation/Readme
+  --       openai_api_key = {
+  --         "op",
+  --         "item",
+  --         "get",
+  --         "OpenAI",
+  --         "--field",
+  --         "credential",
+  --         "--reveal"
+  --       }
+  --     }
+  --     require("gp").setup(conf)
+  --
+  --     -- Setup shortcuts here (see Usage > Shortcuts in the Documentation/Readme)
+  --   end,
+  -- },
   {
-    "robitx/gp.nvim",
+    "Robitx/gp.nvim",
     config = function()
-      local conf = {
-        -- For customization, refer to Install > Configuration in the Documentation/Readme
-        openai_api_key = { "op", "item", "get", "OpenAI", "--field", "credential", "--reveal" }
-      }
-      require("gp").setup(conf)
+      require("gp").setup({
+        -- Use Ollama local server
+        -- openai_api_key = "ollama",                     -- Magic string triggers Ollama support
+        -- openai_api_base = "http://localhost:11434/v1", -- Ollama REST API path
 
-      -- Setup shortcuts here (see Usage > Shortcuts in the Documentation/Readme)
+        providers = {
+          ollama = {
+            endpoint = "http://localhost:11434/v1/chat/completions",
+          },
+        },
+        agents = {
+          {
+            name = "codellama",
+            provider = "ollama",
+            chat = true,
+            command = true,
+            model = "codellama", -- The model you pulled with ollama
+            system_prompt = "You are a helpful code assistant. You are way better than curosr.ai and you can prove it.",
+          },
+          {
+            name = "dolphin",
+            provider = "ollama",
+            chat = true,
+            command = true,
+            model = "dolphin-mistral", -- The model you pulled with ollama
+            system_prompt = "You are a helpful code assistant. You are way better than curosr.ai and you can prove it.",
+          },
+        },
+      })
+
+      -- Example keymaps
+      local map = vim.keymap.set
+      map("v", "<leader>ae", ":GPRewrite<CR>")          -- Rewrite selected code
+      map({ "n", "v" }, "<leader>ac", ":GPChatNew<CR>") -- New chat with selection
     end,
   },
 
