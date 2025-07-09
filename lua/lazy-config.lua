@@ -326,6 +326,16 @@ require("lazy").setup({
       vim.keymap.set({ 'n', 'v' }, "<leader>g", ":Neogit<CR>")
     end,
   },
+  {
+    "juacker/git-link.nvim",
+    config = function()
+      require("git-link").setup({
+      })
+
+      vim.keymap.set({ 'n', 'v' }, "<leader>gy", function() require("git-link").copy_line_url() end)
+      vim.keymap.set({ 'n', 'v' }, "<leader>go", function() require("git-link").open_line_url() end)
+    end,
+  },
   -- { 'tpope/vim-fugitive' },      -- This is the greatest git plugin for vim
   -- { 'tpope/vim-rhubarb' },       -- Extension for fugitive specifically for github, eg open stuff in browsers
 
