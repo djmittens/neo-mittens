@@ -50,13 +50,7 @@ require("lazy").setup({
     end
   },
   {
-    'williamboman/mason.nvim',
-    build = function()
-      pcall(vim.cmd, 'MasonUpdate')
-    end,
-  },
-  {
-    'williamboman/mason-lspconfig.nvim',
+    'mason-org/mason-lspconfig.nvim',
     dependencies = {
       {
         "mason-org/mason.nvim",
@@ -342,6 +336,15 @@ require("lazy").setup({
   -- Debugger Support -- is this even a good idea? maybe for scala...
   { 'mfussenegger/nvim-dap',  dependencies = { "nvim-neotest/nvim-nio" } }, -- debugging adapter for a protocol
   { 'rcarriga/nvim-dap-ui' },                                               -- UI for debugging with the adapter. this is very situational
+  {
+    'jay-babu/mason-nvim-dap.nvim',
+    config = function()
+      require("mason-nvim-dap").setup({
+        ensure_installed = { 'stylua', 'jq', 'cppdbg' },
+        handlers = {}, -- sets up dap in the predefined manner
+      })
+    end
+  },
 
   -- Status line mostly for scala support
   {

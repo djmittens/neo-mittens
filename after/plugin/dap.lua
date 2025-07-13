@@ -1,5 +1,6 @@
 local dap, dapui = require("dap"), require("dapui")
-dapui.setup()
+
+dapui.setup({})
 
 dap.listeners.before.attach.dapui_config = function()
   dapui.open()
@@ -53,18 +54,18 @@ dap.listeners.after['event_terminated']['me'] = function()
   keymap_restore = {}
 end
 
-dap.adapters.codelldb = {
-  type = 'server',
-  port = "${port}",
-  executable = {
-    -- CHANGE THIS to your path!
-    command = vim.fn.expand('$HOME/bin/codelldb/adapter/codelldb'),
-    args = { "--port", "${port}" },
-
-    -- On windows you may have to uncomment this:
-    -- detached = false,
-  }
-}
+-- dap.adapters.codelldb = {
+--   type = 'server',
+--   port = "${port}",
+--   executable = {
+--     -- CHANGE THIS to your path!
+--     command = vim.fn.expand('$HOME/bin/codelldb/adapter/codelldb'),
+--     args = { "--port", "${port}" },
+--
+--     -- On windows you may have to uncomment this:
+--     -- detached = false,
+--   }
+-- }
 
 dap.adapters.gdb = {
   type = "executable",
@@ -73,19 +74,19 @@ dap.adapters.gdb = {
 }
 
 
-dap.configurations.cpp = {
-  {
-    name = "Launch file",
-    type = "codelldb",
-    request = "launch",
-    -- program = function()
-    --   return vim.fn.input('Path to executable: ', vim.fn.getcwd() .. '/', 'file')
-    -- end,
-    program = vim.fn.getcwd() .. "/build/bin/hello-opengl",
-    cwd = '${workspaceFolder}',
-    stopOnEntry = false,
-  },
-}
+-- dap.configurations.cpp = {
+--   {
+--     name = "Launch file",
+--     type = "codelldb",
+--     request = "launch",
+--     -- program = function()
+--     --   return vim.fn.input('Path to executable: ', vim.fn.getcwd() .. '/', 'file')
+--     -- end,
+--     program = vim.fn.getcwd() .. "/build/bin/hello-opengl",
+--     cwd = '${workspaceFolder}',
+--     stopOnEntry = false,
+--   },
+-- }
 
 dap.configurations.scala = {
   {
@@ -143,13 +144,13 @@ local function telescope_select_exec()
   end)
 end
 
-dap.configurations.c = {
-  {
-    name = "Launch an executable",
-    type = "gdb",
-    request = "launch",
-    program = telescope_select_exec,
-    cwd = "${workspaceFolder}",
-    stopAtBeginningOfMainSubprogram = false,
-  },
-}
+-- dap.configurations.c = {
+--   {
+--     name = "Launch an executable",
+--     type = "gdb",
+--     request = "launch",
+--     program = telescope_select_exec,
+--     cwd = "${workspaceFolder}",
+--     stopAtBeginningOfMainSubprogram = false,
+--   },
+-- }
