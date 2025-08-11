@@ -190,7 +190,22 @@ require("lazy").setup({
     dependencies = { "nvim-tree/nvim-web-devicons" }, -- use if prefer nvim-web-devicons
   },
   { 'echasnovski/mini.pairs',     version = '*',  config = function() require('mini.pairs').setup() end },
-  { 'echasnovski/mini.surround',  version = '*',  config = function() require('mini.surround').setup() end },
+  {
+    'echasnovski/mini.surround',
+    version = '*',
+    config = function()
+      require('mini.surround').setup({
+        custom_surroundings = {
+          ['('] = { output = { left = '(', right = ')' } },
+          ['['] = { output = { left = '[', right = ']' } },
+          ['{'] = { output = { left = '{', right = '}' } },
+          ['"'] = { output = { left = '"', right = '"' } },
+          ["'"] = { output = { left = "'", right = "'" } },
+          ['`'] = { output = { left = '`', right = '`' } },
+        }
+      })
+    end
+  },
   { 'echasnovski/mini.comment',   version = '*',  config = function() require('mini.comment').setup() end },
   { 'echasnovski/mini.splitjoin', version = '*',  config = function() require('mini.splitjoin').setup() end },
   { 'echasnovski/mini.operators', version = '*',  config = function() require('mini.operators').setup({ replace = { prefix = 'cr' } }) end },

@@ -2,6 +2,54 @@ local dap, dapui = require("dap"), require("dapui")
 
 dapui.setup({})
 
+-- Temporary debug single-key maps
+local function set_debug_keymaps()
+  local o = { silent = true, noremap = true }
+  vim.keymap.set("n", "c", function() dap.continue() end, o)       -- Continue
+  vim.keymap.set("n", "n", function() dap.step_over() end, o)      -- Next
+  vim.keymap.set("n", "s", function() dap.step_into() end, o)      -- Step into
+  vim.keymap.set("n", "o", function() dap.step_out() end, o)       -- Step out
+  vim.keymap.set("n", "b", function() dap.toggle_breakpoint() end, o) -- Breakpoint
+end
+
+local function restore_normal_keymaps()
+  pcall(vim.keymap.del, "n", "c")
+  pcall(vim.keymap.del, "n", "n")
+  pcall(vim.keymap.del, "n", "s")
+  pcall(vim.keymap.del, "n", "o")
+  pcall(vim.keymap.del, "n", "b")
+
+  -- Restore global and lua-only maps
+  vim.keymap.set("n", "c", "<Cmd>nohlsearch<CR>", { desc = "Clear highlights" })
+  for _, buf in ipairs(vim.api.nvim_list_bufs()) do
+    if vim.bo[buf].filetype == "lua" then
+      vim.keymap.set("n", "s", "<Cmd>luafile %<CR>", { buffer = buf, desc = "Source current Lua file" })
+    end
+  end
+end
+
+-- Use a different listener key than dapui ("debug_single_keys")
+-- Open dapui BEFORE we set keys, close dapui BEFORE we restore keys.
+-- We set keys AFTER session starts, and restore keys AFTER it ends,
+-- so UI open/close doesn’t race with our maps.
+dap.listeners.after.event_initialized.debug_single_keys = function()
+  set_debug_keymaps()
+end
+
+dap.listeners.before.event_terminated.debug_single_keys = function()
+  -- Optional: also restore before termination, in case adapters misfire
+  restore_normal_keymaps()
+end
+dap.listeners.before.event_exited.debug_single_keys = function()
+  restore_normal_keymaps()
+end
+dap.listeners.after.event_terminated.debug_single_keys = function()
+  restore_normal_keymaps()
+end
+dap.listeners.after.event_exited.debug_single_keys = function()
+  restore_normal_keymaps()
+end
+
 dap.listeners.before.attach.dapui_config = function()
   dapui.open()
 end

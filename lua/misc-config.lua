@@ -15,10 +15,20 @@ vim.keymap.set("v", "q", ":norm @q<CR>")
 vim.keymap.set("n", "<leader>m", ":marks<CR>")
 vim.keymap.set({ 'n', 'v' }, "<leader>y", "\"+y")
 vim.keymap.set({ 'n', 'v' }, "<leader>p", "\"+p")
-vim.keymap.set("n", "<leader>s", ":w<CR>:so %<CR>")
 vim.keymap.set("", "<leader>w", ":w<CR>")
 vim.keymap.set("", "<leader>x", ":x<CR>")
 vim.keymap.set("", "<leader>n", ":noh<CR>")
+
+--
+-- this only should work with lua files
+-- vim.keymap.set("n", "<leader>s", ":w<CR>:so %<CR>")
+vim.api.nvim_create_autocmd("FileType", {
+  pattern = "lua",
+  callback = function(ev)
+    -- buffer-local so it only affects Lua files
+    vim.keymap.set("n", "s", "<Cmd>luafile %<CR>", { buffer = ev.buf, desc = "Source current Lua file" })
+  end,
+})
 
 -- NetRW config
 -- Disabling in favor of nvim-tree
@@ -40,7 +50,8 @@ vim.api.nvim_create_user_command("Fdiff", "w !diff % -", {})
 
 -- Copy relative file path
 vim.api.nvim_create_user_command("CopyRelPath", "call setreg('+', expand('%'))", {})
-vim.keymap.set("n", "<leader>yp", ":CopyRelPath<CR>")
+vim.keymap.set("n", "<leader>yp", ":CopyRelPath<CR>", { desc = "Copy relative path to current buffer" })
+vim.keymap.set("n", "<leader>v", "`[v`]", { desc = "Select last paste" })
 
 vim.o.colorcolumn = "80,120"
 vim.o.cursorline = true
