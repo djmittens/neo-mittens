@@ -1,18 +1,35 @@
 local dap, dapui = require("dap"), require("dapui")
 
 dapui.setup({})
+require("dap.ext.vscode").load_launchjs(nil, {
+  cppdbg     = { "vscode" },
+  lldb       = { "vscode" },
+  coreclr    = { "vscode" },
+  go         = { "vscode" },
+  python     = { "vscode" },
+  node2      = { "vscode" },
+  pwa_node   = { "vscode" },
+  pwa_chrome = { "vscode" },
+  java       = { "vscode" },
+  rust       = { "vscode" },
+})
 
-dap.listeners.before.attach.dapui_config = function()
-  dapui.open()
+-- Temporary debug single-key maps
+local function set_debug_keymaps()
+  local o = { noremap = true, silent = true }
+  vim.keymap.set("n", "<leader>n", dap.step_over, o)      -- next
+  vim.keymap.set("n", "<leader>s", dap.step_into, o)      -- step in
+  vim.keymap.set("n", "<leader>o", dap.step_out, o)       -- step out
+  vim.keymap.set("n", "<leader>c", dap.continue, o)       -- continue
+  vim.keymap.set("n", "<leader>b", dap.toggle_breakpoint, o)
+  vim.keymap.set("n", "<leader>r", dap.restart, o)
+  vim.keymap.set("n", "<leader>q", dap.terminate, o)
 end
-dap.listeners.before.launch.dapui_config = function()
-  dapui.open()
-end
-dap.listeners.before.event_terminated.dapui_config = function()
-  dapui.close()
-end
-dap.listeners.before.event_exited.dapui_config = function()
-  dapui.close()
+
+local function clear_debug_keymaps()
+  for _, key in ipairs({ "n", "s", "o", "c", "b", "r", "q" }) do
+    pcall(vim.keymap.del, "n", "<leader>" .. key)
+  end
 end
 
 -- Make K be dap hover when enabled
@@ -30,6 +47,65 @@ dap.listeners.after['event_initialized']['me'] = function()
   end
   api.nvim_set_keymap(
     'n', 'K', '<Cmd>lua require("dap.ui.widgets").hover()<CR>', { silent = true })
+end
+
+vim.keymap.set("n", "<leader>r", function()
+  local cfgs = dap.configurations.vscode
+  if not (cfgs and cfgs[1]) then
+    return vim.notify("No launch.json configs loaded under 'vscode'.", vim.log.levels.WARN)
+  end
+
+  local cfg = vim.deepcopy(cfgs[1])
+
+  -- terminate first (common for C++ debuggers)
+  if dap.session() then
+    local key = "restart_first_vscode"
+    local function relaunch()
+      dap.listeners.after.event_terminated[key] = nil
+      dap.listeners.after.event_exited[key] = nil
+      dap.run(cfg)
+    end
+    dap.listeners.after.event_terminated[key] = relaunch
+    dap.listeners.after.event_exited[key] = relaunch
+    return dap.terminate()
+  end
+
+  dap.run(cfg)
+end, { desc = "Debug: Restart first launch config" })
+
+-- Use a different listener key than dapui ("debug_single_keys")
+-- Open dapui BEFORE we set keys, close dapui BEFORE we restore keys.
+-- We set keys AFTER session starts, and restore keys AFTER it ends,
+-- so UI open/close doesn’t race with our maps.
+dap.listeners.after.event_initialized.debug_single_keys = function()
+  set_debug_keymaps()
+end
+
+dap.listeners.before.event_terminated.debug_single_keys = function()
+  -- Optional: also restore before termination, in case adapters misfire
+  clear_debug_keymaps()
+end
+dap.listeners.before.event_exited.debug_single_keys = function()
+  clear_debug_keymaps()
+end
+dap.listeners.after.event_terminated.debug_single_keys = function()
+  clear_debug_keymaps()
+end
+dap.listeners.after.event_exited.debug_single_keys = function()
+  clear_debug_keymaps()
+end
+
+dap.listeners.before.attach.dapui_config = function()
+  dapui.open()
+end
+dap.listeners.before.launch.dapui_config = function()
+  dapui.open()
+end
+dap.listeners.before.event_terminated.dapui_config = function()
+  dapui.close()
+end
+dap.listeners.before.event_exited.dapui_config = function()
+  dapui.close()
 end
 
 dap.listeners.after['event_terminated']['me'] = function()
