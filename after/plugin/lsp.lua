@@ -1,27 +1,11 @@
--- lets do some lsp shit
--- local lsp = require('lsp-zero')
-local lspconfig = require('lspconfig')
-
-
--- lsp.preset("recomdended")
 vim.opt.signcolumn = 'yes'
-
--- Add cmp_nvim_lsp capabilities settings to lspconfig
--- This should be executed before you configure any language server
-local lspconfig_defaults = lspconfig.util.default_config
-lspconfig_defaults.capabilities = vim.tbl_deep_extend(
-  'force',
-  lspconfig_defaults.capabilities,
-  require('cmp_nvim_lsp').default_capabilities()
-)
-
 
 local mason_lspconfig = require('mason-lspconfig')
 
 -- Configure handlers after Mason installs them
 for _, server in ipairs(mason_lspconfig.get_installed_servers()) do
   if server == "clangd" then
-    lspconfig.clangd.setup({
+    vim.lsp.config("clangd", {
       cmd = {
         "clangd",
         "--clang-tidy",
@@ -34,9 +18,8 @@ for _, server in ipairs(mason_lspconfig.get_installed_servers()) do
         clangdFileStatus = true,
       },
     })
-  else
-    lspconfig[server].setup({})
   end
+  vim.lsp.enable(server)
 end
 
 
