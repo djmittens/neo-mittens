@@ -125,6 +125,19 @@ require("lazy").setup({
     end,
   },
   {
+      "OXY2DEV/markview.nvim",
+      lazy = false,
+
+     -- For `nvim-treesitter` users.
+      priority = 49,
+
+      -- For blink.cmp's completion
+      -- source
+      -- dependencies = {
+      --     "saghen/blink.cmp"
+      -- },
+  },
+  {
     'nvim-telescope/telescope.nvim',
     -- tag = '0.1.2',
     dependencies = { 'nvim-lua/plenary.nvim',
