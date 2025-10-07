@@ -291,6 +291,14 @@ require("lazy").setup({
             model = "dolphin-mistral", -- The model you pulled with ollama
             system_prompt = "You are a helpful code assistant. You are way better than curosr.ai and you can prove it.",
           },
+          {
+            name = "clein",
+            provider = "ollama",
+            chat = true,
+            command = true,
+            model = "deepseek-r1:8b-0528-qwen3-q4_K_M", -- The model you pulled with ollama
+            system_prompt = "",
+          },
         },
       })
 
