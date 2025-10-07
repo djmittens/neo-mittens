@@ -15,10 +15,20 @@ vim.keymap.set("v", "q", ":norm @q<CR>")
 vim.keymap.set("n", "<leader>m", ":marks<CR>")
 vim.keymap.set({ 'n', 'v' }, "<leader>y", "\"+y")
 vim.keymap.set({ 'n', 'v' }, "<leader>p", "\"+p")
-vim.keymap.set("n", "<leader>s", ":w<CR>:so %<CR>")
 vim.keymap.set("", "<leader>w", ":w<CR>")
 vim.keymap.set("", "<leader>x", ":x<CR>")
 vim.keymap.set("", "<leader>n", ":noh<CR>")
+
+--
+-- this only should work with lua files
+-- vim.keymap.set("n", "<leader>s", ":w<CR>:so %<CR>")
+vim.api.nvim_create_autocmd("FileType", {
+  pattern = "lua",
+  callback = function(ev)
+    -- buffer-local so it only affects Lua files
+    vim.keymap.set("n", "s", "<Cmd>luafile %<CR>", { buffer = ev.buf, desc = "Source current Lua file" })
+  end,
+})
 
 -- NetRW config
 -- Disabling in favor of nvim-tree
@@ -40,7 +50,8 @@ vim.api.nvim_create_user_command("Fdiff", "w !diff % -", {})
 
 -- Copy relative file path
 vim.api.nvim_create_user_command("CopyRelPath", "call setreg('+', expand('%'))", {})
-vim.keymap.set("n", "<leader>yp", ":CopyRelPath<CR>")
+vim.keymap.set("n", "<leader>yp", ":CopyRelPath<CR>", { desc = "Copy relative path to current buffer" })
+vim.keymap.set("n", "<leader>v", "`[v`]", { desc = "Select last paste" })
 
 vim.o.colorcolumn = "80,120"
 vim.o.cursorline = true
@@ -249,4 +260,81 @@ end, { nargs = "+" })
 if vim.g.neovide then
   -- Put anything you want to happen only in Neovide here
   vim.g.neovide_normal_opacity = 0.8
+end
+
+
+-- Hypernav integration
+local function detect_env()
+  local env = {}
+
+  env.in_tmux = os.getenv("TMUX") ~= nil
+  env.in_hyprland = os.getenv("XDG_CURRENT_DESKTOP") == "Hyprland"
+
+  return env
+end
+
+local env = detect_env()
+
+local dir_map = {
+  h = {
+    hypr = "l",
+    tmux = { "L", "pane_at_left" }
+  },
+  j = {
+    hypr = "d",
+    tmux = { "D", "pane_at_bottom" }
+  },
+  k = {
+    hypr = "u",
+    tmux = { "U", "pane_at_top" }
+  },
+  l = {
+    hypr = "r",
+    tmux = { "R", "pane_at_right" }
+  }
+}
+
+local function tmux_command(cmd)
+  local tmux_socket = vim.fn.split(vim.env.TMUX, ',')[1]
+  return vim.fn.system("tmux -S " .. tmux_socket .. " " .. cmd)
+end
+
+
+local function nvim_nav(dir)
+  local winnr = vim.fn.winnr()
+  pcall(vim.cmd, 'wincmd '.. dir)
+  -- Check if we navigated 
+  return vim.fn.winnr() ~= winnr
+end
+
+local function hypr_nav(dir)
+  vim.fn.system("hyprctl dispatch movefocus " .. dir_map[dir]['hypr'])
+end
+
+local function tmux_nav(dir)
+  if not nvim_nav(dir) then
+    local res = tmux_command('display -p "#{'.. dir_map[dir]['tmux'][2] ..'}"');
+    -- print("Display res ".. res)
+    -- Trimming the extra spaces n shit
+    if res:match("^%s*(.-)%s*$") == '0' then
+      res = tmux_command('select-pane "-'.. dir_map[dir]['tmux'][1]..'"');
+    elseif env.in_hyprland then
+      -- No panes in that direction, lets default to hypr_nav
+      hypr_nav(dir)
+    end
+  end
+end
+
+-- Meta(windows) key gets eaten by tmux / terminal, so have to use ALT ... Fun
+--
+if env.in_tmux and env.in_hyprland then
+  vim.keymap.set({ 'i', 'n' }, '<M-h>', function() tmux_nav('h') end, { noremap = true, silent = true })
+  vim.keymap.set({ 'i', 'n' }, '<M-j>', function() tmux_nav('j') end, { noremap = true, silent = true })
+  vim.keymap.set({ 'i', 'n' }, '<M-k>', function() tmux_nav('k') end, { noremap = true, silent = true })
+  vim.keymap.set({ 'i', 'n' }, "<M-l>", function() tmux_nav('l') end, { noremap = true, silent = true })
+else
+  vim.keymap.set({ 'i', 'n' }, '<M-h>', function() nvim_nav('h') end, { noremap = true, silent = true })
+  vim.keymap.set({ 'i', 'n' }, '<M-j>', function() nvim_nav('j') end, { noremap = true, silent = true })
+  vim.keymap.set({ 'i', 'n' }, '<M-k>', function() nvim_nav('k') end, { noremap = true, silent = true })
+  vim.keymap.set({ 'i', 'n' }, '<M-l>', function() nvim_nav('l') end, { noremap = true, silent = true })
 end

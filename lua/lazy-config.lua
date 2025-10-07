@@ -50,13 +50,7 @@ require("lazy").setup({
     end
   },
   {
-    'williamboman/mason.nvim',
-    build = function()
-      pcall(vim.cmd, 'MasonUpdate')
-    end,
-  },
-  {
-    'williamboman/mason-lspconfig.nvim',
+    'mason-org/mason-lspconfig.nvim',
     dependencies = {
       {
         "mason-org/mason.nvim",
@@ -131,13 +125,27 @@ require("lazy").setup({
     end,
   },
   {
+      "OXY2DEV/markview.nvim",
+      lazy = false,
+
+     -- For `nvim-treesitter` users.
+      priority = 49,
+
+      -- For blink.cmp's completion
+      -- source
+      -- dependencies = {
+      --     "saghen/blink.cmp"
+      -- },
+  },
+  {
     'nvim-telescope/telescope.nvim',
     -- tag = '0.1.2',
     dependencies = { 'nvim-lua/plenary.nvim',
       {
         'nvim-telescope/telescope-fzf-native.nvim',
-        build =
-        'cmake -S. -Bbuild -DCMAKE_BUILD_TYPE=Release && cmake --build build --config Release'
+        -- build =
+        -- 'cmake -S. -Bbuild -DCMAKE_BUILD_TYPE=Release && cmake --build build --config Release'
+        build = 'make'
       } },
     config = function()
       require('telescope').setup {
@@ -195,7 +203,22 @@ require("lazy").setup({
     dependencies = { "nvim-tree/nvim-web-devicons" }, -- use if prefer nvim-web-devicons
   },
   { 'echasnovski/mini.pairs',     version = '*',  config = function() require('mini.pairs').setup() end },
-  { 'echasnovski/mini.surround',  version = '*',  config = function() require('mini.surround').setup() end },
+  {
+    'echasnovski/mini.surround',
+    version = '*',
+    config = function()
+      require('mini.surround').setup({
+        custom_surroundings = {
+          ['('] = { output = { left = '(', right = ')' } },
+          ['['] = { output = { left = '[', right = ']' } },
+          ['{'] = { output = { left = '{', right = '}' } },
+          ['"'] = { output = { left = '"', right = '"' } },
+          ["'"] = { output = { left = "'", right = "'" } },
+          ['`'] = { output = { left = '`', right = '`' } },
+        }
+      })
+    end
+  },
   { 'echasnovski/mini.comment',   version = '*',  config = function() require('mini.comment').setup() end },
   { 'echasnovski/mini.splitjoin', version = '*',  config = function() require('mini.splitjoin').setup() end },
   { 'echasnovski/mini.operators', version = '*',  config = function() require('mini.operators').setup({ replace = { prefix = 'cr' } }) end },
@@ -333,12 +356,31 @@ require("lazy").setup({
       vim.keymap.set({ 'n', 'v' }, "<leader>g", ":Neogit<CR>")
     end,
   },
+  {
+    "juacker/git-link.nvim",
+    config = function()
+      require("git-link").setup({
+      })
+
+      vim.keymap.set({ 'n', 'v' }, "<leader>gy", function() require("git-link").copy_line_url() end)
+      vim.keymap.set({ 'n', 'v' }, "<leader>go", function() require("git-link").open_line_url() end)
+    end,
+  },
   -- { 'tpope/vim-fugitive' },      -- This is the greatest git plugin for vim
   -- { 'tpope/vim-rhubarb' },       -- Extension for fugitive specifically for github, eg open stuff in browsers
 
   -- Debugger Support -- is this even a good idea? maybe for scala...
   { 'mfussenegger/nvim-dap',  dependencies = { "nvim-neotest/nvim-nio" } }, -- debugging adapter for a protocol
   { 'rcarriga/nvim-dap-ui' },                                               -- UI for debugging with the adapter. this is very situational
+  {
+    'jay-babu/mason-nvim-dap.nvim',
+    config = function()
+      require("mason-nvim-dap").setup({
+        ensure_installed = { 'stylua', 'jq', 'cppdbg' },
+        handlers = {}, -- sets up dap in the predefined manner
+      })
+    end
+  },
 
   -- Status line mostly for scala support
   {

@@ -35,6 +35,7 @@ metals_config.settings = {
   superMethodLensesEnabled = true,
   -- useGlobalExecutable = false, -- For when i finally decide to fork metals
   -- metalsBinaryPath = '',
+  -- startMcpServer = true,
   bloopSbtAlreadyInstalled = false,   -- Bloop, ofcourse is not installed, so dont do it !!!
   enableSemanticHighlighting = false, -- Disable this if there are problems, still experimental
   verboseCompilation = true,
