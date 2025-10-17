@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name= Logout
+Comment=Logout the current session
+Exec=sh -lc '~/.config/wofi/powermenu.sh Logout'
+Icon=system-log-out
+Terminal=false
+Categories=System;
+NoDisplay=false

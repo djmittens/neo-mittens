@@ -1,0 +1,23 @@
+show=drun
+prompt=
+allow_images=true
+image_size=24
+hide_scroll=true
+insensitive=true
+matching=fuzzy
+show_all=true
+no_actions=false
+columns=1
+allow_markup=true
+term=alacritty
+location=center
+print_command=true
+width=900
+
+# Keybindings (per wofi(5) / wofi-keys(7))
+# Use Ctrl+n / Ctrl+p to navigate, and Ctrl+c to exit. Move copy to Ctrl+Shift+c.
+key_up=Ctrl-p
+key_down=Ctrl-n
+key_exit=Ctrl-c
+key_copy=Ctrl-Shift-c
+key_submit=Return

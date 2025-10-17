@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=⏻ Power Off
+Comment=Power off the system
+Exec=sh -lc '~/.config/wofi/powermenu.sh Poweroff'
+Icon=system-shutdown
+Terminal=false
+Categories=System;
+NoDisplay=false

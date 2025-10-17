@@ -232,6 +232,13 @@ install_path_block "$HOME/.profile" "$SCRIPT_DIR/powerplant"
 # 5) Link Hyprland and Rofi configs
 link_symlink "$SCRIPT_DIR/hypr" "$HOME/.config/hypr"
 link_symlink "$SCRIPT_DIR/rofi" "$HOME/.config/rofi"
+link_symlink "$SCRIPT_DIR/wofi" "$HOME/.config/wofi"
+
+# 6) Install Wofi power .desktop entries into XDG applications
+if [ -d "$SCRIPT_DIR/wofi/applications" ]; then
+  ensure_dir "$HOME/.local/share/applications"
+  link_symlink "$SCRIPT_DIR/wofi/applications" "$HOME/.local/share/applications/wofi-sys"
+fi
 
 # 6) Link Waybar config (if present in repo)
 link_symlink "$SCRIPT_DIR/waybar" "$HOME/.config/waybar"

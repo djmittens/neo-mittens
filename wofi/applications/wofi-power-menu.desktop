@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=⏻ Power Menu
+Comment=Show power options (Lock, Suspend, Reboot, Poweroff, Logout)
+Exec=sh -lc '~/.config/wofi/powermenu.sh'
+Icon=system-shutdown
+Terminal=false
+Categories=System;
+NoDisplay=false

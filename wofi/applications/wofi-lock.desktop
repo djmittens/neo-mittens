@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name= Lock Screen
+Comment=Lock the session
+Exec=sh -lc '~/.config/wofi/powermenu.sh Lock'
+Icon=system-lock-screen
+Terminal=false
+Categories=System;
+NoDisplay=false
