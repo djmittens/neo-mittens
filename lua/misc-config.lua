@@ -97,6 +97,11 @@ vim.api.nvim_create_autocmd({ 'InsertLeavePre' }, {
   command = "set number | set rnu",
 })
 
+-- Terminal UX tweaks
+vim.api.nvim_command("autocmd TermOpen * setlocal nonumber")
+vim.api.nvim_command("autocmd TermOpen * setlocal norelativenumber")
+vim.api.nvim_command("autocmd TermEnter * setlocal signcolumn=no")
+
 
 -- Function to get the current git branch name
 local function get_git_branch()

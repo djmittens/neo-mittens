@@ -1,0 +1,17 @@
+#!/bin/bash
+
+WALL_DIR="$HOME/Pictures/Waifu"
+INTERVAL=300  # seconds
+TRANSITION="random"
+
+# Start swww daemon if not running
+pgrep -x swww-daemon >/dev/null || swww-daemon 2>/dev/null&
+
+# Preload images
+swww img "$(find "$WALL_DIR" -type f | shuf -n 1)" --resize fit --transition-type $TRANSITION 2>/dev/null
+
+
+while true; do
+    sleep $INTERVAL
+    swww img "$(find "$WALL_DIR" -type f | shuf -n 1)" --resize fit --transition-type $TRANSITION 2>/dev/null
+done

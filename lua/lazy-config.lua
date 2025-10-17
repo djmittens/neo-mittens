@@ -14,15 +14,10 @@ end
 vim.opt.rtp:prepend(lazypath)
 require("lazy").setup({
   -- LSP
-  { -- optional completion source for require statements and module annotations
+  { -- completion + Lua dev types
     "hrsh7th/nvim-cmp",
-    opts = function(_, opts)
-      opts.sources = opts.sources or {}
-      table.insert(opts.sources, {
-        name = "lazydev",
-        group_index = 0, -- set group index to 0 to skip loading LuaLS completions
-      })
-    end,
+    main = "neo-mittens.plugins.cmp",
+    config = true,
     dependencies = {
       {
         "folke/lazydev.nvim",
@@ -40,7 +35,7 @@ require("lazy").setup({
       },
     }
   },
-  { 'neovim/nvim-lspconfig' },
+  { 'neovim/nvim-lspconfig', config = function() require('neo-mittens.plugins.lsp').on_lsp_attach() end },
   { 'hrsh7th/cmp-nvim-lsp' },
   {
     'L3MON4D3/LuaSnip',
@@ -68,13 +63,13 @@ require("lazy").setup({
       },
       "neovim/nvim-lspconfig",
     },
+    config = function()
+      require('neo-mittens.plugins.lsp').mason_setup()
+    end,
   },
   { 'saadparwaiz1/cmp_luasnip', },
-  { 'scalameta/nvim-metals',    dependencies = { "nvim-lua/plenary.nvim" } },
-  {
-    "nvim-treesitter/nvim-treesitter",
-    build = ":TSUpdate",
-  },
+  { 'scalameta/nvim-metals', dependencies = { 'nvim-lua/plenary.nvim' }, main = 'neo-mittens.plugins.metals', config = true },
+  { "nvim-treesitter/nvim-treesitter", build = ":TSUpdate", main = 'neo-mittens.plugins.treesitter', config = true },
   {
     "nvim-treesitter/nvim-treesitter-context",
     dependencies = { 'nvim-treesitter/nvim-treesitter' },
@@ -174,34 +169,23 @@ require("lazy").setup({
         },
       }
       require('telescope').load_extension("fzf") -- Optional: load fzf for better performance
+      pcall(function() require('neo-mittens.plugins.telescope').setup_keymaps() end)
     end,
   },
   -- Random bullshit
   -- { "folke/which-key.nvim" }, -- Havent needed this in a long time
 
 
-  {
-    "ThePrimeagen/harpoon",
-    branch = "harpoon2",
-    dependencies = { "nvim-lua/plenary.nvim" }
-  },
-  { "mbbill/undotree" },                     -- Havent figured out how to use this effectively yet. Maybe not worth having it around
-  { 'dstein64/nvim-scrollview' },            -- Code map on the right , might be useful for marks and errors
-  { "lukas-reineke/indent-blankline.nvim" }, -- rainbow guides for nesting. kinda useful
+  { "ThePrimeagen/harpoon", branch = "harpoon2", dependencies = { "nvim-lua/plenary.nvim" }, main = 'neo-mittens.plugins.harpoon', config = true },
+  { "mbbill/undotree", main = 'neo-mittens.plugins.undotree', config = true },
+  { 'dstein64/nvim-scrollview', main = 'neo-mittens.plugins.scrollview', config = true },
+  { "lukas-reineke/indent-blankline.nvim", main = 'neo-mittens.plugins.indent', config = true },
   {
     "Fildo7525/pretty_hover",
     event = "LspAttach",
     opts = {}
   },
-  {
-    'stevearc/oil.nvim',
-    ---@module 'oil'
-    ---@type oil.SetupOpts
-    opts = {},
-    -- Optional dependencies
-    -- dependencies = { { "echasnovski/mini.icons", opts = {} } },
-    dependencies = { "nvim-tree/nvim-web-devicons" }, -- use if prefer nvim-web-devicons
-  },
+  { 'stevearc/oil.nvim', dependencies = { "nvim-tree/nvim-web-devicons" }, main = 'neo-mittens.plugins.oil', config = true },
   { 'echasnovski/mini.pairs',     version = '*',  config = function() require('mini.pairs').setup() end },
   {
     'echasnovski/mini.surround',
@@ -325,7 +309,7 @@ require("lazy").setup({
   },
 
   -- Git Support
-  { "lewis6991/gitsigns.nvim" }, -- Gutter help for git changes, very useful for comparing code
+  { "lewis6991/gitsigns.nvim", main = 'neo-mittens.plugins.gitsigns', config = true },
 
   {
     "NeogitOrg/neogit",
@@ -362,8 +346,8 @@ require("lazy").setup({
   -- { 'tpope/vim-rhubarb' },       -- Extension for fugitive specifically for github, eg open stuff in browsers
 
   -- Debugger Support -- is this even a good idea? maybe for scala...
-  { 'mfussenegger/nvim-dap',  dependencies = { "nvim-neotest/nvim-nio" } }, -- debugging adapter for a protocol
-  { 'rcarriga/nvim-dap-ui' },                                               -- UI for debugging with the adapter. this is very situational
+  { 'mfussenegger/nvim-dap',  dependencies = { "nvim-neotest/nvim-nio" } },
+  { 'rcarriga/nvim-dap-ui', main = 'neo-mittens.plugins.dap', config = true },
   {
     'jay-babu/mason-nvim-dap.nvim',
     config = function()
@@ -375,10 +359,7 @@ require("lazy").setup({
   },
 
   -- Status line mostly for scala support
-  {
-    'nvim-lualine/lualine.nvim',
-    dependencies = { 'nvim-tree/nvim-web-devicons' }
-  },
+  { 'nvim-lualine/lualine.nvim', dependencies = { 'nvim-tree/nvim-web-devicons' }, main = 'neo-mittens.plugins.lualine', config = true },
   {
     "j-hui/fidget.nvim",
     opts = {
