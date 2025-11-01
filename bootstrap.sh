@@ -6,6 +6,7 @@ set -euo pipefail
 # - Symlinks this repo's Neovim config into ~/.config/nvim
 # - Ensures require("neo-mittens") is present in ~/.config/nvim/init.lua
 # - Adds this repo's powerplant dir to PATH via a managed block in ~/.profile
+# - Disables ohmyzsh auto-title and sets up custom tmux pane titles
 # - Symlinks Hyprland config to ~/.config/hypr and Rofi config to ~/.config/rofi
 # - Symlinks tmux config (both XDG ~/.config/tmux and ~/.tmux.conf)
 # - Ensures TPM exists and installs plugins (Catppuccin via TPM)
@@ -216,6 +217,74 @@ install_tmux_plugins_if_possible() {
   fi
 }
 
+disable_omz_auto_title() {
+  local zshrc_file="$HOME/.zshrc"
+  
+  if [ ! -f "$zshrc_file" ]; then
+    echo "SKIP: ~/.zshrc not found, cannot disable ohmyzsh auto-title"
+    return 0
+  fi
+
+  # Check if DISABLE_AUTO_TITLE is already set (uncommented)
+  if grep -q '^DISABLE_AUTO_TITLE=' "$zshrc_file"; then
+    echo "OK: DISABLE_AUTO_TITLE already set in $zshrc_file"
+    return 0
+  fi
+
+  # Try to uncomment the existing line
+  if grep -q '# DISABLE_AUTO_TITLE="true"' "$zshrc_file"; then
+    sed -i.bak 's/# DISABLE_AUTO_TITLE="true"/DISABLE_AUTO_TITLE="true"/' "$zshrc_file"
+    echo "UPDATE: Uncommented DISABLE_AUTO_TITLE in $zshrc_file"
+    return 0
+  fi
+
+  # If ohmyzsh is detected but no DISABLE_AUTO_TITLE line exists, add it after ZSH_THEME
+  if grep -q 'ZSH_THEME=' "$zshrc_file"; then
+    tmp="$(mktemp)"
+    awk '/^ZSH_THEME=/ {print; print ""; print "# Disable ohmyzsh auto-title to allow custom tmux pane titles"; print "DISABLE_AUTO_TITLE=\"true\""; next} {print}' "$zshrc_file" > "$tmp"
+    cat "$tmp" > "$zshrc_file"
+    echo "ADD: DISABLE_AUTO_TITLE after ZSH_THEME in $zshrc_file"
+  else
+    echo "SKIP: No ohmyzsh detected in $zshrc_file"
+  fi
+}
+
+install_zsh_pane_title_block() {
+  local zshrc_file="$HOME/.zshrc"
+  local script_path="$SCRIPT_DIR/powerplant/set_tmux_pane_title.sh"
+
+  ensure_dir "$(dirname -- "$zshrc_file")"
+
+  local begin='# >>> neo-mittens tmux pane title >>>'
+  local end='# <<< neo-mittens tmux pane title <<<'
+  local block
+  block="${begin}
+if [ -f \"${script_path}\" ]; then
+  source \"${script_path}\"
+  precmd_functions+=(set_tmux_pane_title)
+fi
+${end}"
+
+  if [ -f "$zshrc_file" ] && grep -Fq "$begin" "$zshrc_file"; then
+    # Replace existing managed block
+    tmp="$(mktemp)"
+    awk -v b="$begin" -v e="$end" '
+      BEGIN{inb=0}
+      $0==b {inb=1; next}
+      $0==e {inb=0; next}
+      inb==0 {print}
+    ' "$zshrc_file" >"$tmp"
+    printf "\n%s\n" "$block" >>"$tmp"
+    # Use copy-overwrite to avoid cross-device mv issues
+    cat "$tmp" > "$zshrc_file"
+    echo "UPDATE: Managed tmux pane title block in $zshrc_file"
+  else
+    # Append new block (file may or may not exist)
+    printf "\n%s\n" "$block" >>"$zshrc_file"
+    echo "ADD: Managed tmux pane title block to $zshrc_file"
+  fi
+}
+
 # 1) Ensure config directories exist
 ensure_dir "$HOME/.config"
 ensure_dir "$NVIM_LUA_DIR"
@@ -229,25 +298,31 @@ append_require_if_missing "$NVIM_DIR/init.lua"
 # 4) Add powerplant to PATH via managed block
 install_path_block "$HOME/.profile" "$SCRIPT_DIR/powerplant"
 
-# 5) Link Hyprland and Rofi configs
+# 5) Disable ohmyzsh auto-title to allow custom tmux pane titles
+disable_omz_auto_title
+
+# 6) Add tmux pane title block to ~/.zshrc
+install_zsh_pane_title_block
+
+# 7) Link Hyprland and Rofi configs
 link_symlink "$SCRIPT_DIR/hypr" "$HOME/.config/hypr"
 link_symlink "$SCRIPT_DIR/rofi" "$HOME/.config/rofi"
 link_symlink "$SCRIPT_DIR/wofi" "$HOME/.config/wofi"
 
-# Install Wofi power .desktop entries into XDG applications (for drun)
+# 8) Install Wofi power .desktop entries into XDG applications
 if [ -d "$SCRIPT_DIR/wofi/applications" ]; then
   ensure_dir "$HOME/.local/share/applications"
   link_symlink "$SCRIPT_DIR/wofi/applications" "$HOME/.local/share/applications/wofi-sys"
 fi
 
-# 6) Link Waybar config (if present in repo)
+# 9) Link Waybar config (if present in repo)
 link_symlink "$SCRIPT_DIR/waybar" "$HOME/.config/waybar"
 
-# 7) Link tmux configs (if present in repo)
+# 10) Link tmux configs (if present in repo)
 link_symlink "$SCRIPT_DIR/tmux/config" "$HOME/.config/tmux"
 link_symlink "$SCRIPT_DIR/tmux/tmux.conf" "$HOME/.tmux.conf"
 
-# 8) Ensure TPM + plugins (Catppuccin via TPM in tmux.conf)
+# 11) Ensure TPM + plugins (Catppuccin via TPM in tmux.conf)
 ensure_tpm
 ensure_tmux_tpm_block
 install_tmux_plugins_if_possible

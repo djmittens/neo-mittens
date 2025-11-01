@@ -16,6 +16,7 @@ vim.keymap.set("n", "<leader>m", ":marks<CR>")
 vim.keymap.set({ 'n', 'v' }, "<leader>y", "\"+y")
 vim.keymap.set({ 'n', 'v' }, "<leader>p", "\"+p")
 vim.keymap.set("", "<leader>w", ":w<CR>")
+vim.keymap.set("", "<leader>e", ":e<CR>")
 vim.keymap.set("", "<leader>x", ":x<CR>")
 vim.keymap.set("", "<leader>n", ":noh<CR>")
 
@@ -87,15 +88,15 @@ vim.cmd.highlight({ "SignColumn", "guibg=NONE" })  -- or you can also set it to 
 vim.cmd.highlight({ "FloatBorder", "guibg=NONE" }) -- this is a hack for some themes, for telescope and so on
 
 -- Relative line number settings
-vim.o.relativenumber = true
-vim.api.nvim_create_autocmd({ 'InsertEnter' }, {
-  pattern = { "*.*" },
-  command = "set nornu | set number",
-})
-vim.api.nvim_create_autocmd({ 'InsertLeavePre' }, {
-  pattern = { "*.*" },
-  command = "set number | set rnu",
-})
+-- vim.o.relativenumber = true
+-- vim.api.nvim_create_autocmd({ 'InsertEnter' }, {
+--   pattern = { "*.*" },
+--   command = "set nornu | set number",
+-- })
+-- vim.api.nvim_create_autocmd({ 'InsertLeavePre' }, {
+--   pattern = { "*.*" },
+--   command = "set number | set rnu",
+-- })
 
 -- Terminal UX tweaks
 vim.api.nvim_command("autocmd TermOpen * setlocal nonumber")
