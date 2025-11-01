@@ -1,8 +1,8 @@
 [Desktop Entry]
 Type=Application
-Name=⏼ Suspend
+Name=Suspend
 Comment=Suspend the system
-Exec=sh -lc '~/.config/wofi/powermenu.sh Suspend'
+Exec=sh -lc 'systemctl suspend'
 Icon=system-suspend
 Terminal=false
 Categories=System;

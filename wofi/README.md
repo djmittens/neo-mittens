@@ -4,7 +4,6 @@ Overview
 - Styled launcher using Catppuccin Mocha colors (style.css).
 - Sensible defaults (config) with fuzzy matching, icons, and compact width.
 - Extra utilities wired for Wayland:
-  - powermenu.sh: Lock/Suspend/Reboot/Poweroff/Logout with confirms.
   - clipboard.sh: Clipboard history via cliphist → wl-copy/xclip.
   - emoji.sh: Emoji picker (full Unicode list via update_emojis.sh), copies and (optionally) types.
   - calc.sh: Simple calculator prompt using qalc (or bc -l).
@@ -41,9 +40,7 @@ Usage
 - Run prompt: `wofi --show run`
 - Window switcher: `wofi --show window`
 - SSH: `wofi --show ssh`
-- Power menu: `~/.config/wofi/powermenu.sh`
-- Power bar (horizontal buttons at bottom): `~/.config/wofi/powerbar.sh`
-  - Clipboard: `~/.config/wofi/clipboard.sh`
+- Clipboard: `~/.config/wofi/clipboard.sh`
 - Emoji picker: `~/.config/wofi/emoji.sh [--type|--copy]`
   - First run may auto-generate `emojis.tsv` if missing
   - To refresh to the latest Unicode list: `~/.config/wofi/update_emojis.sh`
@@ -61,13 +58,7 @@ Hyprland example binds
 - `bind = $mainMod, e, exec, ~/.config/wofi/emoji.sh`  # type emoji if wtype installed
 - `bind = $mainMod, c, exec, ~/.config/wofi/calc.sh`
 - `bind = $mainMod, v, exec, ~/.config/wofi/clipboard.sh`
-- `bind = $mainMod SHIFT, p, exec, ~/.config/wofi/powermenu.sh`
-- `bind = $mainMod, XF86PowerOff, exec, ~/.config/wofi/powerbar.sh`
-
-Power bar notes
-- Appears as a slim horizontal strip at the bottom with clickable buttons.
-- Uses a custom style `powerbar.css` layered over the base theme for larger buttons.
-- Adjust width/height in `powerbar.sh` (e.g., `--height 64`).
+ 
 
 Customization tips
 - Width on ultrawide: set `width=NNN` in `~/.config/wofi/config`.

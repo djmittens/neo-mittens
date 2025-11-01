@@ -1,8 +1,8 @@
 [Desktop Entry]
 Type=Application
-Name= Reboot
+Name=Reboot
 Comment=Reboot the system
-Exec=sh -lc '~/.config/wofi/powermenu.sh Reboot'
+Exec=sh -lc 'systemctl reboot'
 Icon=system-reboot
 Terminal=false
 Categories=System;

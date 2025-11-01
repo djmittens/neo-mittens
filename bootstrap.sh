@@ -234,7 +234,7 @@ link_symlink "$SCRIPT_DIR/hypr" "$HOME/.config/hypr"
 link_symlink "$SCRIPT_DIR/rofi" "$HOME/.config/rofi"
 link_symlink "$SCRIPT_DIR/wofi" "$HOME/.config/wofi"
 
-# 6) Install Wofi power .desktop entries into XDG applications
+# Install Wofi power .desktop entries into XDG applications (for drun)
 if [ -d "$SCRIPT_DIR/wofi/applications" ]; then
   ensure_dir "$HOME/.local/share/applications"
   link_symlink "$SCRIPT_DIR/wofi/applications" "$HOME/.local/share/applications/wofi-sys"
