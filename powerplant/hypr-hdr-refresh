@@ -1,0 +1,161 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Hyprland HDR/washed-out colors refresh helper
+# - Safe mode: only ensures DPMS is on and reapplies current mode
+# - Hard mode: toggles DPMS off/on for all monitors (old behavior)
+# - Reapplies current mode with wlr-randr if available
+# - Restores hyprgamma if present
+
+usage() {
+  cat <<EOF
+Usage: $(basename "$0") [--safe|--hard] [--delay SECONDS] [--reapply] [--nudge-colors] [--restore-gamma]
+
+  --safe            Only turn DPMS on and reapply modes (default)
+  --hard            Power-cycle DPMS off/on before reapplying modes
+  --delay SECONDS   Sleep before actions (default: 2)
+  --reapply         Reapply 'monitor =' lines from hyprland.conf via hyprctl
+  --nudge-colors    For HDR monitors: briefly set sRGB then back to HDR
+  --restore-gamma   Restore hyprgamma profile if hyprgamma is installed
+EOF
+}
+
+get_monitors() {
+  if command -v jq >/dev/null 2>&1; then
+    hyprctl monitors -j | jq -r '.[].name'
+    return
+  fi
+  hyprctl monitors | awk -F': ' '/^Monitor /{print $2}'
+}
+
+find_hypr_config() {
+  if [ -n "${HYPRLAND_CONFIG:-}" ] && [ -f "$HYPRLAND_CONFIG" ]; then
+    printf '%s' "$HYPRLAND_CONFIG"
+    return
+  fi
+  local cfg
+  cfg="${XDG_CONFIG_HOME:-$HOME/.config}/hypr/hyprland.conf"
+  if [ -f "$cfg" ]; then
+    printf '%s' "$cfg"
+    return
+  fi
+  # Fallback: current repo layout if running from source checkout
+  if [ -f "hypr/hyprland.conf" ]; then
+    printf '%s' "hypr/hyprland.conf"
+    return
+  fi
+  return 1
+}
+
+reapply_monitors_from_config() {
+  local cfg
+  cfg=$(find_hypr_config) || return 0
+  # shellcheck disable=SC2002
+  cat "$cfg" | awk '
+    BEGIN { in_block=1 }
+    {
+      s=$0
+      gsub(/^\s+|\s+$/,"",s)
+      if (s ~ /^#/) next
+      if (s ~ /^monitor\s*=/) {
+        # drop leading key and possible spaces, keep the right-hand value
+        sub(/^[^=]*=\s*/, "", s)
+        print s
+      }
+    }
+  ' | while IFS= read -r monitor_line; do
+    [ -n "$monitor_line" ] || continue
+    hyprctl keyword monitor "$monitor_line" || true
+  done
+}
+
+nudge_colors_if_hdr() {
+  local cfg
+  cfg=$(find_hypr_config) || return 0
+  # For any monitor line using HDR, flip to sRGB then back to HDR to force reinit
+  # shellcheck disable=SC2002
+  cat "$cfg" | awk '
+    {
+      s=$0
+      gsub(/^\s+|\s+$/,"",s)
+      if (s ~ /^#/ || s == "") next
+      if (s ~ /^monitor\s*=/) {
+        sub(/^[^=]*=\s*/, "", s)
+        print s
+      }
+    }
+  ' | while IFS= read -r line; do
+    case "$line" in
+      *"cm, hdredid"*|*"cm, hdr"*)
+        # Create an sRGB variant by replacing the colorimetry segment
+        local sdr="${line//cm, hdredid/cm, srgb}"
+        sdr="${sdr//cm, hdr/cm, srgb}"
+        hyprctl keyword monitor "$sdr" || true
+        sleep 0.2
+        hyprctl keyword monitor "$line" || true
+        ;;
+    esac
+  done
+}
+
+main() {
+  local mode="safe"
+  local delay=2
+  local do_reapply=false
+  local do_nudge=false
+  local do_gamma=false
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --safe) mode="safe"; shift ;;
+      --hard) mode="hard"; shift ;;
+      --delay) delay=${2:-2}; shift 2 ;;
+      --reapply) do_reapply=true; shift ;;
+      --nudge-colors) do_nudge=true; shift ;;
+      --restore-gamma) do_gamma=true; shift ;;
+      -h|--help) usage; exit 0 ;;
+      *) echo "Unknown arg: $1" >&2; usage; exit 1 ;;
+    esac
+  done
+
+  # Optional settle time after resume to avoid races
+  sleep "$delay"
+
+  local mons
+  mons=$(get_monitors)
+  [ -n "${mons}" ] || exit 0
+
+  if [[ "$mode" == "hard" ]]; then
+    while read -r m; do
+      [ -n "$m" ] || continue
+      hyprctl dispatch dpms off "$m" || true
+    done <<<"${mons}"
+    sleep 1
+  fi
+
+  while read -r m; do
+    [ -n "$m" ] || continue
+    hyprctl dispatch dpms on "$m" || true
+  done <<<"${mons}"
+
+  if command -v wlr-randr >/dev/null 2>&1; then
+    while read -r m; do
+      [ -n "$m" ] || continue
+      wlr-randr --output "$m" --mode current || true
+    done <<<"${mons}"
+  fi
+
+  if [ "$do_gamma" = true ] && command -v hyprgamma >/dev/null 2>&1; then
+    hyprgamma --restore || true
+  fi
+
+  if [ "$do_reapply" = true ]; then
+    reapply_monitors_from_config || true
+  fi
+
+  if [ "$do_nudge" = true ]; then
+    nudge_colors_if_hdr || true
+  fi
+}
+
+main "$@"
