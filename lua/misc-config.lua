@@ -54,6 +54,7 @@ vim.api.nvim_create_user_command("CopyRelPath", "call setreg('+', expand('%'))",
 vim.keymap.set("n", "<leader>yp", ":CopyRelPath<CR>", { desc = "Copy relative path to current buffer" })
 vim.keymap.set("n", "<leader>v", "`[v`]", { desc = "Select last paste" })
 
+
 vim.o.colorcolumn = "80,120"
 vim.o.cursorline = true
 vim.o.number = true
@@ -77,6 +78,8 @@ vim.o.smartcase = true
 -- vim.o.signcolumn = 'number'
 
 vim.o.wrap = false
+vim.o.modeline = true
+vim.o.modelines = 5
 
 -- So i dont kill my wrist
 vim.keymap.set("i", "jj", "<ESC>")
