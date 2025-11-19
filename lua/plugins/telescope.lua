@@ -22,6 +22,12 @@ function M.setup_keymaps()
   vim.keymap.set('n', '<leader>fd', function() builtin.lsp_definitions(symbol_search_opts) end, {})
   vim.keymap.set('n', '<leader>fs', function() builtin.lsp_document_symbols(symbol_search_opts) end, {})
   vim.keymap.set('n', '<leader>fws', function() builtin.lsp_dynamic_workspace_symbols(symbol_search_opts) end, {})
+
+  -- Essential missing telescope commands
+  vim.keymap.set('n', '<leader>f.', function() builtin.resume() end, { desc = "Resume last telescope search" })
+  vim.keymap.set('n', '<leader>fw', function() builtin.grep_string() end, { desc = "Search current word" })
+  vim.keymap.set('n', '<leader>f/', function() builtin.current_buffer_fuzzy_find() end, { desc = "Fuzzy find in current buffer" })
+  vim.keymap.set('n', '<leader>fO', function() builtin.oldfiles() end, { desc = "Recent files (Old files)" })
 end
 
 return M

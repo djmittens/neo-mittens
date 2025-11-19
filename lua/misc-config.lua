@@ -1,24 +1,30 @@
 vim.cmd.colorscheme("gruvbox")
 
---- HMM are there actual settings i want to use for vscode then ?
-vim.keymap.set("n", "<C-u>", "<C-u>zz")
-vim.keymap.set("n", "<C-d>", "<C-d>zz")
-vim.keymap.set("n", "<C-]>", "<C-]>zz")
-vim.keymap.set("n", "<C-[>", "<C-[>zz")
-vim.keymap.set("n", "<C-o>", "<C-o>zz")
-vim.keymap.set("n", "<C-i>", "<C-i>zz")
-vim.keymap.set("n", "n", "nzz")
-vim.keymap.set("n", "N", "Nzz")
-vim.keymap.set("n", "<leader>ct", ":bd term<C-A><CR>")
-vim.keymap.set("n", "<M-o>", ":LspClangdSwitchSourceHeader<CR>")
-vim.keymap.set("v", "q", ":norm @q<CR>")
-vim.keymap.set("n", "<leader>m", ":marks<CR>")
-vim.keymap.set({ 'n', 'v' }, "<leader>y", "\"+y")
-vim.keymap.set({ 'n', 'v' }, "<leader>p", "\"+p")
-vim.keymap.set("", "<leader>w", ":w<CR>")
-vim.keymap.set("", "<leader>e", ":e<CR>")
-vim.keymap.set("", "<leader>x", ":x<CR>")
-vim.keymap.set("", "<leader>n", ":noh<CR>")
+-- Core navigation improvements - center cursor after jumps
+vim.keymap.set("n", "<C-u>", "<C-u>zz", { desc = "Page up and center" })
+vim.keymap.set("n", "<C-d>", "<C-d>zz", { desc = "Page down and center" })
+vim.keymap.set("n", "<C-]>", "<C-]>zz", { desc = "Jump to tag and center" })
+vim.keymap.set("n", "<C-[>", "<C-[>zz", { desc = "Jump back from tag and center" })
+vim.keymap.set("n", "<C-o>", "<C-o>zz", { desc = "Jump to older position and center" })
+vim.keymap.set("n", "<C-i>", "<C-i>zz", { desc = "Jump to newer position and center" })
+vim.keymap.set("n", "n", "nzz", { desc = "Next search result and center" })
+vim.keymap.set("n", "N", "Nzz", { desc = "Previous search result and center" })
+
+-- Utility commands
+vim.keymap.set("n", "<leader>ct", ":bd term<C-A><CR>", { desc = "Close all terminal buffers" })
+vim.keymap.set("n", "<M-o>", ":LspClangdSwitchSourceHeader<CR>", { desc = "Switch between header/source (C++)" })
+vim.keymap.set("v", "q", ":norm @q<CR>", { desc = "Replay macro q on visual selection" })
+vim.keymap.set("n", "<leader>m", ":marks<CR>", { desc = "Show marks" })
+
+-- Clipboard operations
+vim.keymap.set({ 'n', 'v' }, "<leader>y", "\"+y", { desc = "Yank to system clipboard" })
+vim.keymap.set({ 'n', 'v' }, "<leader>p", "\"+p", { desc = "Paste from system clipboard" })
+
+-- File operations
+vim.keymap.set("", "<leader>w", ":w<CR>", { desc = "Write (save) file" })
+vim.keymap.set("", "<leader>e", ":e<CR>", { desc = "Reload current file" })
+vim.keymap.set("", "<leader>x", ":x<CR>", { desc = "Write and quit" })
+vim.keymap.set("", "<leader>n", ":noh<CR>", { desc = "Clear search highlighting" })
 
 --
 -- this only should work with lua files
@@ -42,9 +48,77 @@ vim.filetype.add({
   }
 })
 
--- Navigating quickfix list n stuff
-vim.keymap.set("", "]q", ":cn<CR>")
-vim.keymap.set("", "[q", ":cp<CR>")
+-- Quickfix navigation - using ]q [q for consistency with vim conventions
+vim.keymap.set("n", "]q", ":cn<CR>zz", { desc = "Next quickfix item" })
+vim.keymap.set("n", "[q", ":cp<CR>zz", { desc = "Previous quickfix item" })
+vim.keymap.set("n", "]Q", ":clast<CR>zz", { desc = "Last quickfix item" })
+vim.keymap.set("n", "[Q", ":cfirst<CR>zz", { desc = "First quickfix item" })
+
+-- Quickfix window management
+vim.keymap.set("n", "<leader>qo", ":copen<CR>", { desc = "Open quickfix window" })
+vim.keymap.set("n", "<leader>qc", ":cclose<CR>", { desc = "Close quickfix window" })
+vim.keymap.set("n", "<leader>qt", function()
+  local qf_exists = false
+  for _, win in pairs(vim.fn.getwininfo()) do
+    if win.quickfix == 1 then
+      qf_exists = true
+      break
+    end
+  end
+  if qf_exists then
+    vim.cmd("cclose")
+  else
+    vim.cmd("copen")
+  end
+end, { desc = "Toggle quickfix window" })
+
+-- Quickfix history navigation
+vim.keymap.set("n", "<leader>qh", ":colder<CR>:copen<CR>", { desc = "Older quickfix list" })
+vim.keymap.set("n", "<leader>ql", ":cnewer<CR>:copen<CR>", { desc = "Newer quickfix list" })
+
+-- Populate quickfix with searches
+vim.keymap.set("n", "<leader>qw", function()
+  local word = vim.fn.expand("<cword>")
+  vim.cmd("silent grep! " .. word)
+  vim.cmd("copen")
+end, { desc = "Search word under cursor to quickfix" })
+
+vim.keymap.set("n", "<leader>q/", function()
+  local pattern = vim.fn.getreg("/")
+  if pattern ~= "" then
+    vim.cmd("silent grep! " .. vim.fn.escape(pattern, "\\"))
+    vim.cmd("copen")
+  end
+end, { desc = "Search last pattern to quickfix" })
+
+-- Location list navigation (window-local quickfix)
+vim.keymap.set("n", "]l", ":lnext<CR>zz", { desc = "Next location list item" })
+vim.keymap.set("n", "[l", ":lprev<CR>zz", { desc = "Previous location list item" })
+vim.keymap.set("n", "]L", ":llast<CR>zz", { desc = "Last location list item" })
+vim.keymap.set("n", "[L", ":lfirst<CR>zz", { desc = "First location list item" })
+vim.keymap.set("n", "<leader>lo", ":lopen<CR>", { desc = "Open location list" })
+vim.keymap.set("n", "<leader>lc", ":lclose<CR>", { desc = "Close location list" })
+vim.keymap.set("n", "<leader>lt", function()
+  local win_id = vim.fn.getloclist(0, { winid = 0 }).winid
+  if win_id ~= 0 then
+    vim.cmd("lclose")
+  else
+    vim.cmd("lopen")
+  end
+end, { desc = "Toggle location list" })
+
+-- Make quickfix windows better
+vim.api.nvim_create_autocmd("FileType", {
+  pattern = "qf",
+  callback = function()
+    -- Allow q to close quickfix window
+    vim.keymap.set("n", "q", ":close<CR>", { buffer = true, silent = true })
+    -- Make <CR> open and switch to window
+    vim.keymap.set("n", "<CR>", "<CR>:cclose<CR>", { buffer = true, silent = true })
+    -- Preview with p
+    vim.keymap.set("n", "p", "<CR><C-w>p", { buffer = true, silent = true })
+  end
+})
 
 -- Check the current files changes against whats on the file system, before storing
 vim.api.nvim_create_user_command("Fdiff", "w !diff % -", {})
@@ -66,8 +140,9 @@ vim.o.tabstop = 2
 vim.o.shiftwidth = 2
 vim.o.timeoutlen = 650
 
-vim.keymap.set("n", "<leader>o", "o<Esc>")
-vim.keymap.set("n", "<leader>O", "O<Esc>")
+-- Quick line insertion without entering insert mode
+vim.keymap.set("n", "<leader>o", "o<Esc>", { desc = "Insert line below" })
+vim.keymap.set("n", "<leader>O", "O<Esc>", { desc = "Insert line above" })
 
 -- tree style listings by default
 vim.g.netrw_liststyle = 0
@@ -78,8 +153,8 @@ vim.o.smartcase = true
 
 vim.o.wrap = false
 
--- So i dont kill my wrist
-vim.keymap.set("i", "jj", "<ESC>")
+-- Quick escape from insert mode
+vim.keymap.set("i", "jj", "<ESC>", { desc = "Exit insert mode" })
 
 -- This makes shit transparent so i can see the waifu's in the background
 -- :hi normal guibg=NONE
@@ -116,7 +191,7 @@ local function insert_todo()
   vim.api.nvim_put({ 'TODO(' .. get_git_branch() .. '): ' }, '', true, true)
 end
 
-vim.keymap.set({ 'i', 'n' }, '<M-t>', function() insert_todo() end, { noremap = true, silent = true })
+vim.keymap.set({ 'i', 'n' }, '<M-t>', function() insert_todo() end, { noremap = true, silent = true, desc = "Insert TODO with git branch" })
 
 vim.o.grepprg = 'rg --vimgrep --hidden --glob "!.git"'
 
@@ -159,12 +234,12 @@ end
 
 
 vim.keymap.set({ 'v', 'n' }, '<leader>h', function() highlight_lines("LineHighlightPurple") end,
-  { noremap = true, silent = false })
+  { noremap = true, silent = false, desc = "Highlight line/selection (purple)" })
 vim.keymap.set({ 'v', 'n' }, '<leader>hg', function() highlight_lines("LineHighlightGreen") end,
-  { noremap = true, silent = false })
+  { noremap = true, silent = false, desc = "Highlight line/selection (green)" })
 vim.keymap.set({ 'v', 'n' }, '<leader>hc', function() highlight_lines("LineHighlightCyan") end,
-  { noremap = true, silent = false })
-vim.keymap.set({ 'n' }, '<leader>c', function() vim.fn.clearmatches() end, { noremap = true, silent = true })
+  { noremap = true, silent = false, desc = "Highlight line/selection (cyan)" })
+vim.keymap.set({ 'n' }, '<leader>c', function() vim.fn.clearmatches() end, { noremap = true, silent = true, desc = "Clear all highlights" })
 
 local function surround_last_edit(txt)
   local start_pos = vim.fn.getpos("'[")
@@ -173,7 +248,7 @@ local function surround_last_edit(txt)
   vim.api.nvim_buf_set_text(0, end_pos[2] - 1, end_pos[3], end_pos[2] - 1, end_pos[3], { txt })
 end
 
-vim.keymap.set({ 'n' }, '<leader><C-q>', function() surround_last_edit('"') end, { noremap = true, silent = true })
+vim.keymap.set({ 'n' }, '<leader><C-q>', function() surround_last_edit('"') end, { noremap = true, silent = true, desc = "Surround last edit with quotes" })
 
 -- List of quote patterns to cycle through
 local quote_patterns = {
@@ -255,13 +330,46 @@ local function cycle_quote_style()
   vim.api.nvim_set_current_line(new_line)
   -- vim.api.nvim_win_set_cursor(0, {row, right_pos + 1})
 end
-vim.keymap.set({ 'n' }, '<C-q>', function() cycle_quote_style() end, { noremap = true, silent = true })
+vim.keymap.set({ 'n' }, '<C-q>', function() cycle_quote_style() end, { noremap = true, silent = true, desc = "Cycle quote style (', \", `)" })
 
 
 -- Create an alias for helpgrep as Hg
 vim.api.nvim_create_user_command('Hg', function(opts)
   vim.cmd("helpgrep " .. table.concat(opts.fargs, " "))
 end, { nargs = "+" })
+
+-- Visual Git Time Machine - simplified
+-- File history (shows timeline you can navigate with tab)
+vim.keymap.set('n', '<leader>gh', ':DiffviewFileHistory %<CR>', { desc = "File history timeline" })
+
+-- Selected lines history (visual mode)
+vim.keymap.set('v', '<leader>gh', ":'<,'>DiffviewFileHistory<CR>", { desc = "Selection history timeline" })
+
+-- Compare branches visually
+vim.keymap.set('n', '<leader>gd', ':DiffviewOpen ', { desc = "Visual branch diff" })
+
+-- Close diffview
+vim.keymap.set('n', '<leader>gq', ':DiffviewClose<CR>', { desc = "Close diffview" })
+
+-- PR workflow helpers
+vim.keymap.set('n', '<leader>gpr', function()
+  -- Show all changes on current branch vs main
+  vim.cmd('DiffviewOpen main...HEAD')
+end, { desc = "Review current PR changes" })
+
+vim.keymap.set('n', '<leader>gpl', function()
+  -- Show commit list for current branch (useful for seeing what's in your PR)
+  require('telescope.builtin').git_commits({
+    git_command = { "git", "log", "--oneline", "--no-merges", "main..HEAD" }
+  })
+end, { desc = "List PR commits" })
+
+-- Tab management
+vim.keymap.set('n', '<leader>tc', ':tabclose<CR>', { desc = "Close tab" })
+vim.keymap.set('n', '<leader>tn', ':tabnew<CR>', { desc = "New tab" })
+vim.keymap.set('n', '<leader>to', ':tabonly<CR>', { desc = "Close all other tabs" })
+vim.keymap.set('n', ']t', ':tabnext<CR>', { desc = "Next tab" })
+vim.keymap.set('n', '[t', ':tabprevious<CR>', { desc = "Previous tab" })
 
 if vim.g.neovide then
   -- Put anything you want to happen only in Neovide here
@@ -333,14 +441,15 @@ end
 
 -- Meta(windows) key gets eaten by tmux / terminal, so have to use ALT ... Fun
 --
+-- Smart navigation - works across nvim splits, tmux panes, and hyprland windows
 if env.in_tmux and env.in_hyprland then
-  vim.keymap.set({ 'i', 'n' }, '<M-h>', function() tmux_nav('h') end, { noremap = true, silent = true })
-  vim.keymap.set({ 'i', 'n' }, '<M-j>', function() tmux_nav('j') end, { noremap = true, silent = true })
-  vim.keymap.set({ 'i', 'n' }, '<M-k>', function() tmux_nav('k') end, { noremap = true, silent = true })
-  vim.keymap.set({ 'i', 'n' }, "<M-l>", function() tmux_nav('l') end, { noremap = true, silent = true })
+  vim.keymap.set({ 'i', 'n' }, '<M-h>', function() tmux_nav('h') end, { noremap = true, silent = true, desc = "Navigate left (nvim/tmux/hyprland)" })
+  vim.keymap.set({ 'i', 'n' }, '<M-j>', function() tmux_nav('j') end, { noremap = true, silent = true, desc = "Navigate down (nvim/tmux/hyprland)" })
+  vim.keymap.set({ 'i', 'n' }, '<M-k>', function() tmux_nav('k') end, { noremap = true, silent = true, desc = "Navigate up (nvim/tmux/hyprland)" })
+  vim.keymap.set({ 'i', 'n' }, "<M-l>", function() tmux_nav('l') end, { noremap = true, silent = true, desc = "Navigate right (nvim/tmux/hyprland)" })
 else
-  vim.keymap.set({ 'i', 'n' }, '<M-h>', function() nvim_nav('h') end, { noremap = true, silent = true })
-  vim.keymap.set({ 'i', 'n' }, '<M-j>', function() nvim_nav('j') end, { noremap = true, silent = true })
-  vim.keymap.set({ 'i', 'n' }, '<M-k>', function() nvim_nav('k') end, { noremap = true, silent = true })
-  vim.keymap.set({ 'i', 'n' }, '<M-l>', function() nvim_nav('l') end, { noremap = true, silent = true })
+  vim.keymap.set({ 'i', 'n' }, '<M-h>', function() nvim_nav('h') end, { noremap = true, silent = true, desc = "Navigate left" })
+  vim.keymap.set({ 'i', 'n' }, '<M-j>', function() nvim_nav('j') end, { noremap = true, silent = true, desc = "Navigate down" })
+  vim.keymap.set({ 'i', 'n' }, '<M-k>', function() nvim_nav('k') end, { noremap = true, silent = true, desc = "Navigate up" })
+  vim.keymap.set({ 'i', 'n' }, '<M-l>', function() nvim_nav('l') end, { noremap = true, silent = true, desc = "Navigate right" })
 end

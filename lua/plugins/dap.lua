@@ -13,17 +13,17 @@ function M.setup()
 
   local function set_debug_keymaps()
     local o = { noremap = true, silent = true }
-    vim.keymap.set('n', '<leader>n', dap.step_over, o)
-    vim.keymap.set('n', '<leader>s', dap.step_into, o)
-    vim.keymap.set('n', '<leader>o', dap.step_out, o)
-    vim.keymap.set('n', '<leader>c', dap.continue, o)
-    vim.keymap.set('n', '<leader>b', dap.toggle_breakpoint, o)
-    vim.keymap.set('n', '<leader>r', dap.restart, o)
-    vim.keymap.set('n', '<leader>q', dap.terminate, o)
+    vim.keymap.set('n', 's', dap.step_over, o)      -- step over (s = step, you won't substitute during debug)
+    vim.keymap.set('n', 'i', dap.step_into, o)      -- step into (i = in, you won't insert during debug)
+    vim.keymap.set('n', 'o', dap.step_out, o)       -- step out (o = out, you won't open line during debug)
+    vim.keymap.set('n', 'c', dap.continue, o)       -- continue (c = continue, you won't change during debug)
+    vim.keymap.set('n', 'b', dap.toggle_breakpoint, o) -- breakpoint
+    vim.keymap.set('n', 'r', dap.restart, o)        -- restart (you won't replace char during debug)
+    vim.keymap.set('n', 'q', dap.terminate, o)      -- quit
   end
   local function clear_debug_keymaps()
-    for _, key in ipairs({ 'n', 's', 'o', 'c', 'b', 'r', 'q' }) do
-      pcall(vim.keymap.del, 'n', '<leader>' .. key)
+    for _, key in ipairs({ 's', 'i', 'o', 'c', 'b', 'r', 'q' }) do
+      pcall(vim.keymap.del, 'n', key)
     end
   end
 

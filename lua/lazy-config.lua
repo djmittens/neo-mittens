@@ -205,7 +205,16 @@ require("lazy").setup({
   },
   { 'echasnovski/mini.comment',   version = '*',  config = function() require('mini.comment').setup() end },
   { 'echasnovski/mini.splitjoin', version = '*',  config = function() require('mini.splitjoin').setup() end },
-  { 'echasnovski/mini.operators', version = '*',  config = function() require('mini.operators').setup({ replace = { prefix = 'cr' } }) end },
+  { 'echasnovski/mini.operators', version = '*',  config = function()
+      require('mini.operators').setup({
+        replace = { prefix = 'gp' },  -- go paste over (gr conflicts with LSP references)
+        exchange = { prefix = 'gx' }, -- go exchange (swap text)
+        sort = { prefix = 'gz' },     -- go sort (gS conflicts with splitjoin)
+        multiply = { prefix = 'gm' }, -- go multiply (duplicate)
+        evaluate = { prefix = '' },   -- disabled (rarely useful)
+      })
+    end
+  },
   -- {
   --   "nvim-tree/nvim-tree.lua",
   --   version = "*",
