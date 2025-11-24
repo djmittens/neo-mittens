@@ -46,5 +46,58 @@ function M.mason_setup()
   end
 end
 
+-- Vulkan documentation helper
+-- Opens official Vulkan docs for function under cursor with gK
+vim.api.nvim_create_autocmd("BufEnter", {
+  pattern = {"*.c", "*.h", "*.cpp", "*.hpp"},
+  callback = function()
+    local bufnr = vim.api.nvim_get_current_buf()
+    -- Check first 50 lines for Vulkan-related content
+    local lines = vim.api.nvim_buf_get_lines(bufnr, 0, math.min(50, vim.api.nvim_buf_line_count(bufnr)), false)
+    local content = table.concat(lines, "\n")
+
+    -- Detect if this is a Vulkan-related file
+    if content:match("#include.*vulkan") or
+       content:match("#include.*volk") or
+       content:match("vk[A-Z]") or
+       content:match("Vk[A-Z]") then
+
+      vim.keymap.set('n', 'gK', function()
+        local word = vim.fn.expand("<cword>")
+        if word:match("^[vV]k") then
+          local url = "https://registry.khronos.org/vulkan/specs/1.3-extensions/man/html/" .. word .. ".html"
+          vim.fn.system("xdg-open " .. url)
+          vim.notify("Vulkan docs: " .. word, vim.log.levels.INFO)
+        else
+          vim.notify("Not a Vulkan function: " .. word, vim.log.levels.WARN)
+        end
+      end, { buffer = bufnr, desc = "Open Vulkan docs" })
+    end
+  end
+})
+
+-- Command to search Vulkan spec
+vim.api.nvim_create_user_command('VkSpec', function(opts)
+  local query = opts.args ~= "" and opts.args or vim.fn.expand("<cword>")
+  local url = "https://registry.khronos.org/vulkan/specs/1.3-extensions/html/vkspec.html#" .. query
+  vim.fn.system("xdg-open " .. url)
+  vim.notify("Opening Vulkan spec: " .. query, vim.log.levels.INFO)
+end, { nargs = '?', desc = 'Search Vulkan specification' })
+
+-- Enhanced syntax highlighting for common Vulkan types
+vim.api.nvim_create_autocmd("FileType", {
+  pattern = {"c", "cpp"},
+  callback = function()
+    vim.cmd([[
+      syn keyword cType VkResult VkInstance VkDevice VkQueue VkCommandBuffer
+      syn keyword cType VkBuffer VkImage VkImageView VkPipeline VkRenderPass
+      syn keyword cType VkFramebuffer VkSemaphore VkFence VkDeviceMemory
+      syn keyword cType VkSurfaceKHR VkSwapchainKHR VkExtent2D VkExtent3D
+      syn keyword cType VkPhysicalDevice VkCommandPool VkDescriptorSet
+      syn keyword cType VkShaderModule VkPipelineLayout VkDescriptorSetLayout
+    ]])
+  end
+})
+
 return M
 
