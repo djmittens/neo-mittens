@@ -354,15 +354,20 @@ require("lazy").setup({
   -- { 'tpope/vim-fugitive' },      -- This is the greatest git plugin for vim
   -- { 'tpope/vim-rhubarb' },       -- Extension for fugitive specifically for github, eg open stuff in browsers
 
-  -- Debugger Support -- is this even a good idea? maybe for scala...
-  { 'mfussenegger/nvim-dap',  dependencies = { "nvim-neotest/nvim-nio" } },
-  { 'rcarriga/nvim-dap-ui', main = 'neo-mittens.plugins.dap', config = true },
+  -- Debugger Support
+  { 'mfussenegger/nvim-dap', dependencies = { "nvim-neotest/nvim-nio" } },
+  {
+    'rcarriga/nvim-dap-ui',
+    dependencies = { 'mfussenegger/nvim-dap', 'nvim-neotest/nvim-nio' },
+    config = function()
+      require('neo-mittens.plugins.dap').setup()
+    end
+  },
   {
     'jay-babu/mason-nvim-dap.nvim',
     config = function()
       require("mason-nvim-dap").setup({
         ensure_installed = { 'stylua', 'jq', 'cppdbg' },
-        handlers = {}, -- sets up dap in the predefined manner
       })
     end
   },

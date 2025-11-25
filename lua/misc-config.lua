@@ -1,5 +1,8 @@
 vim.cmd.colorscheme("gruvbox")
 
+-- Auto-source project-local config (.nvim.lua)
+vim.o.exrc = true
+
 -- Core navigation improvements - center cursor after jumps
 vim.keymap.set("n", "<C-u>", "<C-u>zz", { desc = "Page up and center" })
 vim.keymap.set("n", "<C-d>", "<C-d>zz", { desc = "Page down and center" })

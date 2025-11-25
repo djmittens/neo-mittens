@@ -84,20 +84,5 @@ vim.api.nvim_create_user_command('VkSpec', function(opts)
   vim.notify("Opening Vulkan spec: " .. query, vim.log.levels.INFO)
 end, { nargs = '?', desc = 'Search Vulkan specification' })
 
--- Enhanced syntax highlighting for common Vulkan types
-vim.api.nvim_create_autocmd("FileType", {
-  pattern = {"c", "cpp"},
-  callback = function()
-    vim.cmd([[
-      syn keyword cType VkResult VkInstance VkDevice VkQueue VkCommandBuffer
-      syn keyword cType VkBuffer VkImage VkImageView VkPipeline VkRenderPass
-      syn keyword cType VkFramebuffer VkSemaphore VkFence VkDeviceMemory
-      syn keyword cType VkSurfaceKHR VkSwapchainKHR VkExtent2D VkExtent3D
-      syn keyword cType VkPhysicalDevice VkCommandPool VkDescriptorSet
-      syn keyword cType VkShaderModule VkPipelineLayout VkDescriptorSetLayout
-    ]])
-  end
-})
-
 return M
 
