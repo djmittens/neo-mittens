@@ -55,56 +55,7 @@ function M.setup()
     api.nvim_set_keymap('n', 'K', '<Cmd>lua require("dap.ui.widgets").hover()<CR>', { silent = true })
   end
 
-  -- Track last used config for quick restart
-  local last_config = nil
-
-  vim.keymap.set('n', '<leader>r', function()
-    local ft = vim.bo.filetype
-    local cfgs = dap.configurations.vscode or dap.configurations[ft]
-    if not (cfgs and cfgs[1]) then
-      return vim.notify("No DAP configs for filetype '" .. ft .. "'", vim.log.levels.WARN)
-    end
-    -- Use last config if set, otherwise first
-    local cfg = vim.deepcopy(last_config or cfgs[1])
-    if dap.session() then
-      local key = 'restart_config'
-      local function relaunch()
-        dap.listeners.after.event_terminated[key] = nil
-        dap.listeners.after.event_exited[key] = nil
-        dap.run(cfg)
-      end
-      dap.listeners.after.event_terminated[key] = relaunch
-      dap.listeners.after.event_exited[key] = relaunch
-      return dap.terminate()
-    end
-    -- Build first, then run
-    vim.fn.jobstart('make build', {
-      on_exit = function(_, code)
-        if code == 0 then
-          vim.schedule(function() dap.run(cfg) end)
-        else
-          vim.notify('Build failed', vim.log.levels.ERROR)
-        end
-      end,
-    })
-  end, { desc = 'Debug: Build and run/restart' })
-
-  vim.keymap.set('n', '<leader>R', function()
-    local ft = vim.bo.filetype
-    local cfgs = dap.configurations.vscode or dap.configurations[ft]
-    if not (cfgs and cfgs[1]) then
-      return vim.notify("No DAP configs for filetype '" .. ft .. "'", vim.log.levels.WARN)
-    end
-    vim.ui.select(cfgs, {
-      prompt = 'Select debug config:',
-      format_item = function(cfg) return cfg.name end,
-    }, function(cfg)
-      if cfg then
-        last_config = cfg
-        dap.run(vim.deepcopy(cfg))
-      end
-    end)
-  end, { desc = 'Debug: Pick config' })
+  -- <leader>r and <leader>R are handled by debug.lua (unified gdb/dap interface)
 
   local debug_ui_open = false
   vim.keymap.set('n', '<leader>du', function()

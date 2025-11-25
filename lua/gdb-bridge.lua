@@ -27,8 +27,6 @@ local function send_to_gdb(cmd)
     return
   end
 
-  -- Debug: log what we're sending
-  print('gdb: ' .. cmd)
 
   -- Use async job to avoid blocking on FIFO
   -- timeout after 1 second in case gdb isn't reading
@@ -185,10 +183,8 @@ vim.api.nvim_create_user_command('Gc', function() M.breakpoint_clear() end, { de
 vim.api.nvim_create_user_command('Gp', function() M.print_word() end, { desc = 'Print word under cursor in gdb' })
 vim.api.nvim_create_user_command('GdbRun', function() M.pick_and_start() end, { desc = 'Run gdb with config' })
 
--- Auto-start listening on project socket if not already
+-- Always start project socket for gdb communication
 local socket_path = M.get_socket_path()
-if not vim.v.servername or vim.v.servername == '' then
-  vim.fn.serverstart(socket_path)
-end
+vim.fn.serverstart(socket_path)
 
 return M

@@ -152,7 +152,7 @@ vim.g.netrw_liststyle = 0
 vim.o.splitright = true
 vim.o.ignorecase = true
 vim.o.smartcase = true
--- vim.o.signcolumn = 'number'
+vim.o.signcolumn = 'yes'  -- Single sign column normally, debug.lua sets yes:2 when debugging
 
 vim.o.wrap = false
 

@@ -121,16 +121,10 @@ require("lazy").setup({
   },
   {
       "OXY2DEV/markview.nvim",
-      lazy = false,
+      ft = "markdown",  -- Lazy-load only for markdown files
 
-     -- For `nvim-treesitter` users.
+      -- For `nvim-treesitter` users.
       priority = 49,
-
-      -- For blink.cmp's completion
-      -- source
-      -- dependencies = {
-      --     "saghen/blink.cmp"
-      -- },
   },
   {
     'nvim-telescope/telescope.nvim',
@@ -148,7 +142,7 @@ require("lazy").setup({
           layout_strategy = 'flex',
           layout_config = { height = 0.95 },
           vimgrep_arguments = {
-            "rga",
+            "rg",  -- Use rg instead of rga (ripgrep-all is slower)
             "--color=never",
             "--no-heading",
             "--line-number",

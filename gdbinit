@@ -7,6 +7,9 @@ set auto-load safe-path /
 # Disable pagination (prevents "press enter to continue")
 set pagination off
 
+# Enable debuginfod without prompt
+set debuginfod enabled on
+
 # Pretty printing
 set print pretty on
 set print array on
@@ -75,7 +78,8 @@ sal = frame.find_sal()
 if sal.symtab:
     filename = sal.symtab.fullname()
     line = sal.line
-    subprocess.run(['nvim', '--server', nvim_sock, '--remote-send', f'<Esc>:e +{line} {filename}<CR>'], stderr=subprocess.DEVNULL)
+    subprocess.run(['nvim', '--server', nvim_sock, '--remote-send', f'<Esc>:e +{line} {filename}<CR>'],
+                   stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 else:
     print("No source info available")
   end
@@ -98,8 +102,13 @@ def get_nvim_sock():
 def send_to_nvim(lua_code):
     """Send lua command to nvim via socket"""
     nvim_sock = get_nvim_sock()
-    subprocess.run(['nvim', '--server', nvim_sock, '--remote-send',
-                   f'<Cmd>lua {lua_code}<CR>'], stderr=subprocess.DEVNULL)
+    result = subprocess.run(['nvim', '--server', nvim_sock, '--remote-send',
+                   f'<Cmd>lua {lua_code}<CR>'],
+                   stdin=subprocess.DEVNULL,
+                   stdout=subprocess.PIPE,
+                   stderr=subprocess.PIPE)
+    if result.returncode != 0:
+        print(f"[nvim] error: {result.stderr.decode()} (socket: {nvim_sock})")
 
 def get_breakpoints():
     """Get list of breakpoints"""
@@ -154,9 +163,7 @@ def push_state():
 
 def on_stop(event):
     frame = get_frame()
-    if frame:
-        # Jump to location
-        send_to_nvim(f"vim.cmd('e +{frame['line']} {frame['file']}')")
+    # State includes frame info, nvim will handle jumping
     push_state()
 
 def on_bp_change(event):
@@ -196,9 +203,14 @@ class StartDebug(gdb.Command):
             print("Usage: start_debug <program> [-- args]")
             return
 
-        # Kill any running process (silently)
+        # Disable confirmations for the whole operation
+        gdb.execute('set confirm off')
+
+        # Kill any running inferior
         try:
-            gdb.execute('kill', to_string=True)
+            inf = gdb.selected_inferior()
+            if inf and inf.pid != 0:
+                gdb.execute('kill', to_string=True)
         except:
             pass
 
@@ -216,6 +228,8 @@ class StartDebug(gdb.Command):
         # Set args if provided
         if args:
             gdb.execute(f'set args {args}')
+        else:
+            gdb.execute('set args')  # Clear args if none provided
 
         # Start or run based on breakpoints
         bps = gdb.breakpoints()
@@ -223,6 +237,9 @@ class StartDebug(gdb.Command):
             gdb.execute('run')
         else:
             gdb.execute('start')
+
+        # Re-enable confirmations
+        gdb.execute('set confirm on')
 
 StartDebug()
 end
@@ -251,10 +268,7 @@ def listen_pipe():
                 for line in pipe:
                     cmd = line.strip()
                     if cmd:
-                        def run_cmd(c):
-                            gdb.execute(c)
-                            print("(gdb) ", end="", flush=True)
-                        gdb.post_event(lambda c=cmd: run_cmd(c))
+                        gdb.post_event(lambda c=cmd: gdb.execute(c))
         except:
             pass
 

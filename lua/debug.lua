@@ -12,22 +12,24 @@ M.state = {
   frame = nil,       -- {file, line, func}
 }
 
--- Sign definitions
+-- Use extmarks for debug signs - they respect sign column ordering better
+local ns = vim.api.nvim_create_namespace('neo_mittens_debug')
+
+-- Placeholder sign to reserve the left column for gitsigns
 local signs_defined = false
 local function define_signs()
   if signs_defined then return end
-  vim.fn.sign_define('DbgBreakpoint', { text = '', texthl = 'DiagnosticError' })
-  vim.fn.sign_define('DbgBreakpointDisabled', { text = '', texthl = 'DiagnosticHint' })
-  vim.fn.sign_define('DbgCurrentLine', { text = '', texthl = 'DiagnosticWarn' })
+  vim.fn.sign_define('DbgPlaceholder', { text = '  ' })
   signs_defined = true
 end
 
--- Sign group for our signs
 local sign_group = 'neo_mittens_debug'
 
 -- Find buffer by file path (handles relative/absolute path differences)
 local function find_buffer(filepath)
-  if not filepath then return -1 end
+  if not filepath or type(filepath) ~= 'string' or filepath == '' then
+    return -1
+  end
   -- Try exact match first
   local bufnr = vim.fn.bufnr(filepath)
   if bufnr ~= -1 then return bufnr end
@@ -47,28 +49,95 @@ local function find_buffer(filepath)
   return -1
 end
 
+-- Check if value is valid (not nil, not vim.NIL)
+local function is_valid(v)
+  return v ~= nil and v ~= vim.NIL
+end
+
 -- Update signs based on current state
+-- Uses placeholder sign (low priority) to keep gitsigns left, extmarks for debug signs (high priority) on right
 local function update_signs()
   define_signs()
-  -- Clear all our signs
-  vim.fn.sign_unplace(sign_group)
 
-  -- Place breakpoint signs
-  for _, bp in ipairs(M.state.breakpoints) do
-    if bp.file and bp.line then
-      local sign_name = bp.enabled and 'DbgBreakpoint' or 'DbgBreakpointDisabled'
-      local bufnr = find_buffer(bp.file)
-      if bufnr ~= -1 then
-        vim.fn.sign_place(0, sign_group, sign_name, bufnr, { lnum = bp.line, priority = 20 })
+  -- Clear signs and extmarks
+  vim.fn.sign_unplace(sign_group)
+  for _, buf in ipairs(vim.api.nvim_list_bufs()) do
+    if vim.api.nvim_buf_is_valid(buf) then
+      vim.api.nvim_buf_clear_namespace(buf, ns, 0, -1)
+    end
+  end
+
+  -- Build breakpoint map
+  local bp_map = {}  -- [file][line] = 'enabled' | 'disabled'
+  local bps = M.state.breakpoints
+  if is_valid(bps) then
+    for _, bp in ipairs(bps) do
+      if is_valid(bp.file) and is_valid(bp.line) then
+        local file = vim.fn.fnamemodify(bp.file, ':p')
+        bp_map[file] = bp_map[file] or {}
+        bp_map[file][bp.line] = bp.enabled and 'enabled' or 'disabled'
       end
     end
   end
 
-  -- Place current line sign
-  if M.state.frame and M.state.frame.file and M.state.frame.line then
-    local bufnr = find_buffer(M.state.frame.file)
+  -- Get frame location
+  local frame = M.state.frame
+  local frame_file, frame_line
+  if is_valid(frame) and is_valid(frame.file) and is_valid(frame.line) then
+    frame_file = vim.fn.fnamemodify(frame.file, ':p')
+    frame_line = frame.line
+  end
+
+  -- Collect all lines that need debug signs
+  local debug_lines = {}  -- [file][line] = { bp = 'enabled'|'disabled'|nil, frame = bool }
+  for file, lines in pairs(bp_map) do
+    debug_lines[file] = debug_lines[file] or {}
+    for line, state in pairs(lines) do
+      debug_lines[file][line] = { bp = state, frame = false }
+    end
+  end
+  if frame_file and frame_line then
+    debug_lines[frame_file] = debug_lines[frame_file] or {}
+    debug_lines[frame_file][frame_line] = debug_lines[frame_file][frame_line] or {}
+    debug_lines[frame_file][frame_line].frame = true
+  end
+
+  -- Place signs: placeholder (priority 1) to reserve left column, extmark for debug sign in right column
+  for file, lines in pairs(debug_lines) do
+    local bufnr = find_buffer(file)
     if bufnr ~= -1 then
-      vim.fn.sign_place(0, sign_group, 'DbgCurrentLine', bufnr, { lnum = M.state.frame.line, priority = 30 })
+      for line, info in pairs(lines) do
+        -- Placeholder (priority 99) reserves LEFT column when no gitsign (100) present
+        -- Debug extmark (priority 10) always goes RIGHT
+        vim.fn.sign_place(0, sign_group, 'DbgPlaceholder', bufnr, { lnum = line, priority = 99 })
+
+        -- Determine debug sign text and highlight
+        local sign_text, sign_hl
+        local line_hl = nil
+        if info.frame and info.bp then
+          -- Both breakpoint and frame
+          sign_text = info.bp == 'enabled' and '●→' or '○→'
+          sign_hl = info.bp == 'enabled' and 'DiagnosticError' or 'DiagnosticHint'
+          line_hl = 'CursorLine'
+        elseif info.frame then
+          -- Frame only
+          sign_text = '→'
+          sign_hl = 'DiagnosticWarn'
+          line_hl = 'CursorLine'
+        elseif info.bp then
+          -- Breakpoint only
+          sign_text = info.bp == 'enabled' and '●' or '○'
+          sign_hl = info.bp == 'enabled' and 'DiagnosticError' or 'DiagnosticHint'
+        end
+
+        -- Place debug sign via extmark (priority 10, lower than gitsigns 100 = right column)
+        vim.api.nvim_buf_set_extmark(bufnr, ns, line - 1, 0, {
+          sign_text = sign_text,
+          sign_hl_group = sign_hl,
+          line_hl_group = line_hl,
+          priority = 10,
+        })
+      end
     end
   end
 end
@@ -77,11 +146,40 @@ end
 function M.on_gdb_state(state_json)
   local ok, state = pcall(vim.json.decode, state_json)
   if ok and state then
+    local old_frame = M.state.frame
     M.state = state
     update_signs()
+    -- Jump to new frame location if changed
+    local frame = state.frame
+    if is_valid(frame) and is_valid(frame.file) and is_valid(frame.line) then
+      local new_file = frame.file
+      local new_line = frame.line
+      local should_jump = not is_valid(old_frame)
+        or old_frame.file ~= new_file
+        or old_frame.line ~= new_line
+      if should_jump then
+        M.goto_location(new_file, new_line)
+      end
+    end
     -- Trigger statusline refresh
     vim.cmd('redrawstatus')
   end
+end
+
+-- Jump to file:line from gdb (smart - only loads file if needed)
+function M.goto_location(file, line)
+  local current = vim.fn.expand('%:p')
+  if current ~= file then
+    -- Different file - check if buffer exists
+    local bufnr = vim.fn.bufnr(file)
+    if bufnr ~= -1 then
+      vim.api.nvim_set_current_buf(bufnr)
+    else
+      vim.cmd('e ' .. vim.fn.fnameescape(file))
+    end
+  end
+  vim.api.nvim_win_set_cursor(0, { line, 0 })
+  vim.cmd('normal! zz')
 end
 
 -- Statusline component
@@ -243,13 +341,17 @@ function M.enter_debug_mode(backend)
     M.debug_mode = true
     M.active_backend = backend
     set_debug_keymaps()
+    -- Expand sign column to fit both gitsigns and debug signs
+    vim.o.signcolumn = 'yes:2'
     -- Sync state from debugger (in case it was started before nvim)
     if backend == 'gdb' then
       vim.defer_fn(function()
         get_gdb().request_state()
       end, 100)
     end
-    vim.notify('Debug mode (' .. backend .. ') - q to exit', vim.log.levels.INFO)
+    vim.schedule(function()
+      vim.api.nvim_echo({{'Debug mode (' .. backend .. ') - q to exit', 'Normal'}}, false, {})
+    end)
   end
 end
 
@@ -258,7 +360,15 @@ function M.exit_debug_mode()
     M.debug_mode = false
     M.active_backend = nil
     clear_debug_keymaps()
-    vim.notify('Exited debug mode', vim.log.levels.INFO)
+    -- Clear debug signs and restore single sign column
+    vim.fn.sign_unplace(sign_group)
+    for _, buf in ipairs(vim.api.nvim_list_bufs()) do
+      if vim.api.nvim_buf_is_valid(buf) then
+        vim.api.nvim_buf_clear_namespace(buf, ns, 0, -1)
+      end
+    end
+    vim.o.signcolumn = 'yes'
+    vim.api.nvim_echo({{'Exited debug mode', 'Normal'}}, false, {})
   end
 end
 
@@ -277,8 +387,40 @@ function M.get_backend()
   return get_gdb().get_backend()
 end
 
--- Launch debug session with appropriate backend
+-- Last used config (persists across runs)
+M.last_config = nil
+
+-- Launch debug session with a specific config (no picker)
+function M.launch_config(cfg)
+  if not cfg then
+    vim.notify('No config to launch', vim.log.levels.WARN)
+    return
+  end
+
+  M.last_config = cfg
+  local backend = M.get_backend()
+
+  if backend == 'gdb' then
+    M.enter_debug_mode('gdb')
+    get_gdb().start_with_config(cfg)
+  else
+    M.enter_debug_mode('dap')
+    require('dapui').open()
+    get_dap().run(cfg)
+  end
+end
+
+-- Launch last config, or pick if none
 function M.launch()
+  if M.last_config then
+    M.launch_config(M.last_config)
+  else
+    M.launch_pick()
+  end
+end
+
+-- Show picker and launch selected config
+function M.launch_pick()
   local backend = M.get_backend()
 
   if backend == 'gdb' then
@@ -294,13 +436,11 @@ function M.launch()
       format_item = function(c) return c.name end,
     }, function(cfg)
       if cfg then
-        M.enter_debug_mode('gdb')
-        gdb.start_with_config(cfg)
+        M.launch_config(cfg)
       end
     end)
   else
     local dap = get_dap()
-    local dapui = require('dapui')
     local ft = vim.bo.filetype
     local configs = dap.configurations[ft]
     if not configs or #configs == 0 then
@@ -313,9 +453,7 @@ function M.launch()
       format_item = function(c) return c.name end,
     }, function(cfg)
       if cfg then
-        M.enter_debug_mode('dap')
-        dapui.open()
-        dap.run(cfg)
+        M.launch_config(cfg)
       end
     end)
   end
@@ -328,9 +466,10 @@ function M.sync_state()
   end
 end
 
--- Setup main keybinding
+-- Setup main keybindings
 function M.setup()
-  vim.keymap.set('n', '<leader>r', M.launch, { desc = 'Launch debugger' })
+  vim.keymap.set('n', '<leader>r', M.launch, { desc = 'Run last debug config (or pick)' })
+  vim.keymap.set('n', '<leader>R', M.launch_pick, { desc = 'Pick debug config' })
   vim.keymap.set('n', '<leader>dd', M.toggle_debug_mode, { desc = 'Toggle debug mode' })
 end
 
