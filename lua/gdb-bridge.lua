@@ -23,23 +23,16 @@ local function send_to_gdb(cmd)
   -- Check if pipe exists (gdb creates it when it starts)
   local stat = vim.loop.fs_stat(pipe_path)
   if not stat then
-    -- Pipe doesn't exist - gdb not running, silently ignore
     return
   end
 
-
-  -- Use async job to avoid blocking on FIFO
-  -- timeout after 1 second in case gdb isn't reading
-  vim.fn.jobstart({ 'timeout', '1', 'sh', '-c', 'echo ' .. vim.fn.shellescape(cmd) .. ' > ' .. vim.fn.shellescape(pipe_path) }, {
-    on_exit = function(_, code)
-      if code == 124 then
-        -- timeout - gdb not reading from pipe
-        vim.schedule(function()
-          vim.notify('gdb not responding', vim.log.levels.WARN)
-        end)
-      end
-    end,
-  })
+  -- Write directly to pipe using libuv (non-blocking)
+  vim.loop.fs_open(pipe_path, 'w', 438, function(err, fd)
+    if err or not fd then return end
+    vim.loop.fs_write(fd, cmd .. '\n', -1, function()
+      vim.loop.fs_close(fd)
+    end)
+  end)
 end
 
 function M.breakpoint_toggle()

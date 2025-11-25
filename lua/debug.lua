@@ -25,27 +25,36 @@ end
 
 local sign_group = 'neo_mittens_debug'
 
+-- Cache file path -> bufnr mapping
+local path_to_buf_cache = {}
+
 -- Find buffer by file path (handles relative/absolute path differences)
 local function find_buffer(filepath)
   if not filepath or type(filepath) ~= 'string' or filepath == '' then
     return -1
   end
-  -- Try exact match first
-  local bufnr = vim.fn.bufnr(filepath)
-  if bufnr ~= -1 then return bufnr end
-  -- Try matching by filename
-  local fname = vim.fn.fnamemodify(filepath, ':t')
-  for _, buf in ipairs(vim.api.nvim_list_bufs()) do
-    if vim.api.nvim_buf_is_loaded(buf) then
-      local bufname = vim.api.nvim_buf_get_name(buf)
-      if bufname == filepath or vim.fn.fnamemodify(bufname, ':t') == fname then
-        -- Verify full path matches if possible
-        if vim.fn.fnamemodify(bufname, ':p') == vim.fn.fnamemodify(filepath, ':p') then
-          return buf
-        end
-      end
-    end
+
+  -- Check cache first
+  local cached = path_to_buf_cache[filepath]
+  if cached and vim.api.nvim_buf_is_valid(cached) then
+    return cached
   end
+
+  -- Try exact match
+  local bufnr = vim.fn.bufnr(filepath)
+  if bufnr ~= -1 then
+    path_to_buf_cache[filepath] = bufnr
+    return bufnr
+  end
+
+  -- Try full path match
+  local fullpath = vim.fn.fnamemodify(filepath, ':p')
+  bufnr = vim.fn.bufnr(fullpath)
+  if bufnr ~= -1 then
+    path_to_buf_cache[filepath] = bufnr
+    return bufnr
+  end
+
   return -1
 end
 
@@ -54,31 +63,21 @@ local function is_valid(v)
   return v ~= nil and v ~= vim.NIL
 end
 
+-- Track which buffers have our signs (for efficient cleanup)
+local signed_buffers = {}
+
 -- Update signs based on current state
--- Uses placeholder sign (low priority) to keep gitsigns left, extmarks for debug signs (high priority) on right
 local function update_signs()
   define_signs()
 
-  -- Clear signs and extmarks
+  -- Clear only buffers we've touched (not all buffers)
   vim.fn.sign_unplace(sign_group)
-  for _, buf in ipairs(vim.api.nvim_list_bufs()) do
-    if vim.api.nvim_buf_is_valid(buf) then
-      vim.api.nvim_buf_clear_namespace(buf, ns, 0, -1)
+  for bufnr in pairs(signed_buffers) do
+    if vim.api.nvim_buf_is_valid(bufnr) then
+      vim.api.nvim_buf_clear_namespace(bufnr, ns, 0, -1)
     end
   end
-
-  -- Build breakpoint map
-  local bp_map = {}  -- [file][line] = 'enabled' | 'disabled'
-  local bps = M.state.breakpoints
-  if is_valid(bps) then
-    for _, bp in ipairs(bps) do
-      if is_valid(bp.file) and is_valid(bp.line) then
-        local file = vim.fn.fnamemodify(bp.file, ':p')
-        bp_map[file] = bp_map[file] or {}
-        bp_map[file][bp.line] = bp.enabled and 'enabled' or 'disabled'
-      end
-    end
-  end
+  signed_buffers = {}
 
   -- Get frame location
   local frame = M.state.frame
@@ -88,56 +87,62 @@ local function update_signs()
     frame_line = frame.line
   end
 
-  -- Collect all lines that need debug signs
-  local debug_lines = {}  -- [file][line] = { bp = 'enabled'|'disabled'|nil, frame = bool }
-  for file, lines in pairs(bp_map) do
-    debug_lines[file] = debug_lines[file] or {}
-    for line, state in pairs(lines) do
-      debug_lines[file][line] = { bp = state, frame = false }
+  -- Build map of lines needing signs: [bufnr][line] = {bp, frame}
+  local signs_needed = {}
+
+  -- Add breakpoints
+  local bps = M.state.breakpoints
+  if is_valid(bps) then
+    for _, bp in ipairs(bps) do
+      if is_valid(bp.file) and is_valid(bp.line) then
+        local bufnr = find_buffer(bp.file)
+        if bufnr ~= -1 then
+          signs_needed[bufnr] = signs_needed[bufnr] or {}
+          signs_needed[bufnr][bp.line] = signs_needed[bufnr][bp.line] or {}
+          signs_needed[bufnr][bp.line].bp = bp.enabled and 'enabled' or 'disabled'
+        end
+      end
     end
   end
+
+  -- Add frame
   if frame_file and frame_line then
-    debug_lines[frame_file] = debug_lines[frame_file] or {}
-    debug_lines[frame_file][frame_line] = debug_lines[frame_file][frame_line] or {}
-    debug_lines[frame_file][frame_line].frame = true
+    local bufnr = find_buffer(frame_file)
+    if bufnr ~= -1 then
+      signs_needed[bufnr] = signs_needed[bufnr] or {}
+      signs_needed[bufnr][frame_line] = signs_needed[bufnr][frame_line] or {}
+      signs_needed[bufnr][frame_line].frame = true
+    end
   end
 
-  -- Place signs: placeholder (priority 1) to reserve left column, extmark for debug sign in right column
-  for file, lines in pairs(debug_lines) do
-    local bufnr = find_buffer(file)
-    if bufnr ~= -1 then
-      for line, info in pairs(lines) do
-        -- Placeholder (priority 99) reserves LEFT column when no gitsign (100) present
-        -- Debug extmark (priority 10) always goes RIGHT
-        vim.fn.sign_place(0, sign_group, 'DbgPlaceholder', bufnr, { lnum = line, priority = 99 })
+  -- Place signs
+  for bufnr, lines in pairs(signs_needed) do
+    signed_buffers[bufnr] = true
+    for line, info in pairs(lines) do
+      -- Placeholder for left column
+      vim.fn.sign_place(0, sign_group, 'DbgPlaceholder', bufnr, { lnum = line, priority = 99 })
 
-        -- Determine debug sign text and highlight
-        local sign_text, sign_hl
-        local line_hl = nil
-        if info.frame and info.bp then
-          -- Both breakpoint and frame
-          sign_text = info.bp == 'enabled' and '●→' or '○→'
-          sign_hl = info.bp == 'enabled' and 'DiagnosticError' or 'DiagnosticHint'
-          line_hl = 'CursorLine'
-        elseif info.frame then
-          -- Frame only
-          sign_text = '→'
-          sign_hl = 'DiagnosticWarn'
-          line_hl = 'CursorLine'
-        elseif info.bp then
-          -- Breakpoint only
-          sign_text = info.bp == 'enabled' and '●' or '○'
-          sign_hl = info.bp == 'enabled' and 'DiagnosticError' or 'DiagnosticHint'
-        end
-
-        -- Place debug sign via extmark (priority 10, lower than gitsigns 100 = right column)
-        vim.api.nvim_buf_set_extmark(bufnr, ns, line - 1, 0, {
-          sign_text = sign_text,
-          sign_hl_group = sign_hl,
-          line_hl_group = line_hl,
-          priority = 10,
-        })
+      -- Determine sign
+      local sign_text, sign_hl, line_hl
+      if info.frame and info.bp then
+        sign_text = info.bp == 'enabled' and '●→' or '○→'
+        sign_hl = info.bp == 'enabled' and 'DiagnosticError' or 'DiagnosticHint'
+        line_hl = 'CursorLine'
+      elseif info.frame then
+        sign_text = '→'
+        sign_hl = 'DiagnosticWarn'
+        line_hl = 'CursorLine'
+      elseif info.bp then
+        sign_text = info.bp == 'enabled' and '●' or '○'
+        sign_hl = info.bp == 'enabled' and 'DiagnosticError' or 'DiagnosticHint'
       end
+
+      vim.api.nvim_buf_set_extmark(bufnr, ns, line - 1, 0, {
+        sign_text = sign_text,
+        sign_hl_group = sign_hl,
+        line_hl_group = line_hl,
+        priority = 10,
+      })
     end
   end
 end

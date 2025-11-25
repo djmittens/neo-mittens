@@ -99,16 +99,51 @@ def get_nvim_sock():
     project = os.path.basename(cwd)
     return f'/tmp/nvim-{project}.sock'
 
+import socket
+import msgpack
+
+_nvim_sock = None
+_nvim_sock_path = None
+_msg_id = 0
+
+def get_nvim_socket():
+    """Get or create persistent socket connection to nvim"""
+    global _nvim_sock, _nvim_sock_path
+    nvim_sock_path = get_nvim_sock()
+
+    # Reconnect if path changed or socket is dead
+    if _nvim_sock is None or _nvim_sock_path != nvim_sock_path:
+        if _nvim_sock:
+            try:
+                _nvim_sock.close()
+            except:
+                pass
+        _nvim_sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        _nvim_sock.setblocking(False)
+        try:
+            _nvim_sock.connect(nvim_sock_path)
+            _nvim_sock_path = nvim_sock_path
+        except:
+            _nvim_sock = None
+            return None
+    return _nvim_sock
+
 def send_to_nvim(lua_code):
-    """Send lua command to nvim via socket"""
-    nvim_sock = get_nvim_sock()
-    result = subprocess.run(['nvim', '--server', nvim_sock, '--remote-send',
-                   f'<Cmd>lua {lua_code}<CR>'],
-                   stdin=subprocess.DEVNULL,
-                   stdout=subprocess.PIPE,
-                   stderr=subprocess.PIPE)
-    if result.returncode != 0:
-        print(f"[nvim] error: {result.stderr.decode()} (socket: {nvim_sock})")
+    """Send lua command to nvim via RPC socket"""
+    global _nvim_sock, _msg_id
+    sock = get_nvim_socket()
+    if not sock:
+        return
+
+    try:
+        _msg_id += 1
+        # msgpack-rpc notification: [type=2, method, args]
+        # Notifications don't expect a response (faster)
+        msg = msgpack.packb([2, 'nvim_exec_lua', [lua_code, []]])
+        sock.sendall(msg)
+    except (BrokenPipeError, ConnectionResetError, BlockingIOError):
+        # Connection lost, reset for next attempt
+        _nvim_sock = None
 
 def get_breakpoints():
     """Get list of breakpoints"""
@@ -149,25 +184,27 @@ def get_frame():
         pass
     return None
 
-def push_state():
-    """Push full debug state to nvim"""
+# Cache breakpoints - only rebuild on bp events
+_cached_breakpoints = None
+
+def push_state(bp_changed=False):
+    """Push debug state to nvim"""
+    global _cached_breakpoints
+    if bp_changed or _cached_breakpoints is None:
+        _cached_breakpoints = get_breakpoints()
     state = {
-        'breakpoints': get_breakpoints(),
+        'breakpoints': _cached_breakpoints,
         'frame': get_frame()
     }
-    # Double-encode: json string inside lua string
     state_json = json.dumps(state)
-    # Escape for lua string (single quotes)
     escaped = state_json.replace("\\", "\\\\").replace("'", "\\'")
     send_to_nvim(f"require('neo-mittens.debug').on_gdb_state('{escaped}')")
 
 def on_stop(event):
-    frame = get_frame()
-    # State includes frame info, nvim will handle jumping
-    push_state()
+    push_state(bp_changed=False)
 
 def on_bp_change(event):
-    push_state()
+    push_state(bp_changed=True)
 
 gdb.events.stop.connect(on_stop)
 gdb.events.breakpoint_created.connect(on_bp_change)
