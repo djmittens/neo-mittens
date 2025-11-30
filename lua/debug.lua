@@ -166,8 +166,8 @@ function M.on_gdb_state(state_json)
         M.goto_location(new_file, new_line)
       end
     end
-    -- Trigger statusline refresh
-    vim.cmd('redrawstatus')
+    -- Trigger screen refresh
+    vim.cmd('redraw')
   end
 end
 

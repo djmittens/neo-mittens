@@ -100,50 +100,22 @@ def get_nvim_sock():
     return f'/tmp/nvim-{project}.sock'
 
 import socket
-import msgpack
-
-_nvim_sock = None
-_nvim_sock_path = None
-_msg_id = 0
-
-def get_nvim_socket():
-    """Get or create persistent socket connection to nvim"""
-    global _nvim_sock, _nvim_sock_path
-    nvim_sock_path = get_nvim_sock()
-
-    # Reconnect if path changed or socket is dead
-    if _nvim_sock is None or _nvim_sock_path != nvim_sock_path:
-        if _nvim_sock:
-            try:
-                _nvim_sock.close()
-            except:
-                pass
-        _nvim_sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        _nvim_sock.setblocking(False)
-        try:
-            _nvim_sock.connect(nvim_sock_path)
-            _nvim_sock_path = nvim_sock_path
-        except:
-            _nvim_sock = None
-            return None
-    return _nvim_sock
+import struct
 
 def send_to_nvim(lua_code):
-    """Send lua command to nvim via RPC socket"""
-    global _nvim_sock, _msg_id
-    sock = get_nvim_socket()
-    if not sock:
-        return
-
+    """Send lua command to nvim via msgpack-rpc socket (no subprocess)"""
+    nvim_sock = get_nvim_sock()
     try:
-        _msg_id += 1
-        # msgpack-rpc notification: [type=2, method, args]
-        # Notifications don't expect a response (faster)
-        msg = msgpack.packb([2, 'nvim_exec_lua', [lua_code, []]])
+        sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        sock.connect(nvim_sock)
+        # msgpack-rpc notification: [2, method, args]
+        # method = "nvim_exec_lua", args = [lua_code, {}]
+        import msgpack
+        msg = msgpack.packb([2, "nvim_exec_lua", [lua_code, []]])
         sock.sendall(msg)
-    except (BrokenPipeError, ConnectionResetError, BlockingIOError):
-        # Connection lost, reset for next attempt
-        _nvim_sock = None
+        sock.close()
+    except Exception as e:
+        pass  # Silently fail if nvim not available
 
 def get_breakpoints():
     """Get list of breakpoints"""
