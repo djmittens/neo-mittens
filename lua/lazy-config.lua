@@ -209,6 +209,8 @@ require("lazy").setup({
     config = function()
       require('mini.surround').setup({
         custom_surroundings = {
+          b = { output = function() return { left = '**', right = '**' } end },
+          i = { output = function() return { left = '_', right = '_' } end },
           ['('] = { output = { left = '(', right = ')' } },
           ['['] = { output = { left = '[', right = ']' } },
           ['{'] = { output = { left = '{', right = '}' } },
