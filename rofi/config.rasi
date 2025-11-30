@@ -1,0 +1,56 @@
+@import "themes/catppuccin-mocha.rasi"
+
+configuration {
+  font: "JetBrainsMono Nerd Font 12";
+  show-icons: true;
+  icon-theme: "Papirus-Dark";
+
+  modi: "drun,run,window,ssh,clipboard:~/.config/rofi/clipboard.sh,power:~/.config/rofi/powermenu.sh";
+  display-drun: "Apps";
+  display-run: "Run";
+  display-window: "Windows";
+  display-ssh: "SSH";
+  display-clipboard: "Clipboard";
+  display-power: "Power";
+
+  case-sensitive: false;
+  matching: "fuzzy";
+  sort: true;
+  cycle: true;
+
+  drun-display-format: "{name} <span weight='light' size='small'>( {generic} )</span>";
+
+  // Keybindings (vim-friendly)
+  kb-element-next: "Down,Control+j";
+  kb-element-prev: "Up,Control+k";
+  kb-row-down: "Down,Control+j";
+  kb-row-up: "Up,Control+k";
+  kb-accept-entry: "Return,Control+m";
+  kb-accept-alt: "Control+Return";
+  kb-remove-char-back: "BackSpace,Control+h";
+  kb-mode-next: "Shift+Right,Alt+Right";
+  kb-mode-previous: "Shift+Left,Alt+Left";
+}
+
+/* Layout tweaks */
+window {
+  width: 42em;
+  border: 2px;
+  padding: 18px;
+}
+
+listview {
+  lines: 12;
+  columns: 1;
+  fixed-height: true;
+  dynamic: false;
+}
+
+inputbar {
+  children: [ prompt, entry ];
+}
+
+prompt {
+  text: ""; // magnifier icon (Nerd Font)
+  margin: 0 10px 0 0;
+}

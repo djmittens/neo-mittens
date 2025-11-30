@@ -1,0 +1,60 @@
+local M = {}
+
+function M.setup()
+  local harpoon = require('harpoon')
+  harpoon:setup()
+
+  vim.keymap.set('n', '<leader>A', function() harpoon:list():prepend() end)
+  vim.keymap.set('n', '<leader>a', function() harpoon:list():add() end)
+
+  vim.keymap.set('n', '<C-h>', function()
+    local list = harpoon:list()
+    if list.items[1] then
+      list:select(1)
+    end
+  end)
+  vim.keymap.set('n', '<C-t>', function()
+    local list = harpoon:list()
+    if list.items[2] then
+      list:select(2)
+    end
+  end)
+  vim.keymap.set('n', '<C-n>', function()
+    local list = harpoon:list()
+    if list.items[3] then
+      list:select(3)
+    end
+  end)
+  vim.keymap.set('n', '<C-s>', function()
+    local list = harpoon:list()
+    if list.items[4] then
+      list:select(4)
+    end
+  end)
+
+  vim.keymap.set('n', '<leader><C-h>', function() harpoon:list():replace_at(1) end)
+  vim.keymap.set('n', '<leader><C-t>', function() harpoon:list():replace_at(2) end)
+  vim.keymap.set('n', '<leader><C-n>', function() harpoon:list():replace_at(3) end)
+  vim.keymap.set('n', '<leader><C-s>', function() harpoon:list():replace_at(4) end)
+
+  vim.keymap.set('n', '<C-S-P>', function() harpoon:list():prev() end)
+  vim.keymap.set('n', '<C-S-N>', function() harpoon:list():next() end)
+
+  local conf = require('telescope.config').values
+  local function toggle_telescope(harpoon_files)
+    local file_paths = {}
+    for _, item in ipairs(harpoon_files.items) do
+      table.insert(file_paths, item.value)
+    end
+    require('telescope.pickers').new({}, {
+      prompt_title = 'Harpoon',
+      finder = require('telescope.finders').new_table({ results = file_paths }),
+      previewer = conf.file_previewer({}),
+      sorter = conf.generic_sorter({}),
+    }):find()
+  end
+  vim.keymap.set('n', '<C-e>', function() toggle_telescope(harpoon:list()) end, { desc = 'Open harpoon window' })
+end
+
+return M
+

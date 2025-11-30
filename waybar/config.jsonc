@@ -1,0 +1,8 @@
+[
+  {
+  "output": [ "DP-2" ],
+    "include": [
+      "~/.config/waybar/bars/top.jsonc"
+    ]
+  }
+]
