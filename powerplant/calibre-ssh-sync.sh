@@ -23,14 +23,14 @@ set -euo pipefail
 ########################################
 
 # SSH remote in the form user@host
-REMOTE_SSH="user@desktop-host"
+REMOTE_SSH="xyzyx@RedBox"
 
 # Paths to calibredb binaries (override if not in PATH)
-CALIBREDB_LOCAL_BIN="${CALIBREDB_LOCAL_BIN:-/Applications/calibre.app/Contents/MacOS/calibredb}"
+CALIBREDB_LOCAL_BIN="${CALIBREDB_LOCAL_BIN:-/opt/homebrew/bin/calibredb}"
 CALIBREDB_REMOTE_BIN="${CALIBREDB_REMOTE_BIN:-calibredb}"
 
 # Calibre library folders (contain metadata.db)
-LIBRARY_LOCAL="${LIBRARY_LOCAL:-/path/to/Laptop Calibre Library}"
+LIBRARY_LOCAL="${LIBRARY_LOCAL:-/Users/djmittens/ExternalBooks/Linux Library}"
 LIBRARY_REMOTE="${LIBRARY_REMOTE:-/path/to/Desktop Calibre Library}"
 
 # Bundle roots (where temporary export/import run directories live)
