@@ -27,11 +27,12 @@ REMOTE_SSH="user@desktop-host"
 
 # Paths to calibredb binaries (override if not in PATH)
 CALIBREDB_LOCAL_BIN="${CALIBREDB_LOCAL_BIN:-/Applications/calibre.app/Contents/MacOS/calibredb}"
-CALIBREDB_REMOTE_BIN="${CALIBREDB_REMOTE_BIN:-calibredb}"
+CALIBREDB_REMOTE_BIN="${CALIBREDB_REMOTE_BIN:-/usr/bin/calibredb}"
 
 # Calibre library folders (contain metadata.db)
+# Defaults to the common Calibre location on Linux/macOS; override if different.
 LIBRARY_LOCAL="${LIBRARY_LOCAL:-/path/to/Laptop Calibre Library}"
-LIBRARY_REMOTE="${LIBRARY_REMOTE:-/path/to/Desktop Calibre Library}"
+LIBRARY_REMOTE="${LIBRARY_REMOTE:-$HOME/Calibre Library}"
 
 # Bundle roots (where temporary export/import run directories live)
 LOCAL_BUNDLES_ROOT="${LOCAL_BUNDLES_ROOT:-$HOME/CalibreSync}"
