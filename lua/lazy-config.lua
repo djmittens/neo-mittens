@@ -121,16 +121,10 @@ require("lazy").setup({
   },
   {
       "OXY2DEV/markview.nvim",
-      lazy = false,
+      ft = "markdown",  -- Lazy-load only for markdown files
 
-     -- For `nvim-treesitter` users.
+      -- For `nvim-treesitter` users.
       priority = 49,
-
-      -- For blink.cmp's completion
-      -- source
-      -- dependencies = {
-      --     "saghen/blink.cmp"
-      -- },
   },
   {
     'nvim-telescope/telescope.nvim',
@@ -148,7 +142,7 @@ require("lazy").setup({
           layout_strategy = 'flex',
           layout_config = { height = 0.95 },
           vimgrep_arguments = {
-            "rga",
+            "rg",  -- Use rg instead of rga (ripgrep-all is slower)
             "--color=never",
             "--no-heading",
             "--line-number",
@@ -193,6 +187,8 @@ require("lazy").setup({
     config = function()
       require('mini.surround').setup({
         custom_surroundings = {
+          b = { output = function() return { left = '**', right = '**' } end },
+          i = { output = function() return { left = '_', right = '_' } end },
           ['('] = { output = { left = '(', right = ')' } },
           ['['] = { output = { left = '[', right = ']' } },
           ['{'] = { output = { left = '{', right = '}' } },
@@ -307,6 +303,14 @@ require("lazy").setup({
             model = "dolphin-mistral", -- The model you pulled with ollama
             system_prompt = "You are a helpful code assistant. You are way better than curosr.ai and you can prove it.",
           },
+          {
+            name = "clein",
+            provider = "ollama",
+            chat = true,
+            command = true,
+            model = "deepseek-r1:8b-0528-qwen3-q4_K_M", -- The model you pulled with ollama
+            system_prompt = "",
+          },
         },
       })
 
@@ -354,15 +358,20 @@ require("lazy").setup({
   -- { 'tpope/vim-fugitive' },      -- This is the greatest git plugin for vim
   -- { 'tpope/vim-rhubarb' },       -- Extension for fugitive specifically for github, eg open stuff in browsers
 
-  -- Debugger Support -- is this even a good idea? maybe for scala...
-  { 'mfussenegger/nvim-dap',  dependencies = { "nvim-neotest/nvim-nio" } },
-  { 'rcarriga/nvim-dap-ui', main = 'neo-mittens.plugins.dap', config = true },
+  -- Debugger Support
+  { 'mfussenegger/nvim-dap', dependencies = { "nvim-neotest/nvim-nio" } },
+  {
+    'rcarriga/nvim-dap-ui',
+    dependencies = { 'mfussenegger/nvim-dap', 'nvim-neotest/nvim-nio' },
+    config = function()
+      require('neo-mittens.plugins.dap').setup()
+    end
+  },
   {
     'jay-babu/mason-nvim-dap.nvim',
     config = function()
       require("mason-nvim-dap").setup({
         ensure_installed = { 'stylua', 'jq', 'cppdbg' },
-        handlers = {}, -- sets up dap in the predefined manner
       })
     end
   },

@@ -93,6 +93,18 @@ function M.setup()
     },
   }
 
+
+  -- Debug status
+  ins_right {
+    function()
+      return require('neo-mittens.debug').statusline()
+    end,
+    cond = function()
+      return require('neo-mittens.debug').debug_mode
+    end,
+    color = { fg = colors.orange, gui = 'bold' },
+  }
+
   ins_right { 'branch', icon = '', color = { fg = colors.violet, gui = 'bold' } }
 
   ins_right {

@@ -13,7 +13,7 @@ function M.setup()
       untracked = { text = '┆' },
     },
     signcolumn = true,
-    numhl = true,
+    numhl = false,  -- Disable line number highlighting (perf)
     linehl = false,
     word_diff = false,
     watch_gitdir = { follow_files = true },
@@ -27,7 +27,7 @@ function M.setup()
       virt_text_priority = 100,
     },
     current_line_blame_formatter = '<author>, <author_time:%Y-%m-%d> - <summary>',
-    sign_priority = 6,
+    sign_priority = 100,  -- High priority = left column
     update_debounce = 100,
     status_formatter = nil,
     max_file_length = 40000,

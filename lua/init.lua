@@ -9,3 +9,5 @@ vim.opt.termguicolors = true
 
 require("neo-mittens.lazy-config")
 require("neo-mittens.misc-config")
+require("neo-mittens.gdb-bridge")
+require("neo-mittens.debug").setup()

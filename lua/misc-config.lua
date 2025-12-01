@@ -1,5 +1,8 @@
 vim.cmd.colorscheme("gruvbox")
 
+-- Auto-source project-local config (.nvim.lua)
+vim.o.exrc = true
+
 -- Core navigation improvements - center cursor after jumps
 vim.keymap.set("n", "<C-u>", "<C-u>zz", { desc = "Page up and center" })
 vim.keymap.set("n", "<C-d>", "<C-d>zz", { desc = "Page down and center" })
@@ -150,7 +153,7 @@ vim.g.netrw_liststyle = 0
 vim.o.splitright = true
 vim.o.ignorecase = true
 vim.o.smartcase = true
--- vim.o.signcolumn = 'number'
+vim.o.signcolumn = 'yes'  -- Single sign column normally, debug.lua sets yes:2 when debugging
 
 vim.o.wrap = false
 vim.o.modeline = true

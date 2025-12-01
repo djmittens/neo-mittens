@@ -327,4 +327,7 @@ ensure_tpm
 ensure_tmux_tpm_block
 install_tmux_plugins_if_possible
 
+# 12) Link gdbinit and add auto-load safe path
+link_symlink "$SCRIPT_DIR/gdbinit" "$HOME/.gdbinit"
+
 echo "Done. You may need to restart your shell (or source ~/.profile) and restart Neovim."
