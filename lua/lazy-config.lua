@@ -68,8 +68,8 @@ require("lazy").setup({
     end,
   },
   { 'saadparwaiz1/cmp_luasnip', },
-  { 'scalameta/nvim-metals', dependencies = { 'nvim-lua/plenary.nvim' }, main = 'neo-mittens.plugins.metals', config = true },
-  { "nvim-treesitter/nvim-treesitter", build = ":TSUpdate", main = 'neo-mittens.plugins.treesitter', config = true },
+  { 'scalameta/nvim-metals',           dependencies = { 'nvim-lua/plenary.nvim' }, main = 'neo-mittens.plugins.metals',     config = true },
+  { "nvim-treesitter/nvim-treesitter", build = ":TSUpdate",                        main = 'neo-mittens.plugins.treesitter', config = true },
   {
     "nvim-treesitter/nvim-treesitter-context",
     dependencies = { 'nvim-treesitter/nvim-treesitter' },
@@ -120,11 +120,11 @@ require("lazy").setup({
     end,
   },
   {
-      "OXY2DEV/markview.nvim",
-      ft = "markdown",  -- Lazy-load only for markdown files
+    "OXY2DEV/markview.nvim",
+    ft = "markdown",   -- Lazy-load only for markdown files
 
-      -- For `nvim-treesitter` users.
-      priority = 49,
+    -- For `nvim-treesitter` users.
+    priority = 49,
   },
   {
     'nvim-telescope/telescope.nvim',
@@ -142,7 +142,7 @@ require("lazy").setup({
           layout_strategy = 'flex',
           layout_config = { height = 0.95 },
           vimgrep_arguments = {
-            "rg",  -- Use rg instead of rga (ripgrep-all is slower)
+            "rg", -- Use rg instead of rga (ripgrep-all is slower)
             "--color=never",
             "--no-heading",
             "--line-number",
@@ -170,17 +170,18 @@ require("lazy").setup({
   -- { "folke/which-key.nvim" }, -- Havent needed this in a long time
 
 
-  { "ThePrimeagen/harpoon", branch = "harpoon2", dependencies = { "nvim-lua/plenary.nvim" }, main = 'neo-mittens.plugins.harpoon', config = true },
-  { "mbbill/undotree", main = 'neo-mittens.plugins.undotree', config = true },
-  { 'dstein64/nvim-scrollview', main = 'neo-mittens.plugins.scrollview', config = true },
-  { "lukas-reineke/indent-blankline.nvim", main = 'neo-mittens.plugins.indent', config = true },
+  { "ThePrimeagen/harpoon",                branch = "harpoon2",                     dependencies = { "nvim-lua/plenary.nvim" }, main = 'neo-mittens.plugins.harpoon', config = true },
+  { "mbbill/undotree",                     main = 'neo-mittens.plugins.undotree',   config = true },
+  { 'dstein64/nvim-scrollview',            main = 'neo-mittens.plugins.scrollview', config = true },
+  { "lukas-reineke/indent-blankline.nvim", main = 'neo-mittens.plugins.indent',     config = true },
   {
     "Fildo7525/pretty_hover",
     event = "LspAttach",
     opts = {}
   },
-  { 'stevearc/oil.nvim', dependencies = { "nvim-tree/nvim-web-devicons" }, main = 'neo-mittens.plugins.oil', config = true },
-  { 'echasnovski/mini.pairs',     version = '*',  config = function() require('mini.pairs').setup() end },
+  { 'stevearc/oil.nvim',      dependencies = { "nvim-tree/nvim-web-devicons" }, main = 'neo-mittens.plugins.oil',                     config = true },
+  { 'echasnovski/mini.pairs', version = '*',                                    config = function() require('mini.pairs')
+        .setup() end },
   {
     'echasnovski/mini.surround',
     version = '*',
@@ -199,9 +200,12 @@ require("lazy").setup({
       })
     end
   },
-  { 'echasnovski/mini.comment',   version = '*',  config = function() require('mini.comment').setup() end },
-  { 'echasnovski/mini.splitjoin', version = '*',  config = function() require('mini.splitjoin').setup() end },
-  { 'echasnovski/mini.operators', version = '*',  config = function()
+  { 'echasnovski/mini.comment',   version = '*', config = function() require('mini.comment').setup() end },
+  { 'echasnovski/mini.splitjoin', version = '*', config = function() require('mini.splitjoin').setup() end },
+  {
+    'echasnovski/mini.operators',
+    version = '*',
+    config = function()
       require('mini.operators').setup({
         replace = { prefix = 'gp' },  -- go paste over (gr conflicts with LSP references)
         exchange = { prefix = 'gx' }, -- go exchange (swap text)
@@ -250,7 +254,7 @@ require("lazy").setup({
   --     vim.keymap.set('n', '];', dropbar_api.select_next_context, { desc = 'Select next context' })
   --   end
   -- },
-  { "ellisonleao/gruvbox.nvim",   priority = 1000 }, -- My theme
+  { "ellisonleao/gruvbox.nvim", priority = 1000 },   -- My theme
   -- LLM stuff
   -- { "zbirenbaum/copilot.lua" }, -- Turning this off as its just autocomplete
   -- {
@@ -322,7 +326,7 @@ require("lazy").setup({
   },
 
   -- Git Support
-  { "lewis6991/gitsigns.nvim", main = 'neo-mittens.plugins.gitsigns', config = true },
+  { "lewis6991/gitsigns.nvim",  main = 'neo-mittens.plugins.gitsigns', config = true },
 
   {
     "NeogitOrg/neogit",
@@ -359,7 +363,7 @@ require("lazy").setup({
   -- { 'tpope/vim-rhubarb' },       -- Extension for fugitive specifically for github, eg open stuff in browsers
 
   -- Debugger Support
-  { 'mfussenegger/nvim-dap', dependencies = { "nvim-neotest/nvim-nio" } },
+  { 'mfussenegger/nvim-dap',     dependencies = { "nvim-neotest/nvim-nio" } },
   {
     'rcarriga/nvim-dap-ui',
     dependencies = { 'mfussenegger/nvim-dap', 'nvim-neotest/nvim-nio' },
@@ -402,5 +406,82 @@ require("lazy").setup({
       -- Your DBUI configuration
       vim.g.db_ui_use_nerd_fonts = 1
     end,
+  },
+  {
+    "yetone/avante.nvim",
+    -- if you want to build from source then do `make BUILD_FROM_SOURCE=true`
+    -- ⚠️ must add this setting! ! !
+    build = vim.fn.has("win32") ~= 0
+        and "powershell -ExecutionPolicy Bypass -File Build.ps1 -BuildFromSource false"
+        or "make",
+    event = "VeryLazy",
+    version = false, -- Never set this value to "*"! Never!
+    ---@module 'avante'
+    ---@type avante.Config
+    opts = {
+      -- add any opts here
+      -- this file can contain specific instructions for your project
+      instructions_file = "avante.md",
+      -- for example
+      provider = "claude",
+      providers = {
+        claude = {
+          endpoint = "https://api.anthropic.com",
+          model = "claude-sonnet-4-20250514",
+          timeout = 30000, -- Timeout in milliseconds
+          extra_request_body = {
+            temperature = 0.75,
+            max_tokens = 20480,
+          },
+        },
+        moonshot = {
+          endpoint = "https://api.moonshot.ai/v1",
+          model = "kimi-k2-0711-preview",
+          timeout = 30000, -- Timeout in milliseconds
+          extra_request_body = {
+            temperature = 0.75,
+            max_tokens = 32768,
+          },
+        },
+      },
+    },
+    dependencies = {
+      "nvim-lua/plenary.nvim",
+      "MunifTanjim/nui.nvim",
+      --- The below dependencies are optional,
+      "nvim-mini/mini.pick",         -- for file_selector provider mini.pick
+      "nvim-telescope/telescope.nvim", -- for file_selector provider telescope
+      "hrsh7th/nvim-cmp",            -- autocompletion for avante commands and mentions
+      "ibhagwan/fzf-lua",            -- for file_selector provider fzf
+      "stevearc/dressing.nvim",      -- for input provider dressing
+      "folke/snacks.nvim",           -- for input provider snacks
+      "nvim-tree/nvim-web-devicons", -- or echasnovski/mini.icons
+      "zbirenbaum/copilot.lua",      -- for providers='copilot'
+      {
+        -- support for image pasting
+        "HakonHarnes/img-clip.nvim",
+        event = "VeryLazy",
+        opts = {
+          -- recommended settings
+          default = {
+            embed_image_as_base64 = false,
+            prompt_for_file_name = false,
+            drag_and_drop = {
+              insert_mode = true,
+            },
+            -- required for Windows users
+            use_absolute_path = true,
+          },
+        },
+      },
+      {
+        -- Make sure to set this up properly if you have lazy=true
+        'MeanderingProgrammer/render-markdown.nvim',
+        opts = {
+          file_types = { "markdown", "Avante" },
+        },
+        ft = { "markdown", "Avante" },
+      },
+    },
   }
 })
