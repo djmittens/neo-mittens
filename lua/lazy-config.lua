@@ -125,6 +125,116 @@ require("lazy").setup({
 
       -- For `nvim-treesitter` users.
       priority = 49,
+
+      opts = {
+        preview = {
+          modes = { "n" },
+          hybrid_modes = { "n" },
+          linewise_hybrid_mode = true,
+          raw_previews = {
+            markdown = { "headings" },
+          },
+        },
+
+        markdown = {
+          headings = {
+            enable = true,
+            shift_width = 0,
+
+            -- Icons sized to match "# " (2 chars), "## " (3 chars), etc.
+            heading_1 = { style = "icon", icon = "󰉫 ", hl = "MarkviewHeading1" },  -- 2 chars to match "# "
+            heading_2 = { style = "icon", icon = "󰉬  ", hl = "MarkviewHeading2" }, -- 3 chars to match "## "
+            heading_3 = { style = "icon", icon = "󰉭   ", hl = "MarkviewHeading3" }, -- 4 chars to match "### "
+            heading_4 = { style = "icon", icon = "󰉮    ", hl = "MarkviewHeading4" }, -- 5 chars to match "#### "
+            heading_5 = { style = "icon", icon = "󰉯     ", hl = "MarkviewHeading5" }, -- 6 chars to match "##### "
+            heading_6 = { style = "icon", icon = "󰉰      ", hl = "MarkviewHeading6" }, -- 7 chars to match "###### "
+
+            setext_1 = { style = "decorated", icon = "󰉫 ", hl = "MarkviewHeading1", border = "─" },
+            setext_2 = { style = "decorated", icon = "󰉬 ", hl = "MarkviewHeading2", border = "─" },
+          },
+
+          -- List items: match raw markdown indentation
+          list_items = {
+            indent_size = 2,   -- Match your markdown's indent (adjust if needed)
+            shift_width = 2,   -- Virtual indent matches actual indent
+
+            marker_minus = {
+              add_padding = false,  -- No extra padding
+              text = "-",           -- Keep original character
+            },
+            marker_plus = {
+              add_padding = false,
+              text = "+",
+            },
+            marker_star = {
+              add_padding = false,
+              text = "*",
+            },
+            marker_dot = {
+              add_padding = false,
+            },
+            marker_parenthesis = {
+              add_padding = false,
+            },
+          },
+
+          -- Code blocks: simpler style to reduce visual shift
+          code_blocks = {
+            style = "simple",
+            pad_amount = 0,
+            sign = true,  -- Show language icon in sign column
+          },
+
+          -- Tables: cleaner borders
+          tables = {
+            enable = true,
+          },
+        },
+
+        markdown_inline = {
+          -- Checkboxes with nice icons
+          checkboxes = {
+            enable = true,
+            checked = { text = "󰄵", hl = "MarkviewCheckboxChecked" },
+            unchecked = { text = "󰄱", hl = "MarkviewCheckboxUnchecked" },
+            custom = {
+              { match_string = "-", text = "󰍶", hl = "MarkviewCheckboxPending" },  -- [/-/] in progress
+              { match_string = ">", text = "", hl = "MarkviewCheckboxCancelled" }, -- [>] deferred
+              { match_string = "~", text = "󰰱", hl = "MarkviewCheckboxCancelled" }, -- [~] cancelled
+            },
+          },
+
+          -- Inline code styling
+          inline_codes = {
+            enable = true,
+            hl = "MarkviewInlineCode",
+          },
+
+          -- Links
+          hyperlinks = {
+            enable = true,
+            icon = " ",
+            hl = "MarkviewHyperlink",
+          },
+
+          images = {
+            enable = true,
+            icon = " ",
+            hl = "MarkviewImage",
+          },
+        },
+
+        preview = {
+          -- Performance: don't render huge files
+          max_buf_lines = 1000,
+
+          -- Debounce for smoother experience
+          debounce = 50,
+
+          -- Map gx to open links
+          map_gx = true,
+        },
+      },
   },
   {
     'nvim-telescope/telescope.nvim',
