@@ -1,0 +1,395 @@
+#!/usr/bin/env bash
+# Ralph Wiggum - Autonomous AI Development Loop
+# https://ghuntley.com/ralph/
+#
+# Usage: ralph [plan|build] [max_iterations]
+#   ralph              - Build mode, unlimited iterations
+#   ralph 10           - Build mode, max 10 iterations  
+#   ralph plan         - Plan mode, generate implementation plan
+#   ralph plan 3       - Plan mode, max 3 iterations
+#   ralph init         - Initialize ralph in current repo
+#   ralph status       - Show current status
+#   ralph log          - Tail the current log
+
+set -euo pipefail
+
+# Colors
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+BLUE='\033[0;34m'
+NC='\033[0m' # No Color
+
+# Find repo root
+find_repo_root() {
+  local dir="$PWD"
+  while [[ "$dir" != "/" ]]; do
+    if [[ -d "$dir/.git" ]]; then
+      echo "$dir"
+      return 0
+    fi
+    dir="$(dirname "$dir")"
+  done
+  echo ""
+  return 1
+}
+
+REPO_ROOT=$(find_repo_root) || {
+  echo -e "${RED}Error: Not in a git repository${NC}"
+  exit 1
+}
+
+RALPH_DIR="$REPO_ROOT/.ralph"
+LOG_DIR="$REPO_ROOT/build/ralph-logs"
+PROMPT_PLAN="$RALPH_DIR/PROMPT_plan.md"
+PROMPT_BUILD="$RALPH_DIR/PROMPT_build.md"
+IMPL_PLAN="$RALPH_DIR/IMPLEMENTATION_PLAN.md"
+SPECS_DIR="$RALPH_DIR/specs"
+
+# Ensure log directory exists
+mkdir -p "$LOG_DIR"
+
+# ============================================================================
+# Commands
+# ============================================================================
+
+cmd_init() {
+  if [[ -d "$RALPH_DIR" ]]; then
+    echo -e "${YELLOW}Ralph already initialized in this repo${NC}"
+    echo "  $RALPH_DIR"
+    return 0
+  fi
+
+  echo -e "${BLUE}Initializing Ralph in $REPO_ROOT${NC}"
+  
+  mkdir -p "$RALPH_DIR" "$SPECS_DIR"
+
+  # Create default plan prompt
+  cat > "$PROMPT_PLAN" << 'EOF'
+0a. Study `.ralph/specs/*` to learn the project specifications.
+0b. Study @.ralph/IMPLEMENTATION_PLAN.md (if present) to understand the plan so far.
+0c. Study the source code to understand the current implementation.
+
+## Task
+
+Analyze specs vs existing code and create/update @.ralph/IMPLEMENTATION_PLAN.md:
+1. Use subagents to study specs and source code
+2. Compare specs against implementation (gap analysis)
+3. Create prioritized task list in @.ralph/IMPLEMENTATION_PLAN.md
+4. DO NOT implement anything - planning only
+
+## Output
+
+Update @.ralph/IMPLEMENTATION_PLAN.md with:
+- Prioritized bullet list of tasks
+- Each task should be small enough for one iteration
+- Mark completed items with [x]
+EOF
+
+  # Create default build prompt
+  cat > "$PROMPT_BUILD" << 'EOF'
+0a. Study `.ralph/specs/*` to understand requirements.
+0b. Study @.ralph/IMPLEMENTATION_PLAN.md for current task list.
+
+## CRITICAL: ONE TASK, THEN EXIT
+
+1. Pick ONE incomplete item from @.ralph/IMPLEMENTATION_PLAN.md
+2. Implement it (search first - don't assume not implemented)
+3. Run tests to validate
+4. Update @.ralph/IMPLEMENTATION_PLAN.md
+5. `git add -A && git commit && git push`
+6. **EXIT** - the loop restarts you fresh
+
+## Progress Reporting
+
+```
+[RALPH] === START: <task> ===
+[RALPH] FILE: <file>
+```
+
+```
+[RALPH] === DONE: <task> ===
+[RALPH] RESULT: <summary>
+```
+
+## Issue Handling
+
+1. Document issues in @.ralph/IMPLEMENTATION_PLAN.md under "## Discovered Issues"
+2. DO NOT work around problems - fix them or document them
+3. If stuck >5 min, document and EXIT
+
+## Rules
+
+- ONE task, then EXIT
+- Complete implementations only, no stubs
+- No comments in code unless asked
+EOF
+
+  # Create empty implementation plan
+  cat > "$IMPL_PLAN" << 'EOF'
+# Implementation Plan
+
+Run `ralph plan` to generate this from specs.
+
+## Pending Tasks
+
+- [ ] (Add tasks here or run `ralph plan`)
+
+## Completed
+
+- (Tasks move here when done)
+
+## Discovered Issues
+
+- (Document issues found during implementation)
+EOF
+
+  # Create example spec
+  cat > "$SPECS_DIR/example.md" << 'EOF'
+# Example Specification
+
+Delete this file and create your own specs.
+
+## Overview
+
+Describe what you want to build.
+
+## Requirements
+
+- Requirement 1
+- Requirement 2
+
+## Acceptance Criteria
+
+- [ ] Criterion 1
+- [ ] Criterion 2
+EOF
+
+  # Add to gitignore if not already there
+  local gitignore="$REPO_ROOT/.gitignore"
+  if [[ -f "$gitignore" ]]; then
+    if ! grep -q "build/ralph-logs" "$gitignore"; then
+      echo -e "\n# Ralph logs\nbuild/ralph-logs/" >> "$gitignore"
+    fi
+    if ! grep -q ".ralph/IMPLEMENTATION_PLAN.md" "$gitignore"; then
+      echo ".ralph/IMPLEMENTATION_PLAN.md" >> "$gitignore"
+    fi
+  fi
+
+  # Install Claude commands if .claude directory exists or create it
+  local claude_commands_src
+  claude_commands_src="$(dirname "$(realpath "$0")")/../.claude/commands"
+  
+  if [[ -d "$claude_commands_src" ]]; then
+    mkdir -p "$REPO_ROOT/.claude/commands"
+    for cmd in "$claude_commands_src"/ralph-*.md; do
+      if [[ -f "$cmd" ]]; then
+        local basename=$(basename "$cmd")
+        if [[ ! -f "$REPO_ROOT/.claude/commands/$basename" ]]; then
+          cp "$cmd" "$REPO_ROOT/.claude/commands/"
+          echo "INSTALL: .claude/commands/$basename"
+        fi
+      fi
+    done
+  fi
+
+  echo -e "${GREEN}Ralph initialized!${NC}"
+  echo ""
+  echo "Next steps:"
+  echo "  1. Write specs in .ralph/specs/"
+  echo "  2. Run 'ralph plan' to generate implementation plan"
+  echo "  3. Run 'ralph' to start building"
+  echo ""
+  echo "Files created:"
+  echo "  $RALPH_DIR/"
+  echo "  ├── PROMPT_plan.md    (planning mode prompt)"
+  echo "  ├── PROMPT_build.md   (build mode prompt)"
+  echo "  ├── IMPLEMENTATION_PLAN.md"
+  echo "  └── specs/"
+  echo "      └── example.md    (delete and add your own)"
+  
+  if [[ -d "$REPO_ROOT/.claude/commands" ]]; then
+    echo ""
+    echo "Claude commands installed:"
+    echo "  /ralph-init, /ralph-plan, /ralph-task, /ralph-status"
+  fi
+}
+
+cmd_status() {
+  if [[ ! -d "$RALPH_DIR" ]]; then
+    echo -e "${YELLOW}Ralph not initialized. Run 'ralph init' first.${NC}"
+    return 1
+  fi
+
+  echo -e "${BLUE}Ralph Status${NC}"
+  echo "  Repo: $REPO_ROOT"
+  echo "  Ralph dir: $RALPH_DIR"
+  echo ""
+  
+  # Count specs
+  local spec_count=$(find "$SPECS_DIR" -name "*.md" 2>/dev/null | wc -l)
+  echo "  Specs: $spec_count files"
+  
+  # Count tasks
+  if [[ -f "$IMPL_PLAN" ]]; then
+    local pending=$(grep -c "^\- \[ \]" "$IMPL_PLAN" 2>/dev/null || echo 0)
+    local done=$(grep -c "^\- \[x\]" "$IMPL_PLAN" 2>/dev/null || echo 0)
+    echo "  Tasks: $pending pending, $done completed"
+  else
+    echo "  Tasks: No implementation plan yet"
+  fi
+  
+  # Check for running ralph
+  if pgrep -f "ralph.*claude" > /dev/null 2>&1; then
+    echo -e "  Status: ${GREEN}Running${NC}"
+  else
+    echo -e "  Status: ${YELLOW}Stopped${NC}"
+  fi
+  
+  # Latest log
+  local latest_log=$(ls -t "$LOG_DIR"/ralph-*.log 2>/dev/null | head -1)
+  if [[ -n "$latest_log" ]]; then
+    echo "  Latest log: $latest_log"
+  fi
+}
+
+cmd_log() {
+  local latest_log=$(ls -t "$LOG_DIR"/ralph-*.log 2>/dev/null | head -1)
+  if [[ -z "$latest_log" ]]; then
+    echo -e "${YELLOW}No logs found${NC}"
+    return 1
+  fi
+  echo -e "${BLUE}Tailing: $latest_log${NC}"
+  tail -f "$latest_log"
+}
+
+cmd_run() {
+  local mode="$1"
+  local max_iterations="${2:-0}"
+  
+  if [[ ! -d "$RALPH_DIR" ]]; then
+    echo -e "${RED}Ralph not initialized. Run 'ralph init' first.${NC}"
+    return 1
+  fi
+
+  local prompt_file
+  if [[ "$mode" == "plan" ]]; then
+    prompt_file="$PROMPT_PLAN"
+  else
+    prompt_file="$PROMPT_BUILD"
+  fi
+
+  if [[ ! -f "$prompt_file" ]]; then
+    echo -e "${RED}Prompt file not found: $prompt_file${NC}"
+    return 1
+  fi
+
+  local iteration=0
+  local current_branch=$(git branch --show-current)
+  local log_file="$LOG_DIR/ralph-$(date +%Y%m%d-%H%M%S).log"
+
+  echo -e "${BLUE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+  echo -e "Mode:   ${GREEN}$mode${NC}"
+  echo -e "Branch: $current_branch"
+  echo -e "Log:    $log_file"
+  [[ $max_iterations -gt 0 ]] && echo -e "Max:    $max_iterations iterations"
+  echo -e "${BLUE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+
+  while true; do
+    if [[ $max_iterations -gt 0 ]] && [[ $iteration -ge $max_iterations ]]; then
+      echo -e "${BLUE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+      echo -e "Reached max iterations: $max_iterations"
+      echo -e "${BLUE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+      break
+    fi
+
+    iteration=$((iteration + 1))
+    local start_time=$(date +%s)
+    
+    echo ""
+    echo -e "${GREEN}╔═══════════════════════════════════════════════════════════════╗${NC}"
+    echo -e "${GREEN}║  ITERATION $iteration - $(date '+%Y-%m-%d %H:%M:%S')                              ║${NC}"
+    echo -e "${GREEN}╚═══════════════════════════════════════════════════════════════╝${NC}"
+    echo ""
+
+    # Run Claude - use script for unbuffered output
+    script -q -c "cat '$prompt_file' | claude -p --dangerously-skip-permissions --verbose" /dev/null 2>&1 | tee -a "$log_file"
+    
+    local exit_code=${PIPESTATUS[0]}
+    local end_time=$(date +%s)
+    local duration=$((end_time - start_time))
+    
+    echo ""
+    echo -e "${BLUE}┌───────────────────────────────────────────────────────────────┐${NC}"
+    echo -e "${BLUE}│  Iteration $iteration done in ${duration}s (exit: $exit_code)                     │${NC}"
+    echo -e "${BLUE}└───────────────────────────────────────────────────────────────┘${NC}"
+
+    # Push changes
+    git push origin "$current_branch" 2>/dev/null || git push -u origin "$current_branch" 2>/dev/null || true
+
+    # Show recent commits
+    echo ""
+    echo "Recent commits:"
+    git log --oneline -3
+    echo ""
+  done
+}
+
+# ============================================================================
+# Main
+# ============================================================================
+
+case "${1:-}" in
+  init)
+    cmd_init
+    ;;
+  status)
+    cmd_status
+    ;;
+  log)
+    cmd_log
+    ;;
+  plan)
+    cmd_run "plan" "${2:-0}"
+    ;;
+  ""|build)
+    # Default to build mode
+    if [[ "${1:-}" =~ ^[0-9]+$ ]]; then
+      # ralph 10 -> build mode with 10 iterations
+      cmd_run "build" "$1"
+    else
+      # ralph or ralph build
+      cmd_run "build" "${2:-0}"
+    fi
+    ;;
+  [0-9]*)
+    # ralph 10 -> build mode with 10 iterations
+    cmd_run "build" "$1"
+    ;;
+  help|--help|-h)
+    echo "Ralph Wiggum - Autonomous AI Development Loop"
+    echo ""
+    echo "Usage: ralph [command] [options]"
+    echo ""
+    echo "Commands:"
+    echo "  init          Initialize ralph in current repo"
+    echo "  plan [N]      Run planning mode (generate implementation plan)"
+    echo "  build [N]     Run build mode (implement from plan)"
+    echo "  [N]           Shorthand for 'build N'"
+    echo "  status        Show current status"
+    echo "  log           Tail the current log"
+    echo "  help          Show this help"
+    echo ""
+    echo "Examples:"
+    echo "  ralph init    # Initialize in current repo"
+    echo "  ralph plan    # Generate implementation plan from specs"
+    echo "  ralph         # Build mode, unlimited"
+    echo "  ralph 10      # Build mode, max 10 iterations"
+    echo "  ralph status  # Check status"
+    ;;
+  *)
+    echo -e "${RED}Unknown command: $1${NC}"
+    echo "Run 'ralph help' for usage"
+    exit 1
+    ;;
+esac
