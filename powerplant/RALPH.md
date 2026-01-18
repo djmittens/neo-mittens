@@ -21,6 +21,10 @@ ralph plan
 
 # Let ralph build it
 ralph 10  # Run 10 iterations
+
+# Or with safety limits
+ralph 50 --max-cost 25  # Stop at 50 iterations or $25
+ralph --completion-promise "ALL TESTS PASSING"  # Stop when done
 ```
 
 ## How It Works
@@ -69,15 +73,33 @@ ralph 10  # Run 10 iterations
 ```bash
 ralph init          # Initialize ralph in current repo
 ralph plan          # Generate implementation plan from specs (runs once)
-ralph status        # Show current status
+ralph status        # Show current status + session metrics
 ralph watch         # Live dashboard (run in separate terminal)
 ralph log           # Tail the current log
+ralph metrics       # Show detailed session metrics
 ralph help          # Show help
 
 # Build mode (implement from plan)
 ralph               # Run forever (until Ctrl+C or no tasks left)
 ralph 10            # Run max 10 iterations then stop
 ralph build 10      # Same as above (explicit)
+```
+
+## Options
+
+```bash
+--max-cost N            # Stop when cumulative cost exceeds $N
+--max-failures N        # Circuit breaker: stop after N consecutive failures (default: 3)
+--completion-promise T  # Stop when output contains text T
+```
+
+**Examples:**
+
+```bash
+ralph 50 --max-cost 25              # Max 50 iterations or $25, whichever first
+ralph --max-cost 10                 # Unlimited iterations, stop at $10
+ralph --completion-promise "DONE"   # Stop when DONE appears in output
+ralph 100 --max-failures 5          # Allow up to 5 consecutive failures
 ```
 
 **Iteration limits:** The number after `ralph` or `ralph build` sets how many
@@ -170,24 +192,52 @@ tail -f build/ralph-logs/ralph-*.log
 # Check commits
 git log --oneline -10
 
-# See status
+# See status + metrics
 ralph status
+
+# Detailed metrics (cost, tokens, success rate)
+ralph metrics
+
+# Live dashboard with metrics
+ralph watch
 ```
+
+## Metrics
+
+Ralph tracks session metrics automatically:
+
+- **Total cost** - Cumulative API cost in USD
+- **Iterations** - Total iterations run
+- **Success/Failure count** - For circuit breaker
+- **Token usage** - Input and output tokens
+
+View with `ralph status`, `ralph metrics`, or `ralph watch`.
+
+Metrics are stored in `build/ralph-logs/metrics.json` and reset each session.
 
 ## Safety
 
 Ralph uses `--dangerously-skip-permissions` to run autonomously.
 
+**Built-in Safety Features:**
+
+1. **Cost limits** - Use `--max-cost N` to cap spending at $N
+2. **Circuit breaker** - Stops after N consecutive failures (default: 3)
+3. **Iteration limits** - Use `ralph N` to cap iterations
+4. **Completion detection** - Use `--completion-promise` to stop on success
+
 **Recommendations:**
 - Run in a sandboxed environment for untrusted code
 - Use a separate git branch
 - Review commits before merging to main
-- Set reasonable iteration limits
+- Set reasonable iteration AND cost limits for unattended runs
+- Example overnight run: `ralph 100 --max-cost 50 --max-failures 5`
 
 **Recovery:**
 - `Ctrl+C` stops the loop
 - `git reset --hard HEAD~N` undoes N commits
 - Delete and regenerate `IMPLEMENTATION_PLAN.md` if stuck
+- `ralph metrics` shows what was spent
 
 ## Integration with AGENTS.md
 

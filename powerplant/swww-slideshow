@@ -1,5 +1,8 @@
 #!/bin/bash
 
+# Exit if already running
+pidof -x -o $$ "$(basename "$0")" >/dev/null && exit 0
+
 WALL_DIR="$HOME/Pictures/Waifu"
 INTERVAL=300  # seconds
 TRANSITION="random"
