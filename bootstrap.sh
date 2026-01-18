@@ -340,4 +340,13 @@ for pattern in "target/" ".bsp/" ".metals/" ".bloop/" "*.class" "*.jar"; do
   fi
 done
 
+# 14) Install global Claude commands (ralph)
+CLAUDE_COMMANDS_DIR="$HOME/.claude/commands"
+ensure_dir "$CLAUDE_COMMANDS_DIR"
+for cmd in "$SCRIPT_DIR/.claude/commands"/ralph-*.md; do
+  if [ -f "$cmd" ]; then
+    link_symlink "$cmd" "$CLAUDE_COMMANDS_DIR/$(basename "$cmd")"
+  fi
+done
+
 echo "Done. You may need to restart your shell (or source ~/.profile) and restart Neovim."

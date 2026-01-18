@@ -195,23 +195,6 @@ EOF
     fi
   fi
 
-  # Install Claude commands if .claude directory exists or create it
-  local claude_commands_src
-  claude_commands_src="$(dirname "$(realpath "$0")")/../.claude/commands"
-  
-  if [[ -d "$claude_commands_src" ]]; then
-    mkdir -p "$REPO_ROOT/.claude/commands"
-    for cmd in "$claude_commands_src"/ralph-*.md; do
-      if [[ -f "$cmd" ]]; then
-        local basename=$(basename "$cmd")
-        if [[ ! -f "$REPO_ROOT/.claude/commands/$basename" ]]; then
-          cp "$cmd" "$REPO_ROOT/.claude/commands/"
-          echo "INSTALL: .claude/commands/$basename"
-        fi
-      fi
-    done
-  fi
-
   echo -e "${GREEN}Ralph initialized!${NC}"
   echo ""
   echo "Next steps:"
@@ -226,12 +209,8 @@ EOF
   echo "  ├── IMPLEMENTATION_PLAN.md"
   echo "  └── specs/"
   echo "      └── example.md    (delete and add your own)"
-  
-  if [[ -d "$REPO_ROOT/.claude/commands" ]]; then
-    echo ""
-    echo "Claude commands installed:"
-    echo "  /ralph-init, /ralph-plan, /ralph-task, /ralph-status"
-  fi
+  echo ""
+  echo "Claude commands (global): /ralph-init, /ralph-plan, /ralph-task, /ralph-status"
 }
 
 cmd_status() {
@@ -280,6 +259,63 @@ cmd_log() {
   fi
   echo -e "${BLUE}Tailing: $latest_log${NC}"
   tail -f "$latest_log"
+}
+
+cmd_watch() {
+  echo -e "${BLUE}Watching ralph progress... (Ctrl+C to stop)${NC}"
+  echo ""
+  
+  while true; do
+    clear
+    echo -e "${BLUE}══════════════════════════════════════════════════════════════${NC}"
+    echo -e "${BLUE}  RALPH WATCH - $(date '+%H:%M:%S')${NC}"
+    echo -e "${BLUE}══════════════════════════════════════════════════════════════${NC}"
+    echo ""
+    
+    # Branch
+    echo -e "${GREEN}Branch:${NC} $(git branch --show-current)"
+    echo ""
+    
+    # Process status
+    if pgrep -f "claude.*dangerously-skip-permissions" > /dev/null 2>&1; then
+      echo -e "${GREEN}Status:${NC} Running"
+    else
+      echo -e "${YELLOW}Status:${NC} Stopped"
+    fi
+    echo ""
+    
+    # Recent commits (last 5 min)
+    echo -e "${GREEN}Recent Commits:${NC}"
+    git log --oneline --since="5 minutes ago" 2>/dev/null | head -5 || echo "  (none in last 5 min)"
+    echo ""
+    
+    # Current task
+    echo -e "${GREEN}Next Task:${NC}"
+    grep -m1 "^- \[ \]" "$IMPL_PLAN" 2>/dev/null | sed 's/^- \[ \] /  /' || echo "  (no pending tasks)"
+    echo ""
+    
+    # Plan summary
+    if [[ -f "$IMPL_PLAN" ]]; then
+      local pending=$(grep -c "^- \[ \]" "$IMPL_PLAN" 2>/dev/null || echo 0)
+      local done=$(grep -c "^- \[x\]" "$IMPL_PLAN" 2>/dev/null || echo 0)
+      echo -e "${GREEN}Progress:${NC} $done done, $pending pending"
+    fi
+    echo ""
+    
+    # Latest log lines
+    echo -e "${GREEN}Latest Output:${NC}"
+    local latest_log=$(ls -t "$LOG_DIR"/ralph-*.log 2>/dev/null | head -1)
+    if [[ -n "$latest_log" && -s "$latest_log" ]]; then
+      tail -8 "$latest_log" | sed 's/^/  /'
+    else
+      echo "  (no output yet)"
+    fi
+    echo ""
+    echo -e "${BLUE}──────────────────────────────────────────────────────────────${NC}"
+    echo "Refreshing every 5s..."
+    
+    sleep 5
+  done
 }
 
 cmd_run() {
@@ -331,8 +367,20 @@ cmd_run() {
     echo -e "${GREEN}╚═══════════════════════════════════════════════════════════════╝${NC}"
     echo ""
 
-    # Run Claude - use script for unbuffered output
-    script -q -c "cat '$prompt_file' | claude -p --dangerously-skip-permissions --verbose" /dev/null 2>&1 | tee -a "$log_file"
+    # Run Claude with streaming output
+    local script_dir
+    script_dir="$(dirname "$(realpath "$0")")"
+    
+    if [[ -x "$script_dir/ralph-stream" ]]; then
+      # Stream JSON and filter for human-readable output
+      claude -p --dangerously-skip-permissions --verbose --output-format stream-json < "$prompt_file" 2>&1 | \
+        tee -a "$log_file.json" | \
+        "$script_dir/ralph-stream" | \
+        tee -a "$log_file"
+    else
+      # Fallback: no streaming filter
+      claude -p --dangerously-skip-permissions --verbose < "$prompt_file" 2>&1 | tee -a "$log_file"
+    fi
     
     local exit_code=${PIPESTATUS[0]}
     local end_time=$(date +%s)
@@ -368,6 +416,9 @@ case "${1:-}" in
   log)
     cmd_log
     ;;
+  watch)
+    cmd_watch
+    ;;
   plan)
     cmd_run "plan" "${2:-0}"
     ;;
@@ -396,6 +447,7 @@ case "${1:-}" in
     echo "  build [N]     Run build mode (implement from plan)"
     echo "  [N]           Shorthand for 'build N'"
     echo "  status        Show current status"
+    echo "  watch         Live dashboard (run in separate terminal)"
     echo "  log           Tail the current log"
     echo "  help          Show this help"
     echo ""
@@ -404,6 +456,7 @@ case "${1:-}" in
     echo "  ralph plan    # Generate implementation plan from specs"
     echo "  ralph         # Build mode, unlimited"
     echo "  ralph 10      # Build mode, max 10 iterations"
+    echo "  ralph watch   # Live progress dashboard"
     echo "  ralph status  # Check status"
     ;;
   *)
