@@ -66,13 +66,20 @@ cmd_init() {
 
   # Create default plan prompt
   cat > "$PROMPT_PLAN" << 'EOF'
-0a. Study `ralph/specs/*` to learn the project specifications.
-0b. Study @ralph/IMPLEMENTATION_PLAN.md (if present) to understand the plan so far.
-0c. Study the source code to understand the current implementation.
+0a. Run `git branch --show-current` to identify the current branch.
+0b. Study `ralph/specs/*` to learn the project specifications.
+0c. Study @ralph/IMPLEMENTATION_PLAN.md (if present) to understand the plan so far.
+0d. Study the source code to understand the current implementation.
+
+## Branch Awareness
+
+IMPORTANT: Check the **Branch:** field in @ralph/IMPLEMENTATION_PLAN.md.
+- If it doesn't match current branch, note this - the plan may be from different work.
+- Update the **Branch:** and **Last updated:** fields when you modify the plan.
 
 ## Task
 
-Analyze specs vs existing code and create/update @.ralph/IMPLEMENTATION_PLAN.md:
+Analyze specs vs existing code and create/update @ralph/IMPLEMENTATION_PLAN.md:
 1. Use subagents to study specs and source code
 2. Compare specs against implementation (gap analysis)
 3. Create prioritized task list in @ralph/IMPLEMENTATION_PLAN.md
@@ -81,6 +88,8 @@ Analyze specs vs existing code and create/update @.ralph/IMPLEMENTATION_PLAN.md:
 ## Output
 
 Update @ralph/IMPLEMENTATION_PLAN.md with:
+- **Branch:** `<current branch>` at the top
+- **Last updated:** timestamp
 - Prioritized bullet list of tasks
 - Each task should be small enough for one iteration
 - Mark completed items with [x]
@@ -88,21 +97,30 @@ EOF
 
   # Create default build prompt
   cat > "$PROMPT_BUILD" << 'EOF'
-0a. Study `ralph/specs/*` to understand requirements.
-0b. Study @ralph/IMPLEMENTATION_PLAN.md for current task list.
+0a. Run `git branch --show-current` to identify the current branch.
+0b. Study `ralph/specs/*` to understand requirements.
+0c. Study @ralph/IMPLEMENTATION_PLAN.md for current task list.
+
+## Branch Awareness
+
+IMPORTANT: Check the **Branch:** field in @ralph/IMPLEMENTATION_PLAN.md.
+- If it matches current branch, continue with tasks.
+- If it doesn't match, the plan is from different work - proceed carefully or run `ralph plan` first.
+- Update **Last updated:** when you complete a task.
 
 ## CRITICAL: ONE TASK, THEN EXIT
 
 1. Pick ONE incomplete item from @ralph/IMPLEMENTATION_PLAN.md
 2. Implement it (search first - don't assume not implemented)
 3. Run tests to validate
-4. Update @ralph/IMPLEMENTATION_PLAN.md
+4. Update @ralph/IMPLEMENTATION_PLAN.md (mark complete, update timestamp)
 5. `git add -A && git commit && git push`
 6. **EXIT** - the loop restarts you fresh
 
 ## Progress Reporting
 
 ```
+[RALPH] BRANCH: <current branch>
 [RALPH] === START: <task> ===
 [RALPH] FILE: <file>
 ```
@@ -125,15 +143,19 @@ EOF
 - No comments in code unless asked
 EOF
 
-  # Create empty implementation plan
-  cat > "$IMPL_PLAN" << 'EOF'
+  # Create empty implementation plan with branch info
+  local current_branch=$(git branch --show-current)
+  cat > "$IMPL_PLAN" << EOF
 # Implementation Plan
 
-Run `ralph plan` to generate this from specs.
+**Branch:** \`$current_branch\`
+**Last updated:** $(date '+%Y-%m-%d %H:%M')
+
+Run \`ralph plan\` to generate this from specs.
 
 ## Pending Tasks
 
-- [ ] (Add tasks here or run `ralph plan`)
+- [ ] (Add tasks here or run \`ralph plan\`)
 
 ## Completed
 
@@ -172,11 +194,6 @@ EOF
       echo -e "\n# Ralph logs\nbuild/ralph-logs/" >> "$gitignore"
     fi
   fi
-  
-  # Note: ralph/IMPLEMENTATION_PLAN.md should be in global gitignore (~/.gitignore_global)
-  # Run neo-mittens bootstrap.sh to set this up, or manually:
-  #   echo "ralph/IMPLEMENTATION_PLAN.md" >> ~/.gitignore_global
-  #   git config --global core.excludesfile ~/.gitignore_global
 
   # Install Claude commands if .claude directory exists or create it
   local claude_commands_src
