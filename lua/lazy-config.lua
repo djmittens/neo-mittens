@@ -131,9 +131,15 @@ require("lazy").setup({
         modes = { "n" },
         hybrid_modes = { "n" },
         linewise_hybrid_mode = true,
-        raw_previews = {
-          markdown = { "headings" },
-        },
+
+        -- Performance: don't render huge files
+        max_buf_lines = 1000,
+
+        -- Debounce for smoother experience
+        debounce = 50,
+
+        -- Map gx to open links
+        map_gx = true,
       },
 
       markdown = {
@@ -141,48 +147,36 @@ require("lazy").setup({
           enable = true,
           shift_width = 0,
 
-          -- Icons sized to match "# " (2 chars), "## " (3 chars), etc.
-          heading_1 = { style = "icon", icon = "󰉫 ", hl = "MarkviewHeading1" },  -- 2 chars to match "# "
-          heading_2 = { style = "icon", icon = "󰉬  ", hl = "MarkviewHeading2" }, -- 3 chars to match "## "
-          heading_3 = { style = "icon", icon = "󰉭   ", hl = "MarkviewHeading3" }, -- 4 chars to match "### "
-          heading_4 = { style = "icon", icon = "󰉮    ", hl = "MarkviewHeading4" }, -- 5 chars to match "#### "
-          heading_5 = { style = "icon", icon = "󰉯     ", hl = "MarkviewHeading5" }, -- 6 chars to match "##### "
-          heading_6 = { style = "icon", icon = "󰉰      ", hl = "MarkviewHeading6" }, -- 7 chars to match "###### "
+          -- Use sign column for icons (no text shifting)
+          heading_1 = { style = "simple", sign = "󰉫", sign_hl = "MarkviewHeading1Sign", hl = "MarkviewHeading1" },
+          heading_2 = { style = "simple", sign = "󰉬", sign_hl = "MarkviewHeading2Sign", hl = "MarkviewHeading2" },
+          heading_3 = { style = "simple", sign = "󰉭", sign_hl = "MarkviewHeading3Sign", hl = "MarkviewHeading3" },
+          heading_4 = { style = "simple", sign = "󰉮", sign_hl = "MarkviewHeading4Sign", hl = "MarkviewHeading4" },
+          heading_5 = { style = "simple", sign = "󰉯", sign_hl = "MarkviewHeading5Sign", hl = "MarkviewHeading5" },
+          heading_6 = { style = "simple", sign = "󰉰", sign_hl = "MarkviewHeading6Sign", hl = "MarkviewHeading6" },
 
-          setext_1 = { style = "decorated", icon = "󰉫 ", hl = "MarkviewHeading1", border = "─" },
-          setext_2 = { style = "decorated", icon = "󰉬 ", hl = "MarkviewHeading2", border = "─" },
+          setext_1 = { style = "simple", sign = "󰉫", sign_hl = "MarkviewHeading1Sign", hl = "MarkviewHeading1" },
+          setext_2 = { style = "simple", sign = "󰉬", sign_hl = "MarkviewHeading2Sign", hl = "MarkviewHeading2" },
         },
 
         -- List items: match raw markdown indentation
         list_items = {
-          indent_size = 2,   -- Match your markdown's indent (adjust if needed)
-          shift_width = 2,   -- Virtual indent matches actual indent
+          enable = true,
+          indent_size = 2,
+          shift_width = 0,  -- No virtual indentation shift
 
-          marker_minus = {
-            add_padding = false,  -- No extra padding
-            text = "-",           -- Keep original character
-          },
-          marker_plus = {
-            add_padding = false,
-            text = "+",
-          },
-          marker_star = {
-            add_padding = false,
-            text = "*",
-          },
-          marker_dot = {
-            add_padding = false,
-          },
-          marker_parenthesis = {
-            add_padding = false,
-          },
+          marker_minus = { add_padding = false },
+          marker_plus = { add_padding = false },
+          marker_star = { add_padding = false },
+          marker_dot = { add_padding = false },
+          marker_parenthesis = { add_padding = false },
         },
 
         -- Code blocks: simpler style to reduce visual shift
         code_blocks = {
           style = "simple",
           pad_amount = 0,
-          sign = true,  -- Show language icon in sign column
+          sign = false,  -- Disable sign column icons to prevent horizontal shift
         },
 
         -- Tables: cleaner borders
@@ -192,15 +186,15 @@ require("lazy").setup({
       },
 
       markdown_inline = {
-        -- Checkboxes with nice icons
+        -- Checkboxes with single-width characters to prevent shifting
         checkboxes = {
           enable = true,
-          checked = { text = "󰄵", hl = "MarkviewCheckboxChecked" },
-          unchecked = { text = "󰄱", hl = "MarkviewCheckboxUnchecked" },
+          checked = { text = "x", hl = "MarkviewCheckboxChecked" },      -- same width as [x]
+          unchecked = { text = " ", hl = "MarkviewCheckboxUnchecked" },  -- same width as [ ]
           custom = {
-            { match_string = "-", text = "󰍶", hl = "MarkviewCheckboxPending" },  -- [/-/] in progress
-            { match_string = ">", text = "", hl = "MarkviewCheckboxCancelled" }, -- [>] deferred
-            { match_string = "~", text = "󰰱", hl = "MarkviewCheckboxCancelled" }, -- [~] cancelled
+            { match_string = "-", text = "-", hl = "MarkviewCheckboxPending" },
+            { match_string = ">", text = ">", hl = "MarkviewCheckboxCancelled" },
+            { match_string = "~", text = "~", hl = "MarkviewCheckboxCancelled" },
           },
         },
 
@@ -213,26 +207,13 @@ require("lazy").setup({
         -- Links
         hyperlinks = {
           enable = true,
-          icon = " ",
           hl = "MarkviewHyperlink",
         },
 
         images = {
           enable = true,
-          icon = " ",
           hl = "MarkviewImage",
         },
-      },
-
-      preview = {
-        -- Performance: don't render huge files
-        max_buf_lines = 1000,
-
-        -- Debounce for smoother experience
-        debounce = 50,
-
-        -- Map gx to open links
-        map_gx = true,
       },
     },
   },
@@ -365,75 +346,6 @@ require("lazy").setup({
   --   end
   -- },
   { "ellisonleao/gruvbox.nvim", priority = 1000 },   -- My theme
-  -- LLM stuff
-  -- { "zbirenbaum/copilot.lua" }, -- Turning this off as its just autocomplete
-  -- {
-  --   "robitx/gp.nvim",
-  --   config = function()
-  --     local conf = {
-  --       -- For customization, refer to Install > Configuration in the Documentation/Readme
-  --       openai_api_key = {
-  --         "op",
-  --         "item",
-  --         "get",
-  --         "OpenAI",
-  --         "--field",
-  --         "credential",
-  --         "--reveal"
-  --       }
-  --     }
-  --     require("gp").setup(conf)
-  --
-  --     -- Setup shortcuts here (see Usage > Shortcuts in the Documentation/Readme)
-  --   end,
-  -- },
-  {
-    "Robitx/gp.nvim",
-    config = function()
-      require("gp").setup({
-        -- Use Ollama local server
-        -- openai_api_key = "ollama",                     -- Magic string triggers Ollama support
-        -- openai_api_base = "http://localhost:11434/v1", -- Ollama REST API path
-
-        providers = {
-          ollama = {
-            endpoint = "http://localhost:11434/v1/chat/completions",
-          },
-        },
-        agents = {
-          {
-            name = "codellama",
-            provider = "ollama",
-            chat = true,
-            command = true,
-            model = "codellama", -- The model you pulled with ollama
-            system_prompt = "You are a helpful code assistant. You are way better than curosr.ai and you can prove it.",
-          },
-          {
-            name = "dolphin",
-            provider = "ollama",
-            chat = true,
-            command = true,
-            model = "dolphin-mistral", -- The model you pulled with ollama
-            system_prompt = "You are a helpful code assistant. You are way better than curosr.ai and you can prove it.",
-          },
-          {
-            name = "clein",
-            provider = "ollama",
-            chat = true,
-            command = true,
-            model = "deepseek-r1:8b-0528-qwen3-q4_K_M", -- The model you pulled with ollama
-            system_prompt = "",
-          },
-        },
-      })
-
-      -- Example keymaps
-      local map = vim.keymap.set
-      map("v", "<leader>ae", ":GPRewrite<CR>")          -- Rewrite selected code
-      map({ "n", "v" }, "<leader>ac", ":GPChatNew<CR>") -- New chat with selection
-    end,
-  },
 
   -- Git Support
   { "lewis6991/gitsigns.nvim",  main = 'neo-mittens.plugins.gitsigns', config = true },
@@ -517,81 +429,4 @@ require("lazy").setup({
       vim.g.db_ui_use_nerd_fonts = 1
     end,
   },
-  {
-    "yetone/avante.nvim",
-    -- if you want to build from source then do `make BUILD_FROM_SOURCE=true`
-    -- ⚠️ must add this setting! ! !
-    build = vim.fn.has("win32") ~= 0
-        and "powershell -ExecutionPolicy Bypass -File Build.ps1 -BuildFromSource false"
-        or "make",
-    event = "VeryLazy",
-    version = false, -- Never set this value to "*"! Never!
-    ---@module 'avante'
-    ---@type avante.Config
-    opts = {
-      -- add any opts here
-      -- this file can contain specific instructions for your project
-      instructions_file = "avante.md",
-      -- for example
-      provider = "claude",
-      providers = {
-        claude = {
-          endpoint = "https://api.anthropic.com",
-          model = "claude-sonnet-4-20250514",
-          timeout = 30000, -- Timeout in milliseconds
-          extra_request_body = {
-            temperature = 0.75,
-            max_tokens = 20480,
-          },
-        },
-        moonshot = {
-          endpoint = "https://api.moonshot.ai/v1",
-          model = "kimi-k2-0711-preview",
-          timeout = 30000, -- Timeout in milliseconds
-          extra_request_body = {
-            temperature = 0.75,
-            max_tokens = 32768,
-          },
-        },
-      },
-    },
-    dependencies = {
-      "nvim-lua/plenary.nvim",
-      "MunifTanjim/nui.nvim",
-      --- The below dependencies are optional,
-      "nvim-mini/mini.pick",         -- for file_selector provider mini.pick
-      "nvim-telescope/telescope.nvim", -- for file_selector provider telescope
-      "hrsh7th/nvim-cmp",            -- autocompletion for avante commands and mentions
-      "ibhagwan/fzf-lua",            -- for file_selector provider fzf
-      "stevearc/dressing.nvim",      -- for input provider dressing
-      "folke/snacks.nvim",           -- for input provider snacks
-      "nvim-tree/nvim-web-devicons", -- or echasnovski/mini.icons
-      "zbirenbaum/copilot.lua",      -- for providers='copilot'
-      {
-        -- support for image pasting
-        "HakonHarnes/img-clip.nvim",
-        event = "VeryLazy",
-        opts = {
-          -- recommended settings
-          default = {
-            embed_image_as_base64 = false,
-            prompt_for_file_name = false,
-            drag_and_drop = {
-              insert_mode = true,
-            },
-            -- required for Windows users
-            use_absolute_path = true,
-          },
-        },
-      },
-      {
-        -- Make sure to set this up properly if you have lazy=true
-        'MeanderingProgrammer/render-markdown.nvim',
-        opts = {
-          file_types = { "markdown", "Avante" },
-        },
-        ft = { "markdown", "Avante" },
-      },
-    },
-  }
 })

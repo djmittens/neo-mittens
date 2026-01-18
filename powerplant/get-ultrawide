@@ -1,0 +1,5 @@
+#!/bin/bash
+# Detect the ultrawide monitor (Samsung Odyssey G95NC) by resolution
+# Returns the monitor name (e.g., DP-1, DP-2, DP-3)
+
+hyprctl monitors -j | jq -r '.[] | select(.width == 7680 and .height == 2160) | .name' | head -1

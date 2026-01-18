@@ -1,0 +1,19 @@
+#!/bin/bash
+# Start waybar with dynamically detected ultrawide monitor
+
+ULTRAWIDE=$(get-ultrawide)
+CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/waybar"
+
+# Generate config with correct monitor
+cat > "$CONFIG_DIR/config.jsonc" << EOF
+[
+  {
+    "output": [ "$ULTRAWIDE" ],
+    "include": [
+      "~/.config/waybar/bars/top.jsonc"
+    ]
+  }
+]
+EOF
+
+exec waybar

@@ -46,8 +46,27 @@ except Exception:
     subprocess.run(["hyprctl", "dispatch", "movefocus", hypr_dir])
     sys.exit(0)
 
-if win_class not in [ "com.mitchellh.ghostty", "Alacritty" ]:
-    log(f"Window class is not Alacritty: {win_class}")
+# Terminal window classes that support tmux/nvim navigation
+TERMINAL_CLASSES = [
+    "com.mitchellh.ghostty",
+    "Alacritty",
+    "kitty",
+    "org.wezfurlong.wezterm",
+    "foot",
+    "footclient",
+    "org.codeberg.dnkl.foot",
+    "st-256color",
+    "xterm-256color",
+    "gnome-terminal-server",
+    "konsole",
+    "terminator",
+    "tilix",
+    "urxvt",
+    "xterm",
+]
+
+if win_class not in TERMINAL_CLASSES:
+    log(f"Window class is not a known terminal: {win_class}")
     subprocess.run(["hyprctl", "dispatch", "movefocus", hypr_dir])
     sys.exit(0)
 
@@ -80,9 +99,9 @@ walk_process_tree(pid)
 # if we are in neovim, then lets hope i have a script that does the switch in there natively
 if in_nvim:
     log("Nvim detected, letting it handle the motion")
-    # requires `wtype` tool to perform the keypress again in wayland, as this
-    # script already consumed it
-    subprocess.run(["wtype", "-M", "win", "-k", dir_key, "-m", "win"], capture_output=True, text=True)
+    # Send Alt+hjkl to nvim - matches <M-h/j/k/l> mappings in misc-config.lua
+    # Using Alt instead of Super so it doesn't interfere with held Super key
+    subprocess.run(["wtype", "-M", "alt", "-k", dir_key, "-m", "alt"], capture_output=True, text=True)
     sys.exit(0)
 
 # Fallback to tmux if possible
@@ -91,12 +110,11 @@ if in_tmux:
     result = subprocess.run(["tmux", "display", "-p", '#{pane_current_command}'], capture_output=True, text=True)
 
     if result.stdout.strip() == 'nvim':
-        # requires `wtype` tool to perform the keypress again in wayland, as this
-        # script already consumed it
+        # Send Alt+hjkl to nvim - matches <M-h/j/k/l> mappings in misc-config.lua
         log("Nvim inside Tmux detected, letting it handle the motion")
 
         try:
-            res = subprocess.run(["wtype", "-M", "alt", "-k", dir_key], capture_output=True, text=True)
+            res = subprocess.run(["wtype", "-M", "alt", "-k", dir_key, "-m", "alt"], capture_output=True, text=True)
             log(f"Sending key to nvim {res}")
 
         except subprocess.CalledProcessError as e:
