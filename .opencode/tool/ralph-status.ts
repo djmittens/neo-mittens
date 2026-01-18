@@ -8,7 +8,7 @@ export default tool({
 Reports: initialization state, spec count, task counts, and latest log.`,
   args: {},
   async execute(args, context) {
-    const ralphDir = ".ralph"
+    const ralphDir = "ralph"
     const specsDir = `${ralphDir}/specs`
     const planFile = `${ralphDir}/IMPLEMENTATION_PLAN.md`
     const logsDir = "build/ralph-logs"

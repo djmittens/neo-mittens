@@ -39,7 +39,7 @@ REPO_ROOT=$(find_repo_root) || {
   exit 1
 }
 
-RALPH_DIR="$REPO_ROOT/.ralph"
+RALPH_DIR="$REPO_ROOT/ralph"
 LOG_DIR="$REPO_ROOT/build/ralph-logs"
 PROMPT_PLAN="$RALPH_DIR/PROMPT_plan.md"
 PROMPT_BUILD="$RALPH_DIR/PROMPT_build.md"
@@ -66,8 +66,8 @@ cmd_init() {
 
   # Create default plan prompt
   cat > "$PROMPT_PLAN" << 'EOF'
-0a. Study `.ralph/specs/*` to learn the project specifications.
-0b. Study @.ralph/IMPLEMENTATION_PLAN.md (if present) to understand the plan so far.
+0a. Study `ralph/specs/*` to learn the project specifications.
+0b. Study @ralph/IMPLEMENTATION_PLAN.md (if present) to understand the plan so far.
 0c. Study the source code to understand the current implementation.
 
 ## Task
@@ -75,12 +75,12 @@ cmd_init() {
 Analyze specs vs existing code and create/update @.ralph/IMPLEMENTATION_PLAN.md:
 1. Use subagents to study specs and source code
 2. Compare specs against implementation (gap analysis)
-3. Create prioritized task list in @.ralph/IMPLEMENTATION_PLAN.md
+3. Create prioritized task list in @ralph/IMPLEMENTATION_PLAN.md
 4. DO NOT implement anything - planning only
 
 ## Output
 
-Update @.ralph/IMPLEMENTATION_PLAN.md with:
+Update @ralph/IMPLEMENTATION_PLAN.md with:
 - Prioritized bullet list of tasks
 - Each task should be small enough for one iteration
 - Mark completed items with [x]
@@ -88,15 +88,15 @@ EOF
 
   # Create default build prompt
   cat > "$PROMPT_BUILD" << 'EOF'
-0a. Study `.ralph/specs/*` to understand requirements.
-0b. Study @.ralph/IMPLEMENTATION_PLAN.md for current task list.
+0a. Study `ralph/specs/*` to understand requirements.
+0b. Study @ralph/IMPLEMENTATION_PLAN.md for current task list.
 
 ## CRITICAL: ONE TASK, THEN EXIT
 
-1. Pick ONE incomplete item from @.ralph/IMPLEMENTATION_PLAN.md
+1. Pick ONE incomplete item from @ralph/IMPLEMENTATION_PLAN.md
 2. Implement it (search first - don't assume not implemented)
 3. Run tests to validate
-4. Update @.ralph/IMPLEMENTATION_PLAN.md
+4. Update @ralph/IMPLEMENTATION_PLAN.md
 5. `git add -A && git commit && git push`
 6. **EXIT** - the loop restarts you fresh
 
@@ -114,7 +114,7 @@ EOF
 
 ## Issue Handling
 
-1. Document issues in @.ralph/IMPLEMENTATION_PLAN.md under "## Discovered Issues"
+1. Document issues in @ralph/IMPLEMENTATION_PLAN.md under "## Discovered Issues"
 2. DO NOT work around problems - fix them or document them
 3. If stuck >5 min, document and EXIT
 
@@ -171,8 +171,8 @@ EOF
     if ! grep -q "build/ralph-logs" "$gitignore"; then
       echo -e "\n# Ralph logs\nbuild/ralph-logs/" >> "$gitignore"
     fi
-    if ! grep -q ".ralph/IMPLEMENTATION_PLAN.md" "$gitignore"; then
-      echo ".ralph/IMPLEMENTATION_PLAN.md" >> "$gitignore"
+    if ! grep -q "ralph/IMPLEMENTATION_PLAN.md" "$gitignore"; then
+      echo "ralph/IMPLEMENTATION_PLAN.md" >> "$gitignore"
     fi
   fi
 
@@ -196,7 +196,7 @@ EOF
   echo -e "${GREEN}Ralph initialized!${NC}"
   echo ""
   echo "Next steps:"
-  echo "  1. Write specs in .ralph/specs/"
+  echo "  1. Write specs in ralph/specs/"
   echo "  2. Run 'ralph plan' to generate implementation plan"
   echo "  3. Run 'ralph' to start building"
   echo ""

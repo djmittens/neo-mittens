@@ -14,7 +14,7 @@ cd your-project
 ralph init
 
 # Write specs describing what you want to build
-vim .ralph/specs/my-feature.md
+vim ralph/specs/my-feature.md
 
 # Generate implementation plan
 ralph plan
@@ -28,7 +28,7 @@ ralph 10  # Run 10 iterations
 ```
 ┌─────────────────────────────────────────────────────────────┐
 │                      YOUR SPECS                              │
-│                   .ralph/specs/*.md                          │
+│                   ralph/specs/*.md                          │
 └─────────────────────┬───────────────────────────────────────┘
                       │
                       ▼
@@ -83,7 +83,7 @@ After `ralph init`, your repo will have:
 
 ```
 your-project/
-├── .ralph/
+├── ralph/
 │   ├── PROMPT_plan.md          # Planning mode instructions
 │   ├── PROMPT_build.md         # Build mode instructions  
 │   ├── IMPLEMENTATION_PLAN.md  # Auto-managed task list
@@ -96,7 +96,7 @@ your-project/
 
 ## Writing Specs
 
-Specs go in `.ralph/specs/`. Each file describes one feature or topic.
+Specs go in `ralph/specs/`. Each file describes one feature or topic.
 
 **Good spec structure:**
 
@@ -126,7 +126,7 @@ Any context that helps implementation.
 
 ## Customizing Prompts
 
-Edit `.ralph/PROMPT_build.md` to customize how Ralph works:
+Edit `ralph/PROMPT_build.md` to customize how Ralph works:
 
 - Add project-specific build/test commands
 - Include coding standards

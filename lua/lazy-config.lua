@@ -126,19 +126,28 @@ require("lazy").setup({
     -- For `nvim-treesitter` users.
     priority = 49,
 
+    config = function(_, opts)
+      -- Set up distinct heading colors (gruvbox-inspired)
+      vim.api.nvim_set_hl(0, "MarkviewHeading1", { fg = "#fb4934", bold = true })        -- red
+      vim.api.nvim_set_hl(0, "MarkviewHeading2", { fg = "#fabd2f", bold = true })        -- yellow
+      vim.api.nvim_set_hl(0, "MarkviewHeading3", { fg = "#b8bb26", bold = true })        -- green
+      vim.api.nvim_set_hl(0, "MarkviewHeading4", { fg = "#83a598", bold = true })        -- blue
+      vim.api.nvim_set_hl(0, "MarkviewHeading5", { fg = "#d3869b", bold = true })        -- purple
+      vim.api.nvim_set_hl(0, "MarkviewHeading6", { fg = "#8ec07c", bold = true })        -- aqua
+      vim.api.nvim_set_hl(0, "MarkviewCheckboxChecked", { fg = "#b8bb26" })              -- green
+      vim.api.nvim_set_hl(0, "MarkviewCheckboxUnchecked", { fg = "#928374" })            -- gray
+      vim.api.nvim_set_hl(0, "MarkviewCheckboxPending", { fg = "#fabd2f" })              -- yellow
+
+      require("markview").setup(opts)
+    end,
+
     opts = {
       preview = {
-        modes = { "n" },
+        modes = { "n", "c" },
         hybrid_modes = { "n" },
         linewise_hybrid_mode = true,
-
-        -- Performance: don't render huge files
         max_buf_lines = 1000,
-
-        -- Debounce for smoother experience
         debounce = 50,
-
-        -- Map gx to open links
         map_gx = true,
       },
 
@@ -147,72 +156,99 @@ require("lazy").setup({
           enable = true,
           shift_width = 0,
 
-          -- Use sign column for icons (no text shifting)
-          heading_1 = { style = "simple", sign = "󰉫", sign_hl = "MarkviewHeading1Sign", hl = "MarkviewHeading1" },
-          heading_2 = { style = "simple", sign = "󰉬", sign_hl = "MarkviewHeading2Sign", hl = "MarkviewHeading2" },
-          heading_3 = { style = "simple", sign = "󰉭", sign_hl = "MarkviewHeading3Sign", hl = "MarkviewHeading3" },
-          heading_4 = { style = "simple", sign = "󰉮", sign_hl = "MarkviewHeading4Sign", hl = "MarkviewHeading4" },
-          heading_5 = { style = "simple", sign = "󰉯", sign_hl = "MarkviewHeading5Sign", hl = "MarkviewHeading5" },
-          heading_6 = { style = "simple", sign = "󰉰", sign_hl = "MarkviewHeading6Sign", hl = "MarkviewHeading6" },
-
-          setext_1 = { style = "simple", sign = "󰉫", sign_hl = "MarkviewHeading1Sign", hl = "MarkviewHeading1" },
-          setext_2 = { style = "simple", sign = "󰉬", sign_hl = "MarkviewHeading2Sign", hl = "MarkviewHeading2" },
+          heading_1 = { style = "icon", icon = "█ ", hl = "MarkviewHeading1" },
+          heading_2 = { style = "icon", icon = "▓ ", hl = "MarkviewHeading2" },
+          heading_3 = { style = "icon", icon = "▒ ", hl = "MarkviewHeading3" },
+          heading_4 = { style = "icon", icon = "░ ", hl = "MarkviewHeading4" },
+          heading_5 = { style = "icon", icon = "◆ ", hl = "MarkviewHeading5" },
+          heading_6 = { style = "icon", icon = "◇ ", hl = "MarkviewHeading6" },
         },
 
-        -- List items: match raw markdown indentation
         list_items = {
           enable = true,
           indent_size = 2,
-          shift_width = 0,  -- No virtual indentation shift
+          shift_width = 0,
 
-          marker_minus = { add_padding = false },
-          marker_plus = { add_padding = false },
-          marker_star = { add_padding = false },
+          marker_minus = { add_padding = false, text = "•" },
+          marker_plus = { add_padding = false, text = "◦" },
+          marker_star = { add_padding = false, text = "★" },
           marker_dot = { add_padding = false },
           marker_parenthesis = { add_padding = false },
         },
 
-        -- Code blocks: simpler style to reduce visual shift
         code_blocks = {
-          style = "simple",
-          pad_amount = 0,
-          sign = false,  -- Disable sign column icons to prevent horizontal shift
+          style = "language",
+          pad_amount = 1,
+          language_names = {
+            lua = "Lua",
+            python = "Python",
+            javascript = "JavaScript",
+            typescript = "TypeScript",
+            bash = "Bash",
+            sh = "Shell",
+            c = "C",
+            cpp = "C++",
+            rust = "Rust",
+          },
         },
 
-        -- Tables: cleaner borders
+        horizontal_rules = {
+          enable = true,
+          parts = {
+            { type = "repeating", text = "─", repeat_amount = function() return vim.o.columns end },
+          },
+        },
+
         tables = {
           enable = true,
+          use_virt_lines = true,
+        },
+
+        block_quotes = {
+          enable = true,
+          default = { border = "▋", border_hl = "MarkviewBlockQuoteDefault" },
         },
       },
 
       markdown_inline = {
-        -- Checkboxes with single-width characters to prevent shifting
         checkboxes = {
           enable = true,
-          checked = { text = "x", hl = "MarkviewCheckboxChecked" },      -- same width as [x]
-          unchecked = { text = " ", hl = "MarkviewCheckboxUnchecked" },  -- same width as [ ]
+          checked = { text = "󰄵", hl = "MarkviewCheckboxChecked" },
+          unchecked = { text = "󰄱", hl = "MarkviewCheckboxUnchecked" },
           custom = {
-            { match_string = "-", text = "-", hl = "MarkviewCheckboxPending" },
-            { match_string = ">", text = ">", hl = "MarkviewCheckboxCancelled" },
-            { match_string = "~", text = "~", hl = "MarkviewCheckboxCancelled" },
+            { match_string = "-", text = "󰍶", hl = "MarkviewCheckboxPending" },
+            { match_string = ">", text = "󰒭", hl = "MarkviewCheckboxCancelled" },
+            { match_string = "~", text = "󰰱", hl = "MarkviewCheckboxCancelled" },
           },
         },
 
-        -- Inline code styling
         inline_codes = {
           enable = true,
           hl = "MarkviewInlineCode",
+          corner_left = " ",
+          corner_right = " ",
         },
 
-        -- Links
         hyperlinks = {
           enable = true,
+          icon = " ",
           hl = "MarkviewHyperlink",
         },
 
         images = {
           enable = true,
+          icon = " ",
           hl = "MarkviewImage",
+        },
+
+        emphasis = {
+          enable = true,
+          hl = "MarkviewItalic",
+        },
+
+        strong = {
+          enable = true,
+          hl = "MarkviewBold",
         },
       },
     },
