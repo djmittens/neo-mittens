@@ -349,4 +349,97 @@ for cmd in "$SCRIPT_DIR/.claude/commands"/ralph-*.md; do
   fi
 done
 
+# 15) Install ralph shell completions
+install_ralph_completion_bash() {
+  local bashrc="$HOME/.bashrc"
+  local completion_file="$SCRIPT_DIR/powerplant/ralph-completion.bash"
+  
+  if [ ! -f "$completion_file" ]; then
+    echo "SKIP: ralph bash completion not found"
+    return 0
+  fi
+  
+  local begin='# >>> neo-mittens ralph completion >>>'
+  local end='# <<< neo-mittens ralph completion <<<'
+  local block
+  block="${begin}
+[ -f \"${completion_file}\" ] && source \"${completion_file}\"
+${end}"
+
+  if [ -f "$bashrc" ] && grep -Fq "$begin" "$bashrc"; then
+    tmp="$(mktemp)"
+    awk -v b="$begin" -v e="$end" '
+      BEGIN{inb=0}
+      $0==b {inb=1; next}
+      $0==e {inb=0; next}
+      inb==0 {print}
+    ' "$bashrc" >"$tmp"
+    printf "\n%s\n" "$block" >>"$tmp"
+    cat "$tmp" > "$bashrc"
+    echo "UPDATE: ralph bash completion in $bashrc"
+  else
+    printf "\n%s\n" "$block" >>"$bashrc"
+    echo "ADD: ralph bash completion to $bashrc"
+  fi
+}
+
+install_ralph_completion_zsh() {
+  local zshrc="$HOME/.zshrc"
+  local completion_file="$SCRIPT_DIR/powerplant/ralph-completion.zsh"
+  
+  if [ ! -f "$completion_file" ]; then
+    echo "SKIP: ralph zsh completion not found"
+    return 0
+  fi
+  
+  local begin='# >>> neo-mittens ralph completion >>>'
+  local end='# <<< neo-mittens ralph completion <<<'
+  local block
+  block="${begin}
+[ -f \"${completion_file}\" ] && source \"${completion_file}\"
+${end}"
+
+  if [ -f "$zshrc" ] && grep -Fq "$begin" "$zshrc"; then
+    tmp="$(mktemp)"
+    awk -v b="$begin" -v e="$end" '
+      BEGIN{inb=0}
+      $0==b {inb=1; next}
+      $0==e {inb=0; next}
+      inb==0 {print}
+    ' "$zshrc" >"$tmp"
+    printf "\n%s\n" "$block" >>"$tmp"
+    cat "$tmp" > "$zshrc"
+    echo "UPDATE: ralph zsh completion in $zshrc"
+  else
+    printf "\n%s\n" "$block" >>"$zshrc"
+    echo "ADD: ralph zsh completion to $zshrc"
+  fi
+}
+
+install_ralph_completion_bash
+install_ralph_completion_zsh
+
+# 16) Install global OpenCode tools (to ~/.config/opencode/tools/)
+OPENCODE_CONFIG_DIR="$HOME/.config/opencode"
+OPENCODE_TOOLS_DIR="$OPENCODE_CONFIG_DIR/tools"
+ensure_dir "$OPENCODE_TOOLS_DIR"
+
+# Link tool files from .opencode/tools/ to ~/.config/opencode/tools/
+for tool_file in "$SCRIPT_DIR/.opencode/tools"/*.ts; do
+  if [ -f "$tool_file" ]; then
+    link_symlink "$tool_file" "$OPENCODE_TOOLS_DIR/$(basename "$tool_file")"
+  fi
+done
+
+# Copy package.json and install deps if bun is available
+if [ -f "$SCRIPT_DIR/.opencode/package.json" ]; then
+  cp "$SCRIPT_DIR/.opencode/package.json" "$OPENCODE_CONFIG_DIR/package.json"
+  if command -v bun >/dev/null 2>&1; then
+    echo "Installing OpenCode tool dependencies..."
+    (cd "$OPENCODE_CONFIG_DIR" && bun install --silent) || echo "WARN: bun install failed"
+  else
+    echo "SKIP: bun not found, run 'cd ~/.config/opencode && bun install' manually"
+  fi
+fi
+
 echo "Done. You may need to restart your shell (or source ~/.profile) and restart Neovim."

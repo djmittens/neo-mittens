@@ -2,14 +2,18 @@
 # Ralph Wiggum - Autonomous AI Development Loop
 # https://ghuntley.com/ralph/
 #
-# Usage: ralph [plan|build] [max_iterations]
+# Usage: ralph [plan|build] [options]
 #   ralph              - Build mode, unlimited iterations
 #   ralph 10           - Build mode, max 10 iterations  
 #   ralph plan         - Plan mode, generate implementation plan
-#   ralph plan 3       - Plan mode, max 3 iterations
 #   ralph init         - Initialize ralph in current repo
 #   ralph status       - Show current status
 #   ralph log          - Tail the current log
+#
+# Options:
+#   --max-cost N       - Stop when cumulative cost exceeds $N (default: unlimited)
+#   --max-failures N   - Circuit breaker: stop after N consecutive failures (default: 3)
+#   --completion-promise "TEXT" - Stop when output contains TEXT
 
 set -euo pipefail
 
@@ -18,7 +22,11 @@ RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 BLUE='\033[0;34m'
+CYAN='\033[0;36m'
 NC='\033[0m' # No Color
+
+# Default limits
+DEFAULT_MAX_FAILURES=3
 
 # Find repo root
 find_repo_root() {
@@ -45,9 +53,152 @@ PROMPT_PLAN="$RALPH_DIR/PROMPT_plan.md"
 PROMPT_BUILD="$RALPH_DIR/PROMPT_build.md"
 IMPL_PLAN="$RALPH_DIR/IMPLEMENTATION_PLAN.md"
 SPECS_DIR="$RALPH_DIR/specs"
+METRICS_FILE="$LOG_DIR/metrics.json"
 
 # Ensure log directory exists
 mkdir -p "$LOG_DIR"
+
+# ============================================================================
+# Metrics & Cost Tracking
+# ============================================================================
+
+init_metrics() {
+  cat > "$METRICS_FILE" << 'EOF'
+{"total_cost": 0, "total_iterations": 0, "total_tokens_in": 0, "total_tokens_out": 0, "failures": 0, "successes": 0, "started_at": null}
+EOF
+  # Set started_at
+  local now=$(date -Iseconds)
+  update_metric "started_at" "\"$now\""
+}
+
+get_metric() {
+  local key="$1"
+  if [[ -f "$METRICS_FILE" ]]; then
+    python3 -c "import json; print(json.load(open('$METRICS_FILE')).get('$key', 0))" 2>/dev/null || echo "0"
+  else
+    echo "0"
+  fi
+}
+
+update_metric() {
+  local key="$1"
+  local value="$2"
+  if [[ -f "$METRICS_FILE" ]]; then
+    python3 -c "
+import json
+with open('$METRICS_FILE', 'r') as f:
+    data = json.load(f)
+data['$key'] = $value
+with open('$METRICS_FILE', 'w') as f:
+    json.dump(data, f)
+" 2>/dev/null || true
+  fi
+}
+
+increment_metric() {
+  local key="$1"
+  local amount="${2:-1}"
+  local current=$(get_metric "$key")
+  local new=$(python3 -c "print($current + $amount)" 2>/dev/null || echo "$current")
+  update_metric "$key" "$new"
+}
+
+# Extract cost from JSON log (finds last step_finish event)
+extract_iteration_cost() {
+  local json_log="$1"
+  if [[ -f "$json_log" ]]; then
+    # Get the last step_finish event's cost
+    python3 -c "
+import json
+import sys
+cost = 0
+tokens_in = 0
+tokens_out = 0
+for line in open('$json_log'):
+    try:
+        event = json.loads(line.strip())
+        if event.get('type') == 'step_finish':
+            part = event.get('part', {})
+            cost = part.get('cost', 0)
+            tokens = part.get('tokens', {})
+            tokens_in = tokens.get('input', 0)
+            tokens_out = tokens.get('output', 0)
+    except: pass
+print(f'{cost},{tokens_in},{tokens_out}')
+" 2>/dev/null || echo "0,0,0"
+  else
+    echo "0,0,0"
+  fi
+}
+
+show_metrics_summary() {
+  if [[ ! -f "$METRICS_FILE" ]]; then
+    echo "No metrics available"
+    return
+  fi
+  
+  local total_cost=$(get_metric "total_cost")
+  local iterations=$(get_metric "total_iterations")
+  local tokens_in=$(get_metric "total_tokens_in")
+  local tokens_out=$(get_metric "total_tokens_out")
+  local failures=$(get_metric "failures")
+  local successes=$(get_metric "successes")
+  
+  echo -e "${CYAN}Session Metrics:${NC}"
+  echo -e "  Cost:       \$$(printf '%.4f' "$total_cost")"
+  echo -e "  Iterations: $iterations ($successes ok, $failures failed)"
+  echo -e "  Tokens:     ${tokens_in} in / ${tokens_out} out"
+}
+
+# ============================================================================
+# Circuit Breaker
+# ============================================================================
+
+CONSECUTIVE_FAILURES=0
+
+check_circuit_breaker() {
+  local max_failures="$1"
+  if [[ $CONSECUTIVE_FAILURES -ge $max_failures ]]; then
+    echo -e "${RED}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+    echo -e "${RED}CIRCUIT BREAKER TRIPPED${NC}"
+    echo -e "${RED}$CONSECUTIVE_FAILURES consecutive failures detected${NC}"
+    echo -e "${RED}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+    return 1
+  fi
+  return 0
+}
+
+record_success() {
+  CONSECUTIVE_FAILURES=0
+  increment_metric "successes" 1
+}
+
+record_failure() {
+  CONSECUTIVE_FAILURES=$((CONSECUTIVE_FAILURES + 1))
+  increment_metric "failures" 1
+}
+
+# ============================================================================
+# Completion Promise Detection
+# ============================================================================
+
+check_completion_promise() {
+  local log_file="$1"
+  local promise="$2"
+  
+  if [[ -z "$promise" ]]; then
+    return 1  # No promise set
+  fi
+  
+  if [[ -f "$log_file" ]] && grep -qF "$promise" "$log_file"; then
+    echo -e "${GREEN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+    echo -e "${GREEN}COMPLETION PROMISE DETECTED${NC}"
+    echo -e "${GREEN}Found: $promise${NC}"
+    echo -e "${GREEN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+    return 0
+  fi
+  return 1
+}
 
 # ============================================================================
 # Commands
@@ -68,31 +219,56 @@ cmd_init() {
   cat > "$PROMPT_PLAN" << 'EOF'
 0a. Run `git branch --show-current` to identify the current branch.
 0b. Study `ralph/specs/*` to learn the project specifications.
-0c. Study @ralph/IMPLEMENTATION_PLAN.md (if present) to understand the plan so far.
-0d. Study the source code to understand the current implementation.
+0c. Study the source code to understand the current implementation.
 
-## Branch Awareness
+## Task: Gap Analysis
 
-IMPORTANT: Check the **Branch:** field in @ralph/IMPLEMENTATION_PLAN.md.
-- If it doesn't match current branch, note this - the plan may be from different work.
-- Update the **Branch:** and **Last updated:** fields when you modify the plan.
+Compare specs against the CURRENT codebase and generate a fresh task list:
 
-## Task
-
-Analyze specs vs existing code and create/update @ralph/IMPLEMENTATION_PLAN.md:
-1. Use subagents to study specs and source code
-2. Compare specs against implementation (gap analysis)
-3. Create prioritized task list in @ralph/IMPLEMENTATION_PLAN.md
+1. Use subagents to study specs and source code thoroughly
+2. For each spec requirement, check if it's already implemented
+3. Create tasks ONLY for what's missing or broken
 4. DO NOT implement anything - planning only
+
+## Updating an Existing Plan
+
+The plan is disposable - regenerate it based on current reality, not the old plan.
+
+If @ralph/IMPLEMENTATION_PLAN.md exists:
+- IGNORE the old pending tasks (they may be stale)
+- KEEP the "## Completed" section as historical record
+- KEEP the "## Discovered Issues" section
+- Generate NEW pending tasks from fresh gap analysis
 
 ## Output
 
-Update @ralph/IMPLEMENTATION_PLAN.md with:
-- **Branch:** `<current branch>` at the top
-- **Last updated:** timestamp
-- Prioritized bullet list of tasks
-- Each task should be small enough for one iteration
-- Mark completed items with [x]
+Write @ralph/IMPLEMENTATION_PLAN.md with:
+
+```markdown
+# Implementation Plan
+
+**Branch:** `<current branch>`
+**Last updated:** <timestamp>
+
+## Pending Tasks
+
+- [ ] Task 1 (highest priority)
+- [ ] Task 2
+...
+
+## Completed
+
+- [x] Previous completed tasks (preserve from old plan)
+
+## Discovered Issues
+
+- Issues found during implementation (preserve from old plan)
+```
+
+Rules:
+- Each task should be completable in ONE iteration
+- Order by priority (most important first)
+- Be specific - "Add X to Y" not "Improve Z"
 EOF
 
   # Create default build prompt
@@ -237,9 +413,19 @@ cmd_status() {
     echo "  Tasks: No implementation plan yet"
   fi
   
-  # Check for running ralph
-  if pgrep -f "ralph.*claude" > /dev/null 2>&1; then
-    echo -e "  Status: ${GREEN}Running${NC}"
+  # Check for running ralph in THIS repo (look for opencode process with cwd in repo)
+  local running_count=0
+  while IFS= read -r pid; do
+    if [[ -n "$pid" ]] && [[ -d "/proc/$pid" ]]; then
+      local cwd=$(readlink -f "/proc/$pid/cwd" 2>/dev/null)
+      if [[ "$cwd" == "$REPO_ROOT"* ]]; then
+        running_count=$((running_count + 1))
+      fi
+    fi
+  done < <(pgrep -x "opencode" 2>/dev/null)
+  
+  if [[ $running_count -gt 0 ]]; then
+    echo -e "  Status: ${GREEN}Running${NC} ($running_count process(es))"
   else
     echo -e "  Status: ${YELLOW}Stopped${NC}"
   fi
@@ -276,9 +462,19 @@ cmd_watch() {
     echo -e "${GREEN}Branch:${NC} $(git branch --show-current)"
     echo ""
     
-    # Process status
-    if pgrep -f "claude.*dangerously-skip-permissions" > /dev/null 2>&1; then
-      echo -e "${GREEN}Status:${NC} Running"
+    # Process status - check for opencode running in THIS repo
+    local running_count=0
+    while IFS= read -r pid; do
+      if [[ -n "$pid" ]] && [[ -d "/proc/$pid" ]]; then
+        local cwd=$(readlink -f "/proc/$pid/cwd" 2>/dev/null)
+        if [[ "$cwd" == "$REPO_ROOT"* ]]; then
+          running_count=$((running_count + 1))
+        fi
+      fi
+    done < <(pgrep -x "opencode" 2>/dev/null)
+    
+    if [[ $running_count -gt 0 ]]; then
+      echo -e "${GREEN}Status:${NC} Running ($running_count)"
     else
       echo -e "${YELLOW}Status:${NC} Stopped"
     fi
@@ -301,6 +497,19 @@ cmd_watch() {
       echo -e "${GREEN}Progress:${NC} $done done, $pending pending"
     fi
     echo ""
+    
+    # Discovered Issues
+    if [[ -f "$IMPL_PLAN" ]]; then
+      local issues=$(sed -n '/^## Discovered Issues/,/^## /{ /^## /d; /^$/d; p; }' "$IMPL_PLAN" 2>/dev/null | grep -c "^- " || echo 0)
+      if [[ $issues -gt 0 ]]; then
+        echo -e "${YELLOW}Discovered Issues:${NC} ($issues)"
+        sed -n '/^## Discovered Issues/,/^## /{ /^## /d; /^$/d; p; }' "$IMPL_PLAN" 2>/dev/null | head -5 | sed 's/^/  /'
+        if [[ $issues -gt 5 ]]; then
+          echo -e "  ${YELLOW}... and $((issues - 5)) more${NC}"
+        fi
+        echo ""
+      fi
+    fi
     
     # Latest log lines
     echo -e "${GREEN}Latest Output:${NC}"
@@ -367,19 +576,21 @@ cmd_run() {
     echo -e "${GREEN}╚═══════════════════════════════════════════════════════════════╝${NC}"
     echo ""
 
-    # Run Claude with streaming output
+    # Run opencode with streaming output
     local script_dir
     script_dir="$(dirname "$(realpath "$0")")"
+    local prompt_content
+    prompt_content="$(cat "$prompt_file")"
     
     if [[ -x "$script_dir/ralph-stream" ]]; then
       # Stream JSON and filter for human-readable output
-      claude -p --dangerously-skip-permissions --verbose --output-format stream-json < "$prompt_file" 2>&1 | \
+      opencode run --model anthropic/claude-opus-4-5 --format json "$prompt_content" 2>&1 | \
         tee -a "$log_file.json" | \
         "$script_dir/ralph-stream" | \
         tee -a "$log_file"
     else
       # Fallback: no streaming filter
-      claude -p --dangerously-skip-permissions --verbose < "$prompt_file" 2>&1 | tee -a "$log_file"
+      opencode run --model anthropic/claude-opus-4-5 "$prompt_content" 2>&1 | tee -a "$log_file"
     fi
     
     local exit_code=${PIPESTATUS[0]}
@@ -420,7 +631,7 @@ case "${1:-}" in
     cmd_watch
     ;;
   plan)
-    cmd_run "plan" "${2:-0}"
+    cmd_run "plan" "1"
     ;;
   ""|build)
     # Default to build mode
@@ -439,11 +650,11 @@ case "${1:-}" in
   help|--help|-h)
     echo "Ralph Wiggum - Autonomous AI Development Loop"
     echo ""
-    echo "Usage: ralph [command] [options]"
+    echo "Usage: ralph [command] [iterations]"
     echo ""
     echo "Commands:"
     echo "  init          Initialize ralph in current repo"
-    echo "  plan [N]      Run planning mode (generate implementation plan)"
+    echo "  plan          Generate implementation plan from specs (runs once)"
     echo "  build [N]     Run build mode (implement from plan)"
     echo "  [N]           Shorthand for 'build N'"
     echo "  status        Show current status"
@@ -454,10 +665,9 @@ case "${1:-}" in
     echo "Examples:"
     echo "  ralph init    # Initialize in current repo"
     echo "  ralph plan    # Generate implementation plan from specs"
-    echo "  ralph         # Build mode, unlimited"
+    echo "  ralph         # Build mode, unlimited (Ctrl+C to stop)"
     echo "  ralph 10      # Build mode, max 10 iterations"
     echo "  ralph watch   # Live progress dashboard"
-    echo "  ralph status  # Check status"
     ;;
   *)
     echo -e "${RED}Unknown command: $1${NC}"

@@ -1,6 +1,6 @@
 [
   {
-    "output": [ "desc:Samsung Electric Company Odyssey G95NC*" ],
+    "output": [ "DP-2", "DP-1", "DP-3", "DP-4" ],
     "include": [
       "~/.config/waybar/bars/top.jsonc"
     ]

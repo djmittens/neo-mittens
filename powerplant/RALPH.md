@@ -66,16 +66,27 @@ ralph 10  # Run 10 iterations
 
 ## Commands
 
-| Command | Description |
-|---------|-------------|
-| `ralph init` | Initialize ralph in current repo |
-| `ralph plan` | Generate/update implementation plan from specs |
-| `ralph plan 3` | Planning mode, max 3 iterations |
-| `ralph` | Build mode, unlimited iterations |
-| `ralph 10` | Build mode, max 10 iterations |
-| `ralph status` | Show current status |
-| `ralph log` | Tail the current log |
-| `ralph help` | Show help |
+```bash
+ralph init          # Initialize ralph in current repo
+ralph plan          # Generate implementation plan from specs (runs once)
+ralph status        # Show current status
+ralph watch         # Live dashboard (run in separate terminal)
+ralph log           # Tail the current log
+ralph help          # Show help
+
+# Build mode (implement from plan)
+ralph               # Run forever (until Ctrl+C or no tasks left)
+ralph 10            # Run max 10 iterations then stop
+ralph build 10      # Same as above (explicit)
+```
+
+**Iteration limits:** The number after `ralph` or `ralph build` sets how many
+iterations to run before stopping. Default is **unlimited** (runs until Ctrl+C
+or no tasks remain). Use limits for unattended runs (e.g., `ralph 50` overnight).
+
+**Planning vs Building:**
+- `ralph plan` - Analyzes specs and code, creates a task list. Runs once. Does NOT write code.
+- `ralph` / `ralph build` - Implements tasks from the plan, one per iteration.
 
 ## Directory Structure
 
@@ -191,6 +202,20 @@ will use it automatically. You can add Ralph-specific guidance there:
 - Always update CHANGELOG.md
 ```
 
+## Re-planning
+
+Run `ralph plan` again whenever:
+- You update specs
+- The plan feels stale or wrong
+- Ralph seems stuck
+
+**The plan is disposable.** Planning does a fresh gap analysis of specs vs current
+code. It ignores old pending tasks and regenerates from scratch. Completed tasks
+and discovered issues are preserved as history.
+
+Think of it like clay on a pottery wheel - if something isn't right, throw it
+back on the wheel.
+
 ## Philosophy
 
 **Why the loop works:**
@@ -205,7 +230,7 @@ will use it automatically. You can add Ralph-specific guidance there:
 - Let Ralph Ralph (trust the loop)
 - Specs drive everything
 - Tests are your safety net
-- The plan is disposable (regenerate if stuck)
+- The plan is disposable (regenerate anytime)
 
 ## Credits
 

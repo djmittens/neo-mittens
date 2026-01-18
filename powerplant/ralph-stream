@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Filter claude stream-json output to show human-readable progress."""
+"""Filter opencode stream-json output to show human-readable progress."""
 
 import json
 import sys
@@ -15,66 +15,59 @@ for line in sys.stdin:
         continue
     
     event_type = event.get("type", "")
+    part = event.get("part", {})
     
-    if event_type == "assistant":
-        msg = event.get("message", {})
-        content = msg.get("content", [])
-        for item in content:
-            if item.get("type") == "text":
-                text = item.get("text", "")
-                if text:
-                    print(f"\n{text}")
-                    sys.stdout.flush()
-            elif item.get("type") == "tool_use":
-                tool = item.get("name", "?")
-                inp = item.get("input", {})
-                if tool == "Bash":
-                    cmd = inp.get("command", "")[:80]
-                    desc = inp.get("description", "")
-                    print(f"\n[TOOL] Bash: {desc or cmd}")
-                elif tool == "Read":
-                    path = inp.get("filePath", "")
-                    print(f"\n[TOOL] Read: {path}")
-                elif tool == "Edit":
-                    path = inp.get("filePath", "")
-                    print(f"\n[TOOL] Edit: {path}")
-                elif tool == "Write":
-                    path = inp.get("filePath", "")
-                    print(f"\n[TOOL] Write: {path}")
-                elif tool == "Grep":
-                    pattern = inp.get("pattern", "")
-                    print(f"\n[TOOL] Grep: {pattern}")
-                elif tool == "Glob":
-                    pattern = inp.get("pattern", "")
-                    print(f"\n[TOOL] Glob: {pattern}")
-                else:
-                    print(f"\n[TOOL] {tool}")
-                sys.stdout.flush()
-    
-    elif event_type == "user":
-        # Tool result
-        tool_result = event.get("tool_use_result", {})
-        if tool_result:
-            stdout = tool_result.get("stdout", "")
-            stderr = tool_result.get("stderr", "")
-            if stderr:
-                # Show first line of error
-                print(f"  ERROR: {stderr.split(chr(10))[0][:80]}")
-            elif stdout:
-                # Show summary of output
-                lines = stdout.strip().split('\n')
-                if len(lines) <= 3:
-                    for l in lines:
-                        print(f"  {l[:100]}")
-                else:
-                    print(f"  ({len(lines)} lines)")
+    # OpenCode format
+    if event_type == "text":
+        text = part.get("text", "")
+        if text:
+            print(f"\n{text}")
             sys.stdout.flush()
     
-    elif event_type == "result":
-        result = event.get("result", "")
-        duration = event.get("duration_ms", 0)
-        cost = event.get("total_cost_usd", 0)
+    elif event_type == "tool_call":
+        tool = part.get("tool", "?")
+        args = part.get("args", {})
+        if tool == "bash":
+            cmd = args.get("command", "")[:80]
+            desc = args.get("description", "")
+            print(f"\n[TOOL] Bash: {desc or cmd}")
+        elif tool == "read":
+            path = args.get("filePath", "")
+            print(f"\n[TOOL] Read: {path}")
+        elif tool == "edit":
+            path = args.get("filePath", "")
+            print(f"\n[TOOL] Edit: {path}")
+        elif tool == "write":
+            path = args.get("filePath", "")
+            print(f"\n[TOOL] Write: {path}")
+        elif tool == "grep":
+            pattern = args.get("pattern", "")
+            print(f"\n[TOOL] Grep: {pattern}")
+        elif tool == "glob":
+            pattern = args.get("pattern", "")
+            print(f"\n[TOOL] Glob: {pattern}")
+        else:
+            print(f"\n[TOOL] {tool}")
+        sys.stdout.flush()
+    
+    elif event_type == "tool_result":
+        result = part.get("result", "")
+        if result:
+            lines = str(result).strip().split('\n')
+            if len(lines) <= 3:
+                for l in lines:
+                    print(f"  {l[:100]}")
+            else:
+                print(f"  ({len(lines)} lines)")
+            sys.stdout.flush()
+    
+    elif event_type == "step_finish":
+        cost = part.get("cost", 0)
+        tokens = part.get("tokens", {})
+        input_tokens = tokens.get("input", 0)
+        output_tokens = tokens.get("output", 0)
+        cache_read = tokens.get("cache", {}).get("read", 0)
         print(f"\n{'='*60}")
-        print(f"Done in {duration/1000:.1f}s, cost: ${cost:.4f}")
+        print(f"Cost: ${cost:.4f} | Tokens: {input_tokens}in/{output_tokens}out (cache: {cache_read})")
         print(f"{'='*60}")
         sys.stdout.flush()
