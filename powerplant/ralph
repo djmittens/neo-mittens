@@ -165,16 +165,18 @@ Describe what you want to build.
 - [ ] Criterion 2
 EOF
 
-  # Add to gitignore if not already there
+  # Add logs to gitignore if not already there
   local gitignore="$REPO_ROOT/.gitignore"
   if [[ -f "$gitignore" ]]; then
     if ! grep -q "build/ralph-logs" "$gitignore"; then
       echo -e "\n# Ralph logs\nbuild/ralph-logs/" >> "$gitignore"
     fi
-    if ! grep -q "ralph/IMPLEMENTATION_PLAN.md" "$gitignore"; then
-      echo "ralph/IMPLEMENTATION_PLAN.md" >> "$gitignore"
-    fi
   fi
+  
+  # Note: ralph/IMPLEMENTATION_PLAN.md should be in global gitignore (~/.gitignore_global)
+  # Run neo-mittens bootstrap.sh to set this up, or manually:
+  #   echo "ralph/IMPLEMENTATION_PLAN.md" >> ~/.gitignore_global
+  #   git config --global core.excludesfile ~/.gitignore_global
 
   # Install Claude commands if .claude directory exists or create it
   local claude_commands_src

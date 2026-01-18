@@ -330,4 +330,12 @@ install_tmux_plugins_if_possible
 # 12) Link gdbinit and add auto-load safe path
 link_symlink "$SCRIPT_DIR/gdbinit" "$HOME/.gdbinit"
 
+# 13) Setup global gitignore for Ralph
+GLOBAL_GITIGNORE="$HOME/.gitignore_global"
+if ! grep -q "ralph/IMPLEMENTATION_PLAN.md" "$GLOBAL_GITIGNORE" 2>/dev/null; then
+  echo "ralph/IMPLEMENTATION_PLAN.md" >> "$GLOBAL_GITIGNORE"
+  echo "ADD: ralph/IMPLEMENTATION_PLAN.md to $GLOBAL_GITIGNORE"
+fi
+git config --global core.excludesfile "$GLOBAL_GITIGNORE"
+
 echo "Done. You may need to restart your shell (or source ~/.profile) and restart Neovim."
