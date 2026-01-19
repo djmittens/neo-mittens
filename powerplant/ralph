@@ -2178,30 +2178,36 @@ def cmd_stream():
             if tool == "bash":
                 cmd = args.get("command", "")
                 desc = args.get("description", "") or title
-                print(f"\n{C.BRIGHT_YELLOW}Bash:{C.RESET} {C.DIM}{cmd[:80]}{C.RESET}")
+                print(f"\n⚡ {C.BRIGHT_YELLOW}Bash:{C.RESET} {C.DIM}{cmd[:80]}{C.RESET}")
                 if desc:
                     print(f"  {C.YELLOW}{desc}{C.RESET}")
             elif tool == "read":
                 path = args.get("filePath", "")
-                print(f"\n{C.BRIGHT_CYAN}Read:{C.RESET} {C.CYAN}{path}{C.RESET}")
+                print(f"\n📖 {C.BRIGHT_CYAN}Read:{C.RESET} {C.CYAN}{path}{C.RESET}")
             elif tool == "edit":
                 path = args.get("filePath", "")
-                print(f"\n{C.BRIGHT_GREEN}Edit:{C.RESET} {C.GREEN}{path}{C.RESET}")
+                print(f"\n✏️  {C.BRIGHT_GREEN}Edit:{C.RESET} {C.GREEN}{path}{C.RESET}")
             elif tool == "write":
                 path = args.get("filePath", "")
-                print(f"\n{C.BRIGHT_GREEN}Write:{C.RESET} {C.GREEN}{path}{C.RESET}")
+                print(f"\n📝 {C.BRIGHT_GREEN}Write:{C.RESET} {C.GREEN}{path}{C.RESET}")
             elif tool == "grep":
                 pattern = args.get("pattern", "")
-                print(f"\n{C.BRIGHT_MAGENTA}Grep:{C.RESET} {C.MAGENTA}{pattern}{C.RESET}")
+                print(f"\n🔍 {C.BRIGHT_MAGENTA}Grep:{C.RESET} {C.MAGENTA}{pattern}{C.RESET}")
             elif tool == "glob":
                 pattern = args.get("pattern", "")
-                print(f"\n{C.BRIGHT_MAGENTA}Glob:{C.RESET} {C.MAGENTA}{pattern}{C.RESET}")
+                print(f"\n📁 {C.BRIGHT_MAGENTA}Glob:{C.RESET} {C.MAGENTA}{pattern}{C.RESET}")
             elif tool == "task":
                 desc = args.get("description", "") or title
-                print(f"\n{C.BRIGHT_BLUE}Task:{C.RESET} {C.BLUE}{desc}{C.RESET}")
+                print(f"\n🤖 {C.BRIGHT_BLUE}Task:{C.RESET} {C.BLUE}{desc}{C.RESET}")
+            elif tool == "ddg-search" or tool == "webfetch":
+                query = args.get("query", "") or args.get("url", "") or title
+                print(f"\n🦆 {C.BRIGHT_CYAN}Web:{C.RESET} {C.CYAN}{query}{C.RESET}")
+            elif tool.startswith("ralph") or tool.startswith("mcp_ralph"):
+                desc = args.get("description", "") or title or tool
+                print(f"\n👮 {C.BRIGHT_YELLOW}Ralph:{C.RESET} {C.YELLOW}{desc}{C.RESET}")
             else:
                 label = f"{tool}: {title}" if title else tool
-                print(f"\n{C.WHITE}{label}{C.RESET}")
+                print(f"\n🔧 {C.WHITE}{label}{C.RESET}")
             
             # Show brief output - dimmed
             if output:
@@ -2222,7 +2228,7 @@ def cmd_stream():
             cache_read = cache.get("read", 0)
             total_input = input_tokens + cache_read
             print(f"\n{C.BRIGHT_BLACK}{'─'*60}{C.RESET}")
-            print(f"{C.CYAN}Cost:{C.RESET} ${cost:.4f} {C.BRIGHT_BLACK}|{C.RESET} {C.CYAN}Tokens:{C.RESET} {total_input}in/{output_tokens}out {C.DIM}(cached: {cache_read}){C.RESET}")
+            print(f"💰 {C.CYAN}Cost:{C.RESET} ${cost:.4f} {C.BRIGHT_BLACK}|{C.RESET} {C.CYAN}Tokens:{C.RESET} {total_input}in/{output_tokens}out {C.DIM}(cached: {cache_read}){C.RESET}")
             print(f"{C.BRIGHT_BLACK}{'─'*60}{C.RESET}")
             sys.stdout.flush()
 
