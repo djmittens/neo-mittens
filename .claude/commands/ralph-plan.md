@@ -21,9 +21,8 @@ Check that `ralph/` exists. If not, tell user to run `/ralph-init` first.
    - What has TODOs, FIXMEs, or placeholders?
 
 4. Create/update `ralph/IMPLEMENTATION_PLAN.md` with:
-   - Prioritized bullet list of tasks
+   - Tasks grouped by their source spec file
    - Each task should be small enough for one iteration
-   - Group by priority (P0 Critical, P1 High, P2 Medium, P3 Low)
    - Include discovered issues
 
 5. DO NOT implement anything - planning only
@@ -33,16 +32,25 @@ Check that `ralph/` exists. If not, tell user to run `/ralph-init` first.
 ```markdown
 # Implementation Plan
 
-## P0: Critical
-- [ ] Task 1
-- [ ] Task 2
+**Branch:** `<current branch>`
+**Last updated:** <timestamp>
 
-## P1: High  
-- [ ] Task 3
+## Spec: spec-filename.md
+
+- [ ] Task 1 from this spec
+- [ ] Task 2 from this spec
+
+## Spec: another-spec.md
+
+- [ ] Task 1 from another spec
 
 ## Completed
+
 - [x] Done task
 
 ## Discovered Issues
+
 - Issue description
 ```
+
+Note: Tasks MUST be grouped under `## Spec: <filename>` headers so that during implementation, only the relevant spec is read and validated against.

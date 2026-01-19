@@ -9,8 +9,7 @@ Usage: ralph [command] [options]
   ralph plan         - Plan mode, generate implementation plan
   ralph init         - Initialize ralph in current repo
   ralph status       - Show current status
-  ralph watch        - Live dashboard
-  ralph metrics      - Show session metrics
+  ralph watch        - Live dashboard with cost tracking
 
 Options:
   --max-cost N             Stop when cumulative cost exceeds $N
@@ -33,6 +32,18 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
+
+# Textual TUI framework (lazy import to avoid startup penalty for non-TUI commands)
+_textual_available = None
+def _check_textual():
+    global _textual_available
+    if _textual_available is None:
+        try:
+            import textual
+            _textual_available = True
+        except ImportError:
+            _textual_available = False
+    return _textual_available
 
 
 # Colors
@@ -228,6 +239,7 @@ RALPH_ART, RALPH_WIDTH = _get_ralph_art()
 
 @dataclass
 class Metrics:
+    """In-memory metrics for the current session."""
     total_cost: float = 0.0
     total_iterations: int = 0
     total_tokens_in: int = 0
@@ -235,19 +247,6 @@ class Metrics:
     failures: int = 0
     successes: int = 0
     started_at: Optional[str] = None
-
-    def save(self, path: Path):
-        path.write_text(json.dumps(self.__dict__, indent=2))
-
-    @classmethod
-    def load(cls, path: Path) -> 'Metrics':
-        if path.exists():
-            try:
-                data = json.loads(path.read_text())
-                return cls(**data)
-            except (json.JSONDecodeError, TypeError):
-                pass
-        return cls()
 
 
 @dataclass
@@ -259,7 +258,6 @@ class RalphConfig:
     prompt_build: Path
     impl_plan: Path
     specs_dir: Path
-    metrics_file: Path
     output_fifo: Path
 
     @classmethod
@@ -274,7 +272,6 @@ class RalphConfig:
             prompt_build=ralph_dir / 'PROMPT_build.md',
             impl_plan=ralph_dir / 'IMPLEMENTATION_PLAN.md',
             specs_dir=ralph_dir / 'specs',
-            metrics_file=log_dir / 'metrics.json',
             output_fifo=log_dir / 'output.fifo',
         )
 
@@ -481,11 +478,14 @@ Write @ralph/IMPLEMENTATION_PLAN.md with:
 **Branch:** `<current branch>`
 **Last updated:** <timestamp>
 
-## Pending Tasks
+## Spec: <spec-filename.md>
 
-- [ ] Task 1 (highest priority)
-- [ ] Task 2
-...
+- [ ] Task 1 for this spec
+- [ ] Task 2 for this spec
+
+## Spec: <another-spec.md>
+
+- [ ] Task 1 for another spec
 
 ## Completed
 
@@ -500,13 +500,13 @@ Rules:
 - Each task should be completable in ONE iteration
 - Order by priority (most important first)
 - Be specific - "Add X to Y" not "Improve Z"
+- Group tasks under their source spec using `## Spec: <filename>`
 ''')
 
     # Create build prompt
     config.prompt_build.write_text('''\
 0a. Run `git branch --show-current` to identify the current branch.
-0b. Study `ralph/specs/*` to understand requirements.
-0c. Study @ralph/IMPLEMENTATION_PLAN.md for current task list.
+0b. Study @ralph/IMPLEMENTATION_PLAN.md for current task list.
 
 ## Branch Awareness
 
@@ -518,16 +518,19 @@ IMPORTANT: Check the **Branch:** field in @ralph/IMPLEMENTATION_PLAN.md.
 ## CRITICAL: ONE TASK, THEN EXIT
 
 1. Pick ONE incomplete item from @ralph/IMPLEMENTATION_PLAN.md
-2. Implement it (search first - don't assume not implemented)
-3. Run tests to validate
-4. Update @ralph/IMPLEMENTATION_PLAN.md (mark complete, update timestamp)
-5. `git add -A && git commit && git push`
-6. **EXIT** - the loop restarts you fresh
+2. Identify which `## Spec:` section the task belongs to
+3. Read ONLY that specific spec file from `ralph/specs/` - do NOT read all specs
+4. Implement the task (search first - don't assume not implemented)
+5. Run tests to validate ONLY the functionality related to this spec
+6. Update @ralph/IMPLEMENTATION_PLAN.md (mark complete, update timestamp)
+7. `git add -A && git commit && git push`
+8. **EXIT** - the loop restarts you fresh
 
 ## Progress Reporting
 
 ```
 [RALPH] BRANCH: <current branch>
+[RALPH] SPEC: <spec-filename.md>
 [RALPH] === START: <task> ===
 [RALPH] FILE: <file>
 ```
@@ -548,6 +551,7 @@ IMPORTANT: Check the **Branch:** field in @ralph/IMPLEMENTATION_PLAN.md.
 - ONE task, then EXIT
 - Complete implementations only, no stubs
 - No comments in code unless asked
+- Only validate against the specific spec being worked on, not all specs
 ''')
 
     # Create implementation plan
@@ -655,45 +659,536 @@ def cmd_status(config: RalphConfig):
     else:
         print(f"  Status: {Colors.YELLOW}Stopped{Colors.NC}")
     
-    # Metrics
+    # Hint about watching
     print()
-    metrics = Metrics.load(config.metrics_file)
-    print(f"{Colors.CYAN}Session Metrics:{Colors.NC}")
-    print(f"  Cost:       ${metrics.total_cost:.4f}")
-    print(f"  Iterations: {metrics.total_iterations} ({metrics.successes} ok, {metrics.failures} failed)")
-    print(f"  Tokens:     {metrics.total_tokens_in} in / {metrics.total_tokens_out} out")
-
-
-def cmd_metrics(config: RalphConfig):
-    """Show detailed metrics."""
-    if not config.metrics_file.exists():
-        print(f"{Colors.YELLOW}No metrics available. Run 'ralph' first.{Colors.NC}")
-        return 1
-    
-    metrics = Metrics.load(config.metrics_file)
-    print(f"{Colors.BLUE}Ralph Session Metrics{Colors.NC}")
-    print()
-    print(f"  Cost:       ${metrics.total_cost:.4f}")
-    print(f"  Iterations: {metrics.total_iterations}")
-    print(f"  Successes:  {metrics.successes}")
-    print(f"  Failures:   {metrics.failures}")
-    print(f"  Tokens in:  {metrics.total_tokens_in}")
-    print(f"  Tokens out: {metrics.total_tokens_out}")
-    if metrics.started_at:
-        print(f"  Started:    {metrics.started_at}")
+    print(f"{Colors.DIM}Use 'ralph watch' to see live metrics during a run{Colors.NC}")
 
 
 @dataclass
 class DashboardState:
     """State for rendering the dashboard."""
     config: RalphConfig
-    metrics: Metrics
     branch: str
-    output_lines: list[str] = field(default_factory=list)
+    cost: float = 0.0  # Parsed from stream
+    tokens_in: int = 0
+    tokens_out: int = 0
     iteration: Optional[int] = None
+    output_lines: list[str] = field(default_factory=list)
     is_running: bool = False
     running_count: int = 0
     footer_text: str = "Watching..."
+    scroll_offset: int = 0  # For scrollable output
+    auto_scroll: bool = True  # Auto-scroll to bottom on new output
+
+
+# =============================================================================
+# Textual TUI Application
+# =============================================================================
+# Uses Textual framework for smooth, optimized rendering with built-in:
+# - Double-buffered rendering with character-level diffing
+# - Smooth scrolling with mouse wheel support
+# - Full ANSI color and emoji preservation
+# - Reactive UI updates
+
+def _create_textual_app():
+    """Create and return the Textual app class. Lazy import to avoid startup cost."""
+    from textual.app import App, ComposeResult
+    from textual.containers import Container, Horizontal, Vertical, ScrollableContainer
+    from textual.widgets import Static, Footer, Header, RichLog
+    from textual.reactive import reactive
+    from textual.binding import Binding
+    from textual import work
+    from textual.worker import Worker, get_current_worker
+    from rich.text import Text
+    from rich.console import Console
+    from rich.markup import escape
+    import asyncio
+
+    class OutputLog(RichLog):
+        """Scrollable output log that preserves ANSI colors."""
+        
+        BINDINGS = [
+            Binding("j", "scroll_down", "Down", show=False),
+            Binding("k", "scroll_up", "Up", show=False),
+            Binding("g", "scroll_home", "Top", show=False),
+            Binding("G", "scroll_end", "Bottom", show=False),
+            Binding("d", "page_down", "Page Down", show=False),
+            Binding("u", "page_up", "Page Up", show=False),
+            Binding("ctrl+d", "page_down", "Page Down", show=False),
+            Binding("ctrl+u", "page_up", "Page Up", show=False),
+        ]
+        
+        def __init__(self, **kwargs):
+            super().__init__(highlight=False, markup=False, wrap=False, auto_scroll=True, **kwargs)
+            self._follow_mode = True
+        
+        @property 
+        def follow_mode(self) -> bool:
+            return self._follow_mode
+        
+        @follow_mode.setter
+        def follow_mode(self, value: bool):
+            self._follow_mode = value
+            self.auto_scroll = value
+        
+        def toggle_follow(self):
+            self.follow_mode = not self.follow_mode
+            if self.follow_mode:
+                self.scroll_end(animate=False)
+        
+        def action_scroll_down(self):
+            self.scroll_relative(y=1)
+            self.follow_mode = False
+        
+        def action_scroll_up(self):
+            self.scroll_relative(y=-1)
+            self.follow_mode = False
+        
+        def action_page_down(self):
+            self.scroll_relative(y=self.size.height // 2)
+            self.follow_mode = False
+        
+        def action_page_up(self):
+            self.scroll_relative(y=-self.size.height // 2)
+            self.follow_mode = False
+        
+        def action_scroll_home(self):
+            self.scroll_home(animate=False)
+            self.follow_mode = False
+        
+        def action_scroll_end(self):
+            self.scroll_end(animate=False)
+            self.follow_mode = True
+        
+        def on_mouse_scroll_down(self, event) -> None:
+            self.follow_mode = False
+        
+        def on_mouse_scroll_up(self, event) -> None:
+            self.follow_mode = False
+
+    class RalphArtWidget(Static):
+        """Widget to display Ralph ASCII art with colors."""
+        
+        DEFAULT_CSS = """
+        RalphArtWidget {
+            width: auto;
+            height: auto;
+        }
+        """
+        
+        def __init__(self, art_lines: list[str], **kwargs):
+            # Art already has ANSI codes, convert to Rich Text
+            super().__init__(**kwargs)
+            self._art_lines = art_lines
+        
+        def render(self):
+            return Text.from_ansi('\n'.join(self._art_lines))
+
+    class StatusPanel(Static):
+        """Status information panel."""
+        
+        DEFAULT_CSS = """
+        StatusPanel {
+            width: 100%;
+            height: auto;
+            padding: 0 1;
+        }
+        """
+        
+        branch = reactive("")
+        status_text = reactive("")
+        cost_text = reactive("")
+        progress_text = reactive("")
+        spec_text = reactive("")
+        task_text = reactive("")
+        
+        def render(self):
+            lines = []
+            if self.branch:
+                lines.append(f"[green]Branch:[/] {escape(self.branch)}")
+            if self.status_text:
+                lines.append(self.status_text)
+            if self.cost_text:
+                lines.append(self.cost_text)
+            lines.append("")
+            if self.progress_text:
+                lines.append(self.progress_text)
+            lines.append("")
+            if self.spec_text:
+                lines.append(self.spec_text)
+            if self.task_text:
+                lines.append(f"[green]Task:[/]")
+                lines.append(f"  {escape(self.task_text)}")
+            return Text.from_markup('\n'.join(lines))
+
+    class IssuesPanel(Static):
+        """Issues display panel."""
+        
+        DEFAULT_CSS = """
+        IssuesPanel {
+            width: 100%;
+            height: auto;
+            padding: 0 1;
+            display: none;
+        }
+        IssuesPanel.visible {
+            display: block;
+        }
+        """
+        
+        def __init__(self, **kwargs):
+            super().__init__(**kwargs)
+            self._issues = []
+            self._open_count = 0
+            self._fixed_count = 0
+        
+        def update_issues(self, issues: list, open_count: int, fixed_count: int):
+            self._issues = issues[:5]
+            self._open_count = open_count
+            self._fixed_count = fixed_count
+            if self._issues:
+                self.add_class("visible")
+            else:
+                self.remove_class("visible")
+            self.refresh()
+        
+        def render(self):
+            if not self._issues:
+                return ""
+            lines = [f"[yellow]Issues:[/] ({self._open_count} open, {self._fixed_count} fixed)"]
+            for status, text in self._issues:
+                # Strip **[STATUS]** markers
+                text = re.sub(r'^\*\*\[[A-Z_]+\]\*\*\s*', '', text)
+                if status == 'fixed':
+                    lines.append(f"  [green]FIXED[/] {escape(text[:60])}")
+                else:
+                    lines.append(f"  [red]OPEN[/]  {escape(text[:60])}")
+            return Text.from_markup('\n'.join(lines))
+
+    class RalphDashboard(App):
+        """Main Ralph Wiggum dashboard application."""
+        
+        TITLE = "Ralph Wiggum"
+        
+        CSS = """
+        Screen {
+            background: $surface;
+        }
+        
+        #header-bar {
+            background: $primary;
+            color: $text;
+            height: 3;
+            padding: 0 1;
+            content-align: center middle;
+        }
+        
+        #header-bar Static {
+            text-style: bold;
+            width: 100%;
+            content-align: center middle;
+        }
+        
+        #main-content {
+            height: 1fr;
+        }
+        
+        #info-panel {
+            height: auto;
+            max-height: 50%;
+            padding: 1 0;
+        }
+        
+        #ralph-section {
+            height: auto;
+            width: 100%;
+            padding: 0 1;
+        }
+        
+        #ralph-art {
+            width: auto;
+            min-width: 20;
+        }
+        
+        #separator {
+            width: 1;
+            height: 100%;
+            margin: 0 1;
+        }
+        
+        #status {
+            width: 1fr;
+        }
+        
+        #divider {
+            height: 1;
+            width: 100%;
+            border-top: solid $primary-lighten-2;
+        }
+        
+        #issues {
+            height: auto;
+            max-height: 8;
+        }
+        
+        #output-section {
+            height: 1fr;
+            border-top: solid $primary-lighten-2;
+        }
+        
+        #output-header {
+            height: 1;
+            padding: 0 1;
+            background: $surface-darken-1;
+        }
+        
+        #output-log {
+            height: 1fr;
+            padding: 0 1;
+        }
+        
+        #footer-bar {
+            height: 1;
+            background: $surface-darken-1;
+            padding: 0 1;
+        }
+        
+        .follow-on {
+            color: $success;
+        }
+        
+        .follow-off {
+            color: $warning;
+        }
+        """
+        
+        BINDINGS = [
+            Binding("q", "quit", "Quit"),
+            Binding("f", "toggle_follow", "Follow"),
+            Binding("j", "focus_log_down", "Down", show=False),
+            Binding("k", "focus_log_up", "Up", show=False),
+        ]
+        
+        def __init__(self, config: 'RalphConfig', watch_mode: bool = False, 
+                     iteration: Optional[int] = None, **kwargs):
+            super().__init__(**kwargs)
+            self._config = config
+            self._watch_mode = watch_mode
+            self._iteration = iteration
+            self._cost = 0.0
+            self._tokens_in = 0
+            self._tokens_out = 0
+            self._branch = ""
+            self._is_running = False
+            self._running_count = 0
+            self._output_lines: deque = deque(maxlen=2000)
+            self._fifo_fd = None
+            self._process = None  # For run mode
+            self._output_buffer = None  # For run mode
+            self._stop_requested = False
+        
+        def compose(self) -> ComposeResult:
+            # Header
+            with Container(id="header-bar"):
+                yield Static(self._get_title())
+            
+            # Main content area
+            with Vertical(id="main-content"):
+                # Info panel (Ralph + status)
+                with Vertical(id="info-panel"):
+                    with Horizontal(id="ralph-section"):
+                        yield RalphArtWidget(RALPH_ART if RALPH_ART else [], id="ralph-art")
+                        yield Static("│", id="separator")
+                        yield StatusPanel(id="status")
+                    yield IssuesPanel(id="issues")
+                
+                # Output section
+                with Vertical(id="output-section"):
+                    yield Static("Output: [FOLLOW]", id="output-header")
+                    yield OutputLog(id="output-log")
+            
+            # Footer
+            yield Static(" q:quit  j/k:scroll  g/G:top/bottom  f:follow  d/u:page", id="footer-bar")
+        
+        def _get_title(self) -> str:
+            ts = datetime.now().strftime('%H:%M:%S')
+            if self._iteration is not None:
+                return f"RALPH WIGGUM - Iteration {self._iteration} - {ts}"
+            return f"RALPH WIGGUM - {ts}"
+        
+        def on_mount(self) -> None:
+            """Start background tasks when app mounts."""
+            self._branch = get_current_branch()
+            
+            # Start update loop
+            self.set_interval(0.1, self._update_display)
+            
+            if self._watch_mode:
+                # Start FIFO reader for watch mode
+                self._start_fifo_reader()
+            
+            # Initial display update
+            self._update_status_panel()
+        
+        def _start_fifo_reader(self):
+            """Start reading from FIFO in background."""
+            @work(thread=True, exclusive=True)
+            async def read_fifo(self):
+                while not self._stop_requested:
+                    # Try to open FIFO if not open
+                    if self._fifo_fd is None and self._config.output_fifo.exists():
+                        try:
+                            self._fifo_fd = os.open(str(self._config.output_fifo), os.O_RDWR | os.O_NONBLOCK)
+                        except OSError:
+                            pass
+                    
+                    # Read data
+                    if self._fifo_fd is not None:
+                        try:
+                            ready, _, _ = select.select([self._fifo_fd], [], [], 0.05)
+                            if ready:
+                                data = os.read(self._fifo_fd, 8192)
+                                if data:
+                                    for line in data.decode('utf-8', errors='replace').splitlines():
+                                        if line:
+                                            self._output_lines.append(line)
+                                            # Parse cost info from stream
+                                            cost_info = parse_cost_line(line)
+                                            if cost_info:
+                                                self._cost = cost_info[0]
+                                                self._tokens_in = cost_info[1]
+                                                self._tokens_out = cost_info[2]
+                                            # Post to main thread
+                                            self.call_from_thread(self._append_output, line)
+                        except OSError:
+                            if self._fifo_fd is not None:
+                                try:
+                                    os.close(self._fifo_fd)
+                                except OSError:
+                                    pass
+                            self._fifo_fd = None
+                    else:
+                        await asyncio.sleep(0.1)
+            
+            read_fifo(self)
+        
+        def _append_output(self, line: str):
+            """Append a line to output log (called from main thread)."""
+            log = self.query_one("#output-log", OutputLog)
+            # Write with ANSI preserved - RichLog will render it
+            log.write(Text.from_ansi(line))
+        
+        def _update_display(self):
+            """Periodic display update."""
+            # Update title with current time
+            header = self.query_one("#header-bar Static", Static)
+            header.update(self._get_title())
+            
+            # Update running status
+            if self._watch_mode:
+                self._running_count = count_running_opencode(self._config.repo_root)
+                self._is_running = self._running_count > 0
+            
+            self._update_status_panel()
+            self._update_output_header()
+        
+        def _update_status_panel(self):
+            """Update the status panel."""
+            status = self.query_one("#status", StatusPanel)
+            plan = parse_impl_plan(self._config.impl_plan)
+            
+            status.branch = self._branch
+            
+            if self._is_running:
+                if self._running_count > 0:
+                    status.status_text = f"[green]Status:[/] Running ({self._running_count})"
+                else:
+                    status.status_text = "[green]Status:[/] Running"
+            else:
+                status.status_text = "[yellow]Status:[/] Stopped"
+            
+            if self._cost > 0:
+                status.cost_text = f"[cyan]Cost:[/] ${self._cost:.4f}"
+            else:
+                status.cost_text = f"[cyan]Cost:[/] --"
+            
+            status.progress_text = f"[green]Progress:[/] {plan['done']} done, {plan['pending']} pending"
+            
+            if plan['current_spec']:
+                status.spec_text = f"[green]Spec:[/] {plan['current_spec']}"
+            else:
+                status.spec_text = ""
+            
+            status.task_text = plan['next_task'] if plan['next_task'] else "(no pending tasks)"
+            
+            # Update issues
+            issues_panel = self.query_one("#issues", IssuesPanel)
+            issues_panel.update_issues(
+                plan['issues']['items'],
+                plan['issues']['open'],
+                plan['issues']['fixed']
+            )
+        
+        def _update_output_header(self):
+            """Update output header with scroll/follow status."""
+            log = self.query_one("#output-log", OutputLog)
+            header = self.query_one("#output-header", Static)
+            
+            if log.follow_mode:
+                header.update("Output: [green][FOLLOW][/]")
+            else:
+                header.update("Output: [yellow][SCROLL][/]")
+        
+        def action_toggle_follow(self):
+            """Toggle follow mode."""
+            log = self.query_one("#output-log", OutputLog)
+            log.toggle_follow()
+            self._update_output_header()
+        
+        def action_focus_log_down(self):
+            """Scroll log down."""
+            log = self.query_one("#output-log", OutputLog)
+            log.action_scroll_down()
+            self._update_output_header()
+        
+        def action_focus_log_up(self):
+            """Scroll log up."""
+            log = self.query_one("#output-log", OutputLog)
+            log.action_scroll_up()
+            self._update_output_header()
+        
+        def action_quit(self):
+            """Quit the application."""
+            self._stop_requested = True
+            if self._fifo_fd is not None:
+                try:
+                    os.close(self._fifo_fd)
+                except OSError:
+                    pass
+            self.exit()
+        
+        # Methods for run mode (not watch mode)
+        def set_process(self, process, output_buffer: 'OutputBuffer'):
+            """Set the process to monitor (for run mode)."""
+            self._process = process
+            self._output_buffer = output_buffer
+            self._is_running = True
+        
+        def add_output_line(self, line: str):
+            """Add a line to output (for run mode, called from output thread)."""
+            self._output_lines.append(line)
+            self.call_from_thread(self._append_output, line)
+        
+        def check_process_done(self) -> Optional[int]:
+            """Check if process is done, return exit code or None."""
+            if self._process is not None:
+                ret = self._process.poll()
+                if ret is not None:
+                    self._is_running = False
+                    return ret
+            return None
+
+    return RalphDashboard, OutputLog
 
 
 def render_dashboard(state: DashboardState, term_width: int, term_height: int) -> list[str]:
@@ -740,10 +1235,10 @@ def render_dashboard(state: DashboardState, term_width: int, term_height: int) -
     else:
         status_lines.append(f"🟡 {Colors.YELLOW}Status:{Colors.NC} Stopped")
     
-    if state.iteration is not None:
-        status_lines.append(f"💰 {Colors.CYAN}Cost:{Colors.NC} ${state.metrics.total_cost:.4f}")
+    if state.cost > 0:
+        status_lines.append(f"💰 {Colors.CYAN}Cost:{Colors.NC} ${state.cost:.4f}")
     else:
-        status_lines.append(f"💰 {Colors.CYAN}Session:{Colors.NC} ${state.metrics.total_cost:.4f} | {state.metrics.total_iterations} iters ({state.metrics.successes} ok, {state.metrics.failures} fail)")
+        status_lines.append(f"💰 {Colors.CYAN}Cost:{Colors.NC} --")
     
     status_lines.append(f"")
     status_lines.append(f"📊 {Colors.GREEN}Progress:{Colors.NC} {plan['done']} done, {plan['pending']} pending")
@@ -810,23 +1305,151 @@ def render_dashboard(state: DashboardState, term_width: int, term_height: int) -
 
 def cmd_watch(config: RalphConfig):
     """Live dashboard showing current status with streamed output."""
+    if not _check_textual():
+        # Use the original ANSI-based dashboard (still good, just not as optimized)
+        _cmd_watch_fallback(config)
+        return
+    
+    # Use Textual TUI
+    RalphDashboard, _ = _create_textual_app()
+    app = RalphDashboard(config, watch_mode=True)
+    app.run()
+    print("Stopped watching.")
+
+
+def _cmd_watch_fallback(config: RalphConfig):
+    """Fallback watch mode without Textual - uses the original ANSI dashboard."""
     import shutil
+    import tty
+    import termios
     
-    HIDE_CURSOR = '\033[?25l'
-    SHOW_CURSOR = '\033[?25h'
-    
-    # Output buffer for lines read from FIFO
-    output_lines: deque = deque(maxlen=100)
+    output_lines: deque = deque(maxlen=1000)
     fifo_fd = None
+    old_settings = None
     
-    # Hide cursor and clear screen
-    print(HIDE_CURSOR, end='')
-    print('\033[2J\033[H', end='')
+    # Get terminal size
+    term_width, term_height = shutil.get_terminal_size((80, 24))
+    
+    # Scroll state
+    scroll_offset = 0
+    auto_scroll = True
+    
+    # Cached expensive data (refresh every ~1 second, not every frame)
+    cached_cost = 0.0
+    cached_tokens_in = 0
+    cached_tokens_out = 0
+    cached_branch = ""
+    cached_running = 0
+    last_expensive_update = 0
+    EXPENSIVE_UPDATE_INTERVAL = 1.0  # seconds
+    
+    # Track if we need to redraw
+    needs_redraw = True
+    last_output_count = 0
+    
+    def get_input() -> Optional[str]:
+        """Non-blocking keyboard input."""
+        try:
+            ready, _, _ = select.select([sys.stdin], [], [], 0)
+            if ready:
+                ch = sys.stdin.read(1)
+                if ch == 'q' or ch == 'Q':
+                    return 'quit'
+                elif ch == 'j':
+                    return 'scroll_down'
+                elif ch == 'k':
+                    return 'scroll_up'
+                elif ch == 'g':
+                    return 'scroll_top'
+                elif ch == 'G':
+                    return 'scroll_bottom'
+                elif ch == 'd':
+                    return 'page_down'
+                elif ch == 'u':
+                    return 'page_up'
+                elif ch == 'f' or ch == 'F':
+                    return 'toggle_follow'
+                elif ch == '\x1b':  # Escape sequence
+                    # Try to read arrow keys
+                    ready2, _, _ = select.select([sys.stdin], [], [], 0.01)
+                    if ready2:
+                        seq = sys.stdin.read(2)
+                        if seq == '[A':
+                            return 'scroll_up'
+                        elif seq == '[B':
+                            return 'scroll_down'
+                        elif seq == '[5':  # Page up
+                            sys.stdin.read(1)  # consume ~
+                            return 'page_up'
+                        elif seq == '[6':  # Page down
+                            sys.stdin.read(1)  # consume ~
+                            return 'page_down'
+        except:
+            pass
+        return None
+    
+    def do_render():
+        """Render the dashboard."""
+        nonlocal term_width, term_height, scroll_offset
+        
+        # Update terminal size
+        term_width, term_height = shutil.get_terminal_size((80, 24))
+        viewport_height = max(1, term_height - 20)
+        
+        # Auto-scroll if enabled
+        if auto_scroll:
+            scroll_offset = max(0, len(output_lines) - viewport_height)
+        
+        # Get visible output slice
+        visible_output = list(output_lines)[scroll_offset:scroll_offset + viewport_height]
+        
+        # Build scroll indicator for footer
+        if len(output_lines) > viewport_height:
+            scroll_info = f"[{scroll_offset + 1}-{min(scroll_offset + viewport_height, len(output_lines))}/{len(output_lines)}]"
+            if auto_scroll:
+                scroll_info += " FOLLOW"
+            else:
+                scroll_info += " SCROLL"
+        else:
+            scroll_info = "FOLLOW" if auto_scroll else ""
+        
+        state = DashboardState(
+            config=config,
+            branch=cached_branch,
+            cost=cached_cost,
+            tokens_in=cached_tokens_in,
+            tokens_out=cached_tokens_out,
+            output_lines=visible_output,
+            is_running=cached_running > 0,
+            running_count=cached_running,
+            footer_text=f"q:quit j/k:scroll g/G:top/bot f:follow | {scroll_info}"
+        )
+        
+        # Move cursor to top and render
+        sys.stdout.write('\033[H')
+        lines = render_dashboard(state, term_width, term_height)
+        sys.stdout.write('\n'.join(lines))
+        sys.stdout.flush()
     
     try:
+        # Set terminal to raw mode for single-key input
+        old_settings = termios.tcgetattr(sys.stdin)
+        tty.setcbreak(sys.stdin.fileno())
+        
+        # Enter alternate screen buffer
+        sys.stdout.write('\033[?1049h')
+        sys.stdout.write('\033[?25l')  # Hide cursor
+        sys.stdout.flush()
+        
+        # Initial expensive data load
+        cached_branch = get_current_branch()
+        cached_running = count_running_opencode(config.repo_root)
+        last_expensive_update = time.time()
+        
         while True:
+            now = time.time()
+            
             # Try to open FIFO if not open
-            # Use O_RDWR to keep FIFO open even when no writer present
             if fifo_fd is None and config.output_fifo.exists():
                 try:
                     fifo_fd = os.open(str(config.output_fifo), os.O_RDWR | os.O_NONBLOCK)
@@ -842,10 +1465,16 @@ def cmd_watch(config: RalphConfig):
                             break
                         data = os.read(fifo_fd, 4096)
                         if not data:
-                            break  # No data right now
+                            break
                         for line in data.decode('utf-8', errors='replace').splitlines():
                             if line:
                                 output_lines.append(line)
+                                # Parse cost info from stream
+                                cost_info = parse_cost_line(line)
+                                if cost_info:
+                                    cached_cost = cost_info[0]
+                                    cached_tokens_in = cost_info[1]
+                                    cached_tokens_out = cost_info[2]
                 except OSError:
                     if fifo_fd is not None:
                         try:
@@ -854,43 +1483,79 @@ def cmd_watch(config: RalphConfig):
                             pass
                     fifo_fd = None
             
-            term_size = shutil.get_terminal_size()
-            term_height = term_size.lines
-            term_width = term_size.columns
+            # Check if output changed
+            if len(output_lines) != last_output_count:
+                last_output_count = len(output_lines)
+                needs_redraw = True
             
-            # Build state for rendering
-            metrics = Metrics.load(config.metrics_file)
-            running = count_running_opencode(config.repo_root)
+            # Handle keyboard input - this should be INSTANT
+            action = get_input()
+            if action == 'quit':
+                break
+            elif action:
+                # Calculate viewport height
+                viewport_height = max(1, term_height - 20)
+                max_offset = max(0, len(output_lines) - viewport_height)
+                
+                if action == 'scroll_down':
+                    scroll_offset = min(scroll_offset + 1, max_offset)
+                    auto_scroll = (scroll_offset >= max_offset)
+                elif action == 'scroll_up':
+                    scroll_offset = max(scroll_offset - 1, 0)
+                    auto_scroll = False
+                elif action == 'scroll_top':
+                    scroll_offset = 0
+                    auto_scroll = False
+                elif action == 'scroll_bottom':
+                    scroll_offset = max_offset
+                    auto_scroll = True
+                elif action == 'page_down':
+                    scroll_offset = min(scroll_offset + viewport_height // 2, max_offset)
+                    auto_scroll = (scroll_offset >= max_offset)
+                elif action == 'page_up':
+                    scroll_offset = max(scroll_offset - viewport_height // 2, 0)
+                    auto_scroll = False
+                elif action == 'toggle_follow':
+                    auto_scroll = not auto_scroll
+                    if auto_scroll:
+                        scroll_offset = max_offset
+                
+                # Immediate redraw on scroll action
+                do_render()
+                continue  # Skip the sleep, check for more input
             
-            state = DashboardState(
-                config=config,
-                metrics=metrics,
-                branch=get_current_branch(),
-                output_lines=list(output_lines),
-                iteration=None,
-                is_running=running > 0,
-                running_count=running,
-                footer_text="Watching... (Ctrl+C to stop)"
-            )
+            # Refresh expensive data periodically (not on every frame)
+            if now - last_expensive_update >= EXPENSIVE_UPDATE_INTERVAL:
+                cached_running = count_running_opencode(config.repo_root)
+                # Branch rarely changes, check less often
+                if int(now) % 5 == 0:
+                    cached_branch = get_current_branch()
+                last_expensive_update = now
+                needs_redraw = True
             
-            # Render and display
-            print('\033[H', end='')  # Move to top
-            lines = render_dashboard(state, term_width, term_height)
-            for i, line in enumerate(lines):
-                if i < len(lines) - 1:
-                    print(line)
-                else:
-                    print(line, end='', flush=True)
-            print('\033[J', end='', flush=True)  # Clear below
+            # Render if needed
+            if needs_redraw:
+                do_render()
+                needs_redraw = False
             
-            time.sleep(0.1)
+            # Small sleep to prevent CPU spin, but short enough for responsive input
+            time.sleep(0.016)  # ~60fps input polling
+                
     except KeyboardInterrupt:
-        print(SHOW_CURSOR, end='')
-        print("\nStopped watching.")
+        pass
     finally:
+        # Restore terminal
+        if old_settings:
+            termios.tcsetattr(sys.stdin, termios.TCSADRAIN, old_settings)
+        sys.stdout.write('\033[?25h')  # Show cursor
+        sys.stdout.write('\033[?1049l')  # Exit alternate screen
+        sys.stdout.flush()
         if fifo_fd is not None:
-            os.close(fifo_fd)
-        print('\033[?25h', end='', flush=True)
+            try:
+                os.close(fifo_fd)
+            except OSError:
+                pass
+        print("Stopped watching.")
 
 
 def cmd_stream():
@@ -1024,42 +1689,109 @@ class OutputBuffer:
 def run_with_live_ui(process, config: RalphConfig, iteration: int,
                      metrics: Metrics, branch: str, output_buffer: OutputBuffer) -> int:
     """Run process with live dashboard UI, return exit code."""
+    
+    if not _check_textual():
+        # Fallback: just wait for process without fancy UI
+        return _run_with_simple_ui(process, config, iteration, metrics, branch, output_buffer)
+    
+    # Use Textual TUI with process monitoring
+    RalphDashboard, _ = _create_textual_app()
+    
+    # Create a custom app that monitors the process
+    app = RalphDashboard(config, watch_mode=False, iteration=iteration)
+    app._cost = metrics.total_cost
+    app._tokens_in = metrics.total_tokens_in
+    app._tokens_out = metrics.total_tokens_out
+    app._branch = branch
+    app._is_running = True
+    
+    # We need to run the app and stream output simultaneously
+    # The output thread is already running, we just need to hook it up
+    exit_code = [None]
+    
+    def check_process():
+        """Check if process is done and update app."""
+        ret = process.poll()
+        if ret is not None:
+            exit_code[0] = ret
+            app._is_running = False
+            # Give a moment for final output then exit
+            app.set_timer(0.5, lambda: app.exit())
+        
+        # Feed new output lines to the app
+        for line in output_buffer.get_lines()[-50:]:  # Get recent lines
+            # Skip if already added (crude dedup by checking last few)
+            pass
+    
+    # Start the app with a process monitor
+    original_on_mount = app.on_mount
+    
+    def patched_on_mount():
+        original_on_mount()
+        # Set up process monitoring
+        app.set_interval(0.1, check_process)
+        # Set up output feeding
+        def feed_output():
+            lines = output_buffer.get_lines()
+            log = app.query_one("#output-log")
+            # Only add new lines
+            current_count = getattr(app, '_fed_lines', 0)
+            from rich.text import Text
+            for line in lines[current_count:]:
+                log.write(Text.from_ansi(line))
+            app._fed_lines = len(lines)
+        app.set_interval(0.1, feed_output)
+    
+    app.on_mount = patched_on_mount
+    
+    try:
+        app.run()
+    except KeyboardInterrupt:
+        process.terminate()
+        process.wait()
+        raise
+    
+    # If we exited before process finished, wait for it
+    if exit_code[0] is None:
+        process.terminate()
+        process.wait()
+        return process.returncode
+    
+    return exit_code[0]
+
+
+def _run_with_simple_ui(process, config: RalphConfig, iteration: int,
+                        metrics: Metrics, branch: str, output_buffer: OutputBuffer) -> int:
+    """Simple fallback UI without Textual."""
     import shutil
+    term_width, term_height = shutil.get_terminal_size((80, 24))
     
-    HIDE_CURSOR = '\033[?25l'
-    SHOW_CURSOR = '\033[?25h'
-    
-    # Hide cursor and clear screen
-    print(HIDE_CURSOR, end='')
-    print('\033[2J\033[H', end='')
+    # Enter alternate screen buffer
+    sys.stdout.write('\033[?1049h')
+    sys.stdout.flush()
     
     try:
         while process.poll() is None:
-            term_size = shutil.get_terminal_size()
-            term_width = term_size.columns
-            term_height = term_size.lines
+            # Move cursor to top
+            sys.stdout.write('\033[H')
             
-            # Build state for rendering
+            # Build and render dashboard
             state = DashboardState(
                 config=config,
-                metrics=metrics,
                 branch=branch,
-                output_lines=output_buffer.get_lines(),
+                cost=metrics.total_cost,
+                tokens_in=metrics.total_tokens_in,
+                tokens_out=metrics.total_tokens_out,
                 iteration=iteration,
+                output_lines=output_buffer.get_lines(),
                 is_running=True,
                 running_count=0,
-                footer_text="Press Ctrl+C to stop"
+                footer_text=""
             )
             
-            # Render and display
-            print('\033[H', end='')  # Move to top
             lines = render_dashboard(state, term_width, term_height)
-            for i, line in enumerate(lines):
-                if i < len(lines) - 1:
-                    print(line)
-                else:
-                    print(line, end='', flush=True)
-            print('\033[J', end='', flush=True)  # Clear below
+            sys.stdout.write('\n'.join(lines))
+            sys.stdout.flush()
             
             time.sleep(0.1)
         
@@ -1070,8 +1802,9 @@ def run_with_live_ui(process, config: RalphConfig, iteration: int,
         process.wait()
         raise
     finally:
-        print(SHOW_CURSOR, end='', flush=True)
-        print('\033[2J\033[H', end='')
+        # Exit alternate screen buffer
+        sys.stdout.write('\033[?1049l')
+        sys.stdout.flush()
 
 
 def stream_output(pipe, output_buffer: OutputBuffer, metrics: Metrics, 
@@ -1284,9 +2017,6 @@ def cmd_run(config: RalphConfig, mode: str, max_iterations: int, max_cost: float
                 print(f"{Colors.BLUE}│  Exit: {exit_code} | Failures: {consecutive_failures}/{max_failures}{Colors.NC}")
                 print(f"{Colors.BLUE}└───────────────────────────────────────────────────────────────┘{Colors.NC}")
 
-            # Save metrics
-            metrics.save(config.metrics_file)
-
             # Check completion promise
             if completion_promise:
                 if completion_promise in output_buffer.get_all():
@@ -1323,8 +2053,7 @@ def cmd_run(config: RalphConfig, mode: str, max_iterations: int, max_cost: float
     except KeyboardInterrupt:
         print(f"\n{Colors.YELLOW}Interrupted by user{Colors.NC}")
     finally:
-        metrics.save(config.metrics_file)
-        print(f"{Colors.CYAN}Session saved: ${metrics.total_cost:.4f} across {metrics.total_iterations} iterations{Colors.NC}")
+        print(f"{Colors.CYAN}Session: ${metrics.total_cost:.4f} across {metrics.total_iterations} iterations{Colors.NC}")
 
 
 def main():
@@ -1345,7 +2074,7 @@ Examples:
     )
     
     parser.add_argument('command', nargs='?', default='build',
-                       help='Command: init, plan, build, status, watch, stream, metrics, help')
+                       help='Command: init, plan, build, status, watch, stream, help')
     parser.add_argument('iterations', nargs='?', type=int, default=0,
                        help='Max iterations (0 = unlimited)')
     parser.add_argument('--max-cost', type=float, default=0,
@@ -1382,8 +2111,6 @@ Examples:
         cmd_init(config)
     elif args.command == 'status':
         cmd_status(config)
-    elif args.command == 'metrics':
-        cmd_metrics(config)
     elif args.command == 'watch':
         cmd_watch(config)
     elif args.command == 'plan':

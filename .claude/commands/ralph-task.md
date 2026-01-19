@@ -12,18 +12,22 @@ Check that `ralph/IMPLEMENTATION_PLAN.md` exists. If not, tell user to run `/ral
 
 1. Read `ralph/IMPLEMENTATION_PLAN.md`
 
-2. Pick the SINGLE most important incomplete task (highest priority, first in list)
+2. Pick the SINGLE most important incomplete task (first incomplete task in the file)
 
-3. Before implementing, search the codebase to confirm it's not already done
+3. Identify which `## Spec:` section this task belongs to
 
-4. Implement the task fully:
+4. Read ONLY that specific spec file from `ralph/specs/` - do NOT read all specs
+
+5. Before implementing, search the codebase to confirm it's not already done
+
+6. Implement the task fully:
    - No placeholders or stubs
    - No comments unless explicitly required
    - Follow existing code patterns
 
-5. Run tests/build to validate
+7. Run tests/build to validate ONLY the functionality related to this spec - do NOT validate all specs
 
-6. Update `ralph/IMPLEMENTATION_PLAN.md`:
+8. Update `ralph/IMPLEMENTATION_PLAN.md`:
    - Mark task as complete: `- [x] Task`
    - Add any discovered issues
    - Add any new tasks found

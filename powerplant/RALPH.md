@@ -6,6 +6,23 @@ mistakes, but never stopping.
 
 > "Ralph is a Bash loop" - Geoffrey Huntley
 
+## Requirements
+
+- Python 3.10+
+- [opencode](https://github.com/sst/opencode) - Claude Code CLI
+
+**Optional (for enhanced TUI):**
+
+```bash
+# Arch Linux
+sudo pacman -S python-textual
+
+# macOS / other Linux (via pip)
+pip3 install textual
+```
+
+Without textual, `ralph watch` uses a simpler but fully functional dashboard.
+
 ## Quick Start
 
 ```bash
@@ -73,10 +90,9 @@ ralph --completion-promise "ALL TESTS PASSING"  # Stop when done
 ```bash
 ralph init          # Initialize ralph in current repo
 ralph plan          # Generate implementation plan from specs (runs once)
-ralph status        # Show current status + session metrics
-ralph watch         # Live dashboard (run in separate terminal)
+ralph status        # Show current status
+ralph watch         # Live dashboard with costs (run in separate terminal)
 ralph log           # Tail the current log
-ralph metrics       # Show detailed session metrics
 ralph help          # Show help
 
 # Build mode (implement from plan)
@@ -192,28 +208,17 @@ tail -f build/ralph-logs/ralph-*.log
 # Check commits
 git log --oneline -10
 
-# See status + metrics
+# See status
 ralph status
 
-# Detailed metrics (cost, tokens, success rate)
-ralph metrics
-
-# Live dashboard with metrics
+# Live dashboard with cost tracking
 ralph watch
 ```
 
-## Metrics
+## Cost Tracking
 
-Ralph tracks session metrics automatically:
-
-- **Total cost** - Cumulative API cost in USD
-- **Iterations** - Total iterations run
-- **Success/Failure count** - For circuit breaker
-- **Token usage** - Input and output tokens
-
-View with `ralph status`, `ralph metrics`, or `ralph watch`.
-
-Metrics are stored in `build/ralph-logs/metrics.json` and reset each session.
+During a run, `ralph watch` shows live cost information parsed from the output stream.
+Cost resets each session (each `ralph` invocation).
 
 ## Safety
 
@@ -237,7 +242,6 @@ Ralph uses `--dangerously-skip-permissions` to run autonomously.
 - `Ctrl+C` stops the loop
 - `git reset --hard HEAD~N` undoes N commits
 - Delete and regenerate `IMPLEMENTATION_PLAN.md` if stuck
-- `ralph metrics` shows what was spent
 
 ## Integration with AGENTS.md
 

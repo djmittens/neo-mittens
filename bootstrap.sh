@@ -419,7 +419,44 @@ ${end}"
 install_ralph_completion_bash
 install_ralph_completion_zsh
 
-# 16) Install global OpenCode tools (to ~/.config/opencode/tools/)
+# 16) Install textual for ralph TUI (optional, best-effort)
+install_ralph_textual() {
+  # Check if textual is already available
+  if python3 -c "import textual" 2>/dev/null; then
+    echo "OK: textual already installed"
+    return 0
+  fi
+
+  # Try various pip methods
+  local pip_cmd=""
+  if command -v pip3 >/dev/null 2>&1; then
+    pip_cmd="pip3"
+  elif command -v pip >/dev/null 2>&1; then
+    pip_cmd="pip"
+  elif python3 -m pip --version >/dev/null 2>&1; then
+    pip_cmd="python3 -m pip"
+  fi
+
+  if [ -n "$pip_cmd" ]; then
+    echo "Installing textual for ralph TUI..."
+    $pip_cmd install --user textual 2>/dev/null && echo "OK: textual installed" || echo "SKIP: textual install failed (ralph will use fallback TUI)"
+  else
+    # Try system package managers
+    if command -v pacman >/dev/null 2>&1; then
+      echo "HINT: Install textual with: sudo pacman -S python-textual"
+    elif command -v apt >/dev/null 2>&1; then
+      echo "HINT: Install textual with: pip3 install --user textual"
+    elif command -v brew >/dev/null 2>&1; then
+      echo "HINT: Install textual with: pip3 install textual"
+    else
+      echo "SKIP: No pip found, ralph will use fallback TUI (install textual for smoother experience)"
+    fi
+  fi
+}
+
+install_ralph_textual
+
+# 17) Install global OpenCode tools (to ~/.config/opencode/tools/)
 OPENCODE_CONFIG_DIR="$HOME/.config/opencode"
 OPENCODE_TOOLS_DIR="$OPENCODE_CONFIG_DIR/tools"
 ensure_dir "$OPENCODE_TOOLS_DIR"
