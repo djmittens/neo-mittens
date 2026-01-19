@@ -14,7 +14,15 @@ Usage: ralph [command] [options]
 Options:
   --max-cost N             Stop when cumulative cost exceeds $N
   --max-failures N         Circuit breaker: stop after N consecutive failures (default: 3)
+  --timeout N              Kill iteration after N seconds (default: 900)
+  --context-limit N        Context window size in tokens (default: 200000)
   --completion-promise T   Stop when output contains TEXT
+
+Safety Features:
+  - Iterations are killed if they exceed the timeout (prevents stuck agents)
+  - Iterations are killed if context usage exceeds 80% (prevents context overflow)
+  - A warning is shown when context usage exceeds 50%
+  - After a kill, the next iteration receives guidance to break down the problem
 """
 
 import argparse
@@ -52,20 +60,39 @@ class Colors:
     GREEN = '\033[0;32m'
     YELLOW = '\033[1;33m'
     BLUE = '\033[0;34m'
+    MAGENTA = '\033[0;35m'
     CYAN = '\033[0;36m'
+    WHITE = '\033[0;37m'
     NC = '\033[0m'  # No Color
     
     # Extended colors for Ralph ASCII art
     BRIGHT_YELLOW = '\033[93m'
     BRIGHT_RED = '\033[91m'
-    WHITE = '\033[97m'
+    BRIGHT_WHITE = '\033[97m'
     BRIGHT_BLUE = '\033[94m'
+    BRIGHT_MAGENTA = '\033[95m'
     DIM = '\033[2m'
     PINK = '\033[38;5;218m'
     SKIN = '\033[38;5;223m'
     HAIR = '\033[38;5;220m'
     SHIRT_BLUE = '\033[38;5;39m'
     SHIRT_DARK = '\033[38;5;25m'
+
+
+# =============================================================================
+# Context and Timeout Limits
+# =============================================================================
+# Context window size for Claude models (in tokens)
+DEFAULT_CONTEXT_WINDOW = 200_000
+
+# Soft limit: warn when context usage exceeds this percentage
+CONTEXT_SOFT_LIMIT_PCT = 50
+
+# Hard limit: kill iteration when context usage exceeds this percentage  
+CONTEXT_HARD_LIMIT_PCT = 80
+
+# Default iteration timeout in seconds (15 minutes)
+DEFAULT_ITERATION_TIMEOUT = 900
 
 
 # =============================================================================
@@ -246,7 +273,79 @@ class Metrics:
     total_tokens_out: int = 0
     failures: int = 0
     successes: int = 0
+    kills_timeout: int = 0
+    kills_context: int = 0
     started_at: Optional[str] = None
+
+
+@dataclass
+class IterationKillInfo:
+    """Information about why an iteration was killed."""
+    reason: str  # "timeout", "context_limit", or "none"
+    task_name: Optional[str] = None
+    tokens_used: int = 0
+    context_limit: int = 0
+    timeout_seconds: int = 0
+    elapsed_seconds: int = 0
+    last_activity: Optional[str] = None  # What the agent was doing when killed
+    
+    def to_prompt_injection(self) -> str:
+        """Generate prompt text to inject into the next iteration."""
+        if self.reason == "none":
+            return ""
+        
+        lines = [
+            "# CRITICAL: Previous Iteration Failed",
+            "",
+        ]
+        
+        if self.reason == "timeout":
+            lines.extend([
+                f"The previous iteration was KILLED after {self.elapsed_seconds}s (timeout: {self.timeout_seconds}s).",
+                f"Task: {self.task_name or 'unknown'}",
+                "",
+                f"Last activity before kill: {self.last_activity or 'unknown'}",
+                "",
+                "## Required Actions:",
+                "1. DO NOT repeat the same approach - it will fail again",
+                "2. Break down the problem into SMALLER steps",
+                "3. If investigating code, use targeted searches instead of reading entire files",
+                "4. If the task is too complex, create sub-tasks using `ralph task add`",
+                "5. Complete ONE small step, then EXIT to let the next iteration continue",
+                "",
+            ])
+        elif self.reason == "context_limit":
+            pct_used = (self.tokens_used / self.context_limit * 100) if self.context_limit > 0 else 0
+            lines.extend([
+                f"The previous iteration was KILLED due to context overflow ({self.tokens_used:,} tokens, {pct_used:.0f}% of {self.context_limit:,} limit).",
+                f"Task: {self.task_name or 'unknown'}",
+                "",
+                f"Last activity before kill: {self.last_activity or 'unknown'}",
+                "",
+                "## Required Actions - YOU MUST USE SUBAGENTS:",
+                "",
+                "You are reading too much code directly. USE THE TASK TOOL to spawn subagents:",
+                "",
+                "```",
+                'Task: "Research how [X] works in this codebase. Find the relevant files, understand the implementation, and report back: 1) which files, 2) how it works, 3) what needs to change"',
+                "```",
+                "",
+                "Each subagent gets a FRESH context window. Spawn multiple subagents in parallel for different research questions.",
+                "",
+                "DO NOT:",
+                "- Read files directly (use subagents)",
+                "- Explore broadly (be specific in subagent prompts)", 
+                "- Try to understand everything at once",
+                "",
+                "DO:",
+                "- Spawn a subagent for each research question",
+                "- Wait for subagent results before proceeding",
+                "- Make targeted edits based on subagent findings",
+                "",
+            ])
+        
+        lines.append("---\n")
+        return "\n".join(lines)
 
 
 @dataclass
@@ -258,6 +357,7 @@ class RalphConfig:
     prompt_build: Path
     prompt_verify: Path
     prompt_investigate: Path
+    prompt_decompose: Path
     specs_dir: Path
     output_fifo: Path
     plan_file: Path
@@ -274,6 +374,7 @@ class RalphConfig:
             prompt_build=ralph_dir / 'PROMPT_build.md',
             prompt_verify=ralph_dir / 'PROMPT_verify.md',
             prompt_investigate=ralph_dir / 'PROMPT_investigate.md',
+            prompt_decompose=ralph_dir / 'PROMPT_decompose.md',
             specs_dir=ralph_dir / 'specs',
             output_fifo=log_dir / 'output.fifo',
             plan_file=ralph_dir / 'plan.jsonl',
@@ -311,6 +412,9 @@ class Task:
     deps: Optional[list] = None  # List of task IDs this depends on
     status: str = "p"  # "p" = pending, "d" = done
     done_at: Optional[str] = None  # Commit hash when marked done
+    needs_decompose: bool = False  # True if task was killed and needs breakdown
+    kill_reason: Optional[str] = None  # "timeout" or "context" if killed
+    kill_log: Optional[str] = None  # Path to log file from killed iteration
     
     def to_jsonl(self) -> str:
         d = {"t": "task", "id": self.id, "spec": self.spec, "name": self.name, "s": self.status}
@@ -322,6 +426,12 @@ class Task:
             d["deps"] = self.deps
         if self.done_at:
             d["done_at"] = self.done_at
+        if self.needs_decompose:
+            d["decompose"] = True
+        if self.kill_reason:
+            d["kill"] = self.kill_reason
+        if self.kill_log:
+            d["kill_log"] = self.kill_log
         return json.dumps(d)
     
     @classmethod
@@ -336,7 +446,10 @@ class Task:
             accept=d.get("accept"),
             deps=d.get("deps"),
             status=d.get("s", "p"),
-            done_at=d.get("done_at")
+            done_at=d.get("done_at"),
+            needs_decompose=d.get("decompose", False),
+            kill_reason=d.get("kill"),
+            kill_log=d.get("kill_log")
         )
 
 
@@ -447,32 +560,51 @@ class RalphState:
         """Compute current stage based on state."""
         if self.spec is None:
             return "PLAN"
+        # INVESTIGATE takes priority - process all issues before building
+        if self.issues:
+            return "INVESTIGATE"
+        # DECOMPOSE takes priority over BUILD - must break down killed tasks first
+        if any(t.needs_decompose for t in self.pending):
+            return "DECOMPOSE"
         if self.pending:
             return "BUILD"
         if self.done:
             return "VERIFY"
-        if self.issues:
-            return "INVESTIGATE"
         return "COMPLETE"
+    
+    def get_task_needing_decompose(self) -> Optional['Task']:
+        """Get first task that needs decomposition."""
+        for t in self.pending:
+            if t.needs_decompose:
+                return t
+        return None
     
     def get_next(self) -> dict:
         """Get next action to take."""
         stage = self.get_stage()
         if stage == "PLAN":
             return {"action": "PLAN", "item": None}
+        elif stage == "DECOMPOSE":
+            task = self.get_task_needing_decompose()
+            return {"action": "DECOMPOSE", "task": task_to_query_dict(task, include_decompose_info=True) if task else None}
         elif stage == "BUILD":
             task = self.get_next_task()
             return {"action": "BUILD", "task": task_to_query_dict(task) if task else None}
         elif stage == "VERIFY":
             return {"action": "VERIFY", "item": f"Verify {len(self.done)} completed tasks against spec"}
         elif stage == "INVESTIGATE":
-            return {"action": "INVESTIGATE", "item": self.issues[0].desc if self.issues else None}
+            return {"action": "INVESTIGATE", "items": [{"id": i.id, "desc": i.desc} for i in self.issues], "count": len(self.issues)}
         else:
             return {"action": "COMPLETE", "item": None}
 
 
-def task_to_query_dict(t: Task) -> dict:
-    """Convert task to dict for query output."""
+def task_to_query_dict(t: Task, include_decompose_info: bool = False) -> dict:
+    """Convert task to dict for query output.
+    
+    Args:
+        t: Task to convert
+        include_decompose_info: If True, include kill_reason and kill_log for decompose context
+    """
     d = {"id": t.id, "name": t.name}
     if t.notes:
         d["notes"] = t.notes
@@ -482,6 +614,20 @@ def task_to_query_dict(t: Task) -> dict:
         d["deps"] = t.deps
     if t.done_at:
         d["done_at"] = t.done_at
+    if include_decompose_info and t.needs_decompose:
+        if t.kill_reason:
+            d["kill_reason"] = t.kill_reason
+        if t.kill_log:
+            d["kill_log"] = t.kill_log
+        else:
+            # Fallback: find log for this task ID (for tasks marked before kill_log was added)
+            log_dir = Path('/tmp/ralph-logs')
+            if log_dir.exists():
+                # Find any log with this task's ID in the filename (new format: STAGE_taskid_*.log)
+                task_logs = sorted(log_dir.glob(f'*_{t.id}_*.log'), reverse=True)
+                if task_logs:
+                    d["kill_log"] = str(task_logs[0])
+                # Don't fallback to random logs - better to have no log than wrong log
     return d
 
 
@@ -871,7 +1017,18 @@ def cmd_init(config: RalphConfig):
 
 1. Run `ralph query` to see current state
 2. Read the spec file: `ralph/specs/{{SPEC_FILE}}`
-3. Study the source code to understand the current implementation
+
+## CRITICAL: Use Subagents for Research
+
+Your context window is LIMITED. Do NOT read many files yourself.
+
+**Launch subagents in parallel to research different aspects:**
+
+```
+Task: "Research how [aspect] is currently implemented. Find relevant files, understand the patterns used, and report back what exists and what's missing for [spec requirement]"
+```
+
+Launch multiple Task calls in a single message to parallelize research.
 
 ## Task: Gap Analysis for {{SPEC_FILE}}
 
@@ -926,8 +1083,34 @@ Run `ralph query` to get current state. The `next.task` field shows:
 ## Step 2: Understand Context
 
 1. Read the spec file: `ralph/specs/<spec>`
-2. Search codebase first - don't assume something isn't implemented
-3. Review `notes` for implementation hints
+2. Review `notes` for implementation hints
+3. **Use subagents for research** - see below
+
+## CRITICAL: Use Subagents for Codebase Research
+
+Your context window is LIMITED. Do NOT read many files yourself - you will run out of context and be killed.
+
+**For any research task, use the Task tool to spawn subagents:**
+
+```
+Task: "Find how X is implemented in the codebase. Search for Y, read relevant files, and report back:
+1. Which files contain X
+2. How it currently works
+3. What would need to change for Z"
+```
+
+**When to use subagents:**
+- Understanding how a feature currently works
+- Finding all usages of a function/type
+- Exploring unfamiliar parts of the codebase
+- Any task requiring reading more than 2-3 files
+
+**When NOT to use subagents:**
+- You already know exactly which file to edit
+- Making a small, targeted change
+- Running tests or build commands
+
+Each subagent gets a fresh context window. Use them liberally for exploration.
 
 ## Step 3: Implement
 
@@ -950,12 +1133,22 @@ ralph task done
 
 This marks the task done and auto-commits.
 
-## Discovering Issues
+## Discovering Issues - IMPORTANT
 
-If you find a problem unrelated to the current task:
+You MUST record any problems you notice, even if unrelated to the current task:
 ```
 ralph issue add "description of issue"
 ```
+
+**Always add an issue when you see:**
+- Test warnings (TSAN, ASAN, valgrind warnings)
+- Compiler warnings
+- Code that "works but has problems" (memory leaks, thread leaks, etc.)
+- TODOs or FIXMEs you encounter
+- Potential bugs you notice while reading code
+- Missing test coverage you observe
+
+**Do NOT ignore problems** just because your current task passes. If you see something wrong, record it.
 
 Issues are investigated later in the INVESTIGATE stage.
 
@@ -1034,59 +1227,181 @@ The loop will continue with BUILD stage to implement the new tasks.
     investigate_prompt_template = '''\
 # INVESTIGATE Stage
 
-An issue was discovered during build. Research and resolve it.
+Issues were discovered during build. Research and resolve ALL of them in parallel.
 
-## Step 1: Get Issue
+## Step 1: Get All Issues
 
-Run `ralph query` to see current state. The `next.item` shows the issue description.
+Run `ralph query issues` to see all pending issues.
 
-## Step 2: Research
+## Step 2: Parallel Investigation
 
-Investigate thoroughly:
-1. Read relevant code
-2. Run tests to understand the failure
-3. Check git history if relevant
-4. Understand root cause before acting
-
-## Step 3: Resolve
-
-Choose ONE approach:
-
-### Option A: Create a fix task
-
-If the fix is non-trivial:
-```
-ralph task add '{"name": "fix for issue", "notes": "root cause analysis", "accept": "how to verify fix"}'
-ralph issue done
-```
-
-### Option B: Fix directly
-
-If the fix is trivial (typo, simple bug):
-1. Make the fix
-2. Run tests to verify
-3. Mark resolved:
-```
-ralph issue done
-```
-
-### Option C: Out of scope
-
-If the issue is outside the current spec's scope:
-```
-ralph issue done
-```
-Note in the commit message why it's being deferred.
-
-## Progress Reporting
+Use the Task tool to investigate ALL issues in parallel. Launch one subagent per issue:
 
 ```
-[RALPH] === INVESTIGATE: <issue description> ===
-[RALPH] Root cause: <what you found>
-[RALPH] Resolution: <what you're doing about it>
+For each issue, launch a Task with prompt:
+"Investigate this issue: <issue description>
+
+1. Read relevant code to understand the problem
+2. Determine root cause
+3. Decide resolution:
+   - If fix is non-trivial: describe the fix task needed
+   - If fix is trivial: describe the simple fix
+   - If out of scope: explain why
+
+Return a JSON object:
+{
+  \\"issue_id\\": \\"<id>\\",
+  \\"root_cause\\": \\"<what you found>\\",
+  \\"resolution\\": \\"task\\" | \\"trivial\\" | \\"out_of_scope\\",
+  \\"task\\": {  // only if resolution is \\"task\\"
+    \\"name\\": \\"<fix description>\\",
+    \\"notes\\": \\"<root cause and approach>\\",
+    \\"accept\\": \\"<how to verify>\\"
+  },
+  \\"trivial_fix\\": \\"<description>\\"  // only if resolution is \\"trivial\\"
+}
+"
 ```
 
-## EXIT after resolving the issue
+## Step 3: Collect Results and Apply
+
+After all subagents complete:
+
+1. Add all tasks in batch:
+```
+ralph task add \'{"name": "...", "notes": "...", "accept": "..."}\'
+ralph task add \'{"name": "...", "notes": "...", "accept": "..."}\'
+...
+```
+
+2. Clear all issues in one command:
+```
+ralph issue done-all
+```
+
+Or if only clearing specific issues:
+```
+ralph issue done-ids i-abc1 i-def2 i-ghi3
+```
+
+## Step 4: Report Summary
+
+```
+[RALPH] === INVESTIGATE COMPLETE ===
+[RALPH] Processed: N issues
+[RALPH] Tasks created: X
+[RALPH] Trivial fixes: Y
+[RALPH] Out of scope: Z
+```
+
+## IMPORTANT
+
+- Launch ALL investigations in parallel using multiple Task tool calls in a single message
+- Wait for all results before applying any changes
+- Do NOT make code changes during investigation - only create tasks
+- Use `ralph issue done-all` to clear all issues at once
+- EXIT after all issues are resolved
+'''
+
+    decompose_prompt_template = '''\
+# DECOMPOSE Stage
+
+A task was killed because it was too large (exceeded context or timeout limits).
+You must break it down into smaller subtasks.
+
+## Step 1: Get the Failed Task
+
+Run `ralph query` to see the task that needs decomposition.
+The `next.task` field shows:
+- `name`: The task that failed
+- `kill_reason`: Why it was killed ("timeout" or "context_limit")
+- `kill_log`: Path to the log from the failed iteration
+
+## Step 2: Review the Failed Iteration Log (if available)
+
+If `kill_log` is provided in the task, review it to understand what went wrong.
+
+**CRITICAL**: The log file may be HUGE (it killed the previous iteration's context!). 
+NEVER read the entire file. Always use head/tail:
+
+```bash
+# First check the size
+wc -l <kill_log_path>
+
+# Read ONLY the header (first 50 lines) - shows what task started
+head -50 <kill_log_path>
+
+# Read ONLY the tail (last 100 lines) - shows where it stopped  
+tail -100 <kill_log_path>
+
+# If you need to search for specific content
+grep -n -E "error|Error|ERROR|failed|FAILED" <kill_log_path> | head -20
+```
+
+From this limited sample, determine:
+- What work was started but not completed
+- Where the iteration got stuck or ran out of context
+- Which files were being modified
+- Any partial progress that was made
+- **What output flooded the context** (e.g., sanitizer output, verbose test logs)
+  - This is important! Subtasks may need to suppress or redirect verbose output
+
+If no `kill_log` is provided, skip this step and proceed to analyze the task based on its description.
+
+## Step 3: Analyze the Task
+
+Use subagents to understand what the task requires:
+
+```
+Task: "Analyze what's needed to implement: [task name]
+
+Research the codebase and report:
+1. Which files need to be modified
+2. What are the distinct pieces of work
+3. What order should they be done in
+4. Any dependencies between pieces"
+```
+
+## Step 4: Create Subtasks
+
+Break the original task into 2-5 smaller tasks that:
+- Can each be completed in ONE iteration
+- Have clear, specific scope
+- Together accomplish the original task
+- Account for any partial progress from the failed iteration
+
+For each subtask:
+```
+ralph task add \'{"name": "Specific subtask", "notes": "What to do", "accept": "How to verify"}\'
+```
+
+Use `deps` to specify order if needed.
+
+## Step 5: Remove the Original Task
+
+After adding all subtasks, delete the original oversized task:
+```
+ralph task delete <task-id>
+```
+
+## Step 6: Report
+
+```
+[RALPH] === DECOMPOSE COMPLETE ===
+[RALPH] Original: <original task name>
+[RALPH] Kill reason: <timeout|context_limit>
+[RALPH] Split into: N subtasks
+```
+
+Then EXIT to let the build loop process the new subtasks.
+
+## Rules
+
+- ALWAYS read the log file first to understand what happened
+- Each subtask should be completable in ONE iteration (< 100k tokens)
+- Be specific: "Add X to file Y" not "Implement feature Z"
+- If a subtask is still too big, it will be killed and decomposed again
+- DO NOT try to implement anything - just create the task breakdown
 '''
 
     # Handle prompt files (with merge options if updating)
@@ -1095,11 +1410,13 @@ Note in the commit message why it's being deferred.
         handle_prompt_file(config.prompt_build, build_prompt_template, config.repo_root)
         handle_prompt_file(config.prompt_verify, verify_prompt_template, config.repo_root)
         handle_prompt_file(config.prompt_investigate, investigate_prompt_template, config.repo_root)
+        handle_prompt_file(config.prompt_decompose, decompose_prompt_template, config.repo_root)
     else:
         config.prompt_plan.write_text(plan_prompt_template)
         config.prompt_build.write_text(build_prompt_template)
         config.prompt_verify.write_text(verify_prompt_template)
         config.prompt_investigate.write_text(investigate_prompt_template)
+        config.prompt_decompose.write_text(decompose_prompt_template)
 
     # Create example spec only on fresh init (preserve existing specs)
     if not is_update:
@@ -1231,9 +1548,15 @@ def cmd_status(config: RalphConfig):
     
     # Next action
     next_action = state.get_next()
-    if next_action['item']:
-        print()
-        print(f"{Colors.CYAN}Next: {next_action['action']}{Colors.NC}")
+    action = next_action['action']
+    print()
+    print(f"{Colors.CYAN}Next: {action}{Colors.NC}")
+    if action in ('BUILD', 'DECOMPOSE') and next_action.get('task'):
+        task = next_action['task']
+        print(f"  {task['id']}: {task['name'][:60]}...")
+    elif action == 'INVESTIGATE' and next_action.get('items'):
+        print(f"  {next_action['count']} issue(s) to investigate")
+    elif next_action.get('item'):
         print(f"  {next_action['item']}")
     
     # Hint
@@ -1256,6 +1579,9 @@ class DashboardState:
     footer_text: str = "Watching..."
     scroll_offset: int = 0  # For scrollable output
     auto_scroll: bool = True  # Auto-scroll to bottom on new output
+    stage: str = ""  # Current stage: PLAN, BUILD, VERIFY, INVESTIGATE, COMPLETE
+    kills_timeout: int = 0
+    kills_context: int = 0
 
 
 # =============================================================================
@@ -1395,6 +1721,7 @@ def _create_textual_app():
         
         branch = reactive("")
         status_text = reactive("")
+        stage_text = reactive("")
         cost_text = reactive("")
         progress_text = reactive("")
         spec_text = reactive("")
@@ -1406,6 +1733,8 @@ def _create_textual_app():
                 lines.append(f"[green]Branch:[/] {escape(self.branch)}")
             if self.status_text:
                 lines.append(self.status_text)
+            if self.stage_text:
+                lines.append(self.stage_text)
             if self.cost_text:
                 lines.append(self.cost_text)
             lines.append("")
@@ -1584,6 +1913,8 @@ def _create_textual_app():
             self._process = None  # For run mode
             self._output_buffer = None  # For run mode
             self._stop_requested = False
+            self._kills_timeout = 0
+            self._kills_context = 0
         
         def compose(self) -> ComposeResult:
             # Header
@@ -1610,9 +1941,17 @@ def _create_textual_app():
         
         def _get_title(self) -> str:
             ts = datetime.now().strftime('%H:%M:%S')
+            kills_str = ""
+            if self._kills_timeout > 0 or self._kills_context > 0:
+                parts = []
+                if self._kills_timeout > 0:
+                    parts.append(f"T:{self._kills_timeout}")
+                if self._kills_context > 0:
+                    parts.append(f"C:{self._kills_context}")
+                kills_str = f" | Kills: {' '.join(parts)}"
             if self._iteration is not None:
-                return f"RALPH WIGGUM - Iteration {self._iteration} - {ts}"
-            return f"RALPH WIGGUM - {ts}"
+                return f"RALPH WIGGUM - Iteration {self._iteration} - {ts}{kills_str}"
+            return f"RALPH WIGGUM - {ts}{kills_str}"
         
         def on_mount(self) -> None:
             """Start background tasks when app mounts."""
@@ -1704,6 +2043,18 @@ def _create_textual_app():
                     status.status_text = "[green]Status:[/] Running"
             else:
                 status.status_text = "[yellow]Status:[/] Stopped"
+            
+            # Show current stage with color coding
+            stage = state.get_stage()
+            stage_colors = {
+                'PLAN': 'magenta',
+                'BUILD': 'cyan',
+                'VERIFY': 'yellow',
+                'INVESTIGATE': 'red',
+                'COMPLETE': 'green',
+            }
+            color = stage_colors.get(stage, 'white')
+            status.stage_text = f"[green]Stage:[/] [{color}]{stage}[/]"
             
             if self._cost > 0:
                 status.cost_text = f"[cyan]Cost:[/] ${self._cost:.4f}"
@@ -1811,6 +2162,8 @@ class FallbackDashboard:
         self.branch = ""
         self.is_running = False
         self.running_count = 0
+        self.kills_timeout = 0
+        self.kills_context = 0
     
     def get_input(self) -> Optional[str | tuple[str, int]]:
         """Non-blocking keyboard input with coalescing for scroll keys.
@@ -1939,7 +2292,9 @@ class FallbackDashboard:
             output_lines=visible_output,
             is_running=self.is_running,
             running_count=self.running_count,
-            footer_text=f"q:quit j/k:scroll g/G:top/bot f:follow | {scroll_info}"
+            footer_text=f"q:quit j/k:scroll g/G:top/bot f:follow | {scroll_info}",
+            kills_timeout=self.kills_timeout,
+            kills_context=self.kills_context
         )
         
         # Move cursor to top and render
@@ -2002,10 +2357,21 @@ def render_dashboard(state: DashboardState, term_width: int, term_height: int) -
     
     # Header
     add(f"{Colors.BLUE}{header_bar}{Colors.NC}")
+    
+    # Build kills string for header
+    kills_str = ""
+    if state.kills_timeout > 0 or state.kills_context > 0:
+        parts = []
+        if state.kills_timeout > 0:
+            parts.append(f"T:{state.kills_timeout}")
+        if state.kills_context > 0:
+            parts.append(f"C:{state.kills_context}")
+        kills_str = f" | {Colors.RED}Kills: {' '.join(parts)}{Colors.NC}"
+    
     if state.iteration is not None:
-        title = f"  RALPH WIGGUM - Iteration {state.iteration} - {datetime.now().strftime('%H:%M:%S')}"
+        title = f"  RALPH WIGGUM - Iteration {state.iteration} - {datetime.now().strftime('%H:%M:%S')}{kills_str}"
     else:
-        title = f"  RALPH WIGGUM - {datetime.now().strftime('%H:%M:%S')}"
+        title = f"  RALPH WIGGUM - {datetime.now().strftime('%H:%M:%S')}{kills_str}"
     add(f"{Colors.BLUE}{title}{Colors.NC}")
     add(f"{Colors.BLUE}{header_bar}{Colors.NC}")
     add()
@@ -2024,6 +2390,18 @@ def render_dashboard(state: DashboardState, term_width: int, term_height: int) -
             status_lines.append(f"🟢 {Colors.GREEN}Status:{Colors.NC} Running")
     else:
         status_lines.append(f"🟡 {Colors.YELLOW}Status:{Colors.NC} Stopped")
+    
+    # Show current stage with color coding
+    stage = ralph_state.get_stage()
+    stage_colors = {
+        'PLAN': Colors.MAGENTA,
+        'BUILD': Colors.CYAN,
+        'VERIFY': Colors.YELLOW,
+        'INVESTIGATE': Colors.RED,
+        'COMPLETE': Colors.GREEN,
+    }
+    stage_color = stage_colors.get(stage, Colors.WHITE)
+    status_lines.append(f"🔧 {Colors.GREEN}Stage:{Colors.NC} {stage_color}{stage}{Colors.NC}")
     
     if state.cost > 0:
         status_lines.append(f"💰 {Colors.CYAN}Cost:{Colors.NC} ${state.cost:.4f}")
@@ -2310,11 +2688,29 @@ class OutputBuffer:
     lines: deque = field(default_factory=lambda: deque(maxlen=100))
     lock: threading.Lock = field(default_factory=threading.Lock)
     total_output: list = field(default_factory=list)  # For completion promise check
+    last_activity: str = ""  # Last tool/action observed
+    iteration_tokens: int = 0  # Cumulative tokens this iteration
     
     def add(self, line: str):
         with self.lock:
             self.lines.append(line)
             self.total_output.append(line)
+    
+    def set_last_activity(self, activity: str):
+        with self.lock:
+            self.last_activity = activity
+    
+    def get_last_activity(self) -> str:
+        with self.lock:
+            return self.last_activity
+    
+    def add_tokens(self, tokens: int):
+        with self.lock:
+            self.iteration_tokens += tokens
+    
+    def get_iteration_tokens(self) -> int:
+        with self.lock:
+            return self.iteration_tokens
     
     def get_lines(self) -> list[str]:
         with self.lock:
@@ -2421,6 +2817,8 @@ def _run_with_simple_ui(process, config: RalphConfig, iteration: int,
             dashboard.cost = metrics.total_cost
             dashboard.tokens_in = metrics.total_tokens_in
             dashboard.tokens_out = metrics.total_tokens_out
+            dashboard.kills_timeout = metrics.kills_timeout
+            dashboard.kills_context = metrics.kills_context
             
             # Handle keyboard input
             action = dashboard.get_input()
@@ -2445,55 +2843,93 @@ def _run_with_simple_ui(process, config: RalphConfig, iteration: int,
 
 
 def stream_output(pipe, output_buffer: OutputBuffer, metrics: Metrics, 
-                  print_to_stdout: bool = False, fifo_path: Optional[Path] = None):
-    """Read from pipe, update buffer and metrics. Runs in a thread."""
+                  print_to_stdout: bool = False, fifo_path: Optional[Path] = None,
+                  stop_event: Optional[threading.Event] = None):
+    """Read from pipe, update buffer and metrics. Runs in a thread.
+    
+    Args:
+        stop_event: Optional event to signal the thread should stop reading.
+    """
     fifo_fd = None
     
-    for line in iter(pipe.readline, b''):
-        decoded = line.decode('utf-8', errors='replace').rstrip('\n')
-        
-        # Parse cost info (before filtering - metrics lines start with \x00)
-        cost_info = parse_cost_line(decoded)
-        if cost_info:
-            metrics.total_cost = cost_info[0]
-            metrics.total_tokens_in = cost_info[1]
-            metrics.total_tokens_out = cost_info[2]
-        
-        # Filter out hidden metrics lines (prefixed with \x00) from display
-        if decoded.startswith('\x00'):
-            continue
-        
-        output_buffer.add(decoded)
-        
-        if print_to_stdout:
-            print(decoded)
-            sys.stdout.flush()
-        
-        # Write to FIFO for watchers
-        # Use O_RDWR so we don't block/fail when no reader is connected
-        if fifo_path is not None:
-            if fifo_fd is None:
-                try:
-                    fifo_fd = os.open(str(fifo_path), os.O_RDWR | os.O_NONBLOCK)
-                except OSError:
-                    pass  # FIFO doesn't exist
-            
-            if fifo_fd is not None:
-                try:
-                    os.write(fifo_fd, (decoded + '\n').encode('utf-8'))
-                except OSError:
-                    # Broken pipe - close and retry next time
-                    try:
-                        os.close(fifo_fd)
-                    except OSError:
-                        pass
-                    fifo_fd = None
+    # Use select for non-blocking reads with timeout if stop_event provided
+    if stop_event is not None:
+        import select as sel
+        fd = pipe.fileno()
+        while not stop_event.is_set():
+            # Wait up to 0.5s for data
+            ready, _, _ = sel.select([fd], [], [], 0.5)
+            if not ready:
+                continue
+            line = pipe.readline()
+            if not line:  # EOF
+                break
+            decoded = line.decode('utf-8', errors='replace').rstrip('\n')
+            _process_stream_line(decoded, output_buffer, metrics, print_to_stdout, fifo_path)
+    else:
+        # Original blocking mode
+        for line in iter(pipe.readline, b''):
+            decoded = line.decode('utf-8', errors='replace').rstrip('\n')
+            _process_stream_line(decoded, output_buffer, metrics, print_to_stdout, fifo_path)
     
     if fifo_fd is not None:
         try:
             os.close(fifo_fd)
         except OSError:
             pass
+
+
+def _process_stream_line(decoded: str, output_buffer: OutputBuffer, metrics: Metrics,
+                         print_to_stdout: bool, fifo_path: Optional[Path]):
+    """Process a single line from the stream."""
+    # Parse cost info (before filtering - metrics lines start with \x00)
+    cost_info = parse_cost_line(decoded)
+    if cost_info:
+        metrics.total_cost = cost_info[0]
+        metrics.total_tokens_in = cost_info[1]
+        metrics.total_tokens_out = cost_info[2]
+        # Track cumulative tokens for this iteration
+        output_buffer.add_tokens(cost_info[1])
+    
+    # Track last activity from tool calls (look for tool indicators)
+    # Match emoji followed by tool name and description
+    activity_match = re.search(r'(?:📖|✏️|⚡|💻|🔍|📁|🤖|🦆|👮|🔧|📝)\s*(?:\x1b\[[0-9;]*m)*(\w+:\s*.{0,60})', decoded)
+    if activity_match:
+        # Clean ANSI codes from the match
+        activity = re.sub(r'\x1b\[[0-9;]*m', '', activity_match.group(1))
+        output_buffer.set_last_activity(activity.strip()[:80])
+    
+    # Filter out hidden metrics lines (prefixed with \x00) from display
+    if decoded.startswith('\x00'):
+        return
+    
+    output_buffer.add(decoded)
+    
+    if print_to_stdout:
+        print(decoded)
+        sys.stdout.flush()
+    
+    # Write to FIFO for watchers
+    # Use O_RDWR so we don't block/fail when no reader is connected
+    if fifo_path is not None:
+        fifo_fd = getattr(_process_stream_line, '_fifo_fd', None)
+        if fifo_fd is None:
+            try:
+                fifo_fd = os.open(str(fifo_path), os.O_RDWR | os.O_NONBLOCK)
+                _process_stream_line._fifo_fd = fifo_fd
+            except OSError:
+                pass  # FIFO doesn't exist
+        
+        if fifo_fd is not None:
+            try:
+                os.write(fifo_fd, (decoded + '\n').encode('utf-8'))
+            except OSError:
+                # Broken pipe - close and retry next time
+                try:
+                    os.close(fifo_fd)
+                except OSError:
+                    pass
+                _process_stream_line._fifo_fd = None
 
 
 def get_prompt_for_stage(config: RalphConfig, mode: str, stage: str) -> Path:
@@ -2506,6 +2942,8 @@ def get_prompt_for_stage(config: RalphConfig, mode: str, stage: str) -> Path:
         return config.prompt_verify
     elif stage == 'INVESTIGATE':
         return config.prompt_investigate
+    elif stage == 'DECOMPOSE':
+        return config.prompt_decompose
     else:
         # BUILD, PLAN, COMPLETE all use build prompt
         return config.prompt_build
@@ -2582,7 +3020,8 @@ def print_plan_report(state: RalphState, mode: str):
 
 def cmd_run(config: RalphConfig, mode: str, max_iterations: int, max_cost: float,
             max_failures: int, completion_promise: str, no_ui: bool = False,
-            spec_file: Optional[str] = None):
+            spec_file: Optional[str] = None, iteration_timeout: int = DEFAULT_ITERATION_TIMEOUT,
+            context_limit: int = DEFAULT_CONTEXT_WINDOW):
     """Run the main loop."""
     if not config.ralph_dir.exists():
         print(f"{Colors.RED}Ralph not initialized. Run 'ralph init' first.{Colors.NC}")
@@ -2620,6 +3059,10 @@ def cmd_run(config: RalphConfig, mode: str, max_iterations: int, max_cost: float
                 rules_source = candidate
                 break
 
+    # Calculate context limits
+    soft_limit = int(context_limit * CONTEXT_SOFT_LIMIT_PCT / 100)
+    hard_limit = int(context_limit * CONTEXT_HARD_LIMIT_PCT / 100)
+
     print(f"{Colors.BLUE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━{Colors.NC}")
     print(f"Mode:   {Colors.GREEN}{mode}{Colors.NC}")
     if spec_file:
@@ -2634,6 +3077,8 @@ def cmd_run(config: RalphConfig, mode: str, max_iterations: int, max_cost: float
     if max_cost > 0:
         print(f"Max cost:       ${max_cost}")
     print(f"Max failures:   {max_failures} (circuit breaker)")
+    print(f"Timeout:        {iteration_timeout}s per iteration")
+    print(f"Context:        {context_limit:,} tokens (warn: {soft_limit:,}, kill: {hard_limit:,})")
     if completion_promise:
         print(f"Completion:     \"{completion_promise}\"")
     print(f"{Colors.BLUE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━{Colors.NC}")
@@ -2703,6 +3148,15 @@ def cmd_run(config: RalphConfig, mode: str, max_iterations: int, max_cost: float
                     print(f"{Colors.YELLOW}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━{Colors.NC}")
                     break
             
+            # Ensure plan.jsonl is committed before BUILD stage begins
+            # This catches changes made by INVESTIGATE stage (task additions)
+            if stage == 'BUILD' and has_uncommitted_plan(config):
+                subprocess.run(['git', 'add', str(config.plan_file)], 
+                              cwd=config.repo_root, capture_output=True)
+                subprocess.run(['git', 'commit', '-m', 'ralph: update plan (from investigate)'],
+                              cwd=config.repo_root, capture_output=True)
+                print(f"{Colors.GREEN}Committed plan.jsonl before BUILD stage{Colors.NC}")
+            
             prompt_file = get_prompt_for_stage(config, mode, stage)
             
             if not prompt_file.exists():
@@ -2718,6 +3172,13 @@ def cmd_run(config: RalphConfig, mode: str, max_iterations: int, max_cost: float
             # Incorporate project rules (already loaded above, reuse for efficiency)
             prompt_content = build_prompt_with_rules(prompt_content, project_rules)
             
+            # Get current task info for kill tracking and log naming
+            current_task_id = None
+            current_task_name = None
+            if state.pending:
+                current_task_id = state.pending[0].id
+                current_task_name = state.pending[0].name
+            
             output_buffer = OutputBuffer()
 
             cmd = ['opencode', 'run', '--model', 'anthropic/claude-opus-4-5', 
@@ -2726,15 +3187,30 @@ def cmd_run(config: RalphConfig, mode: str, max_iterations: int, max_cost: float
             # Use ephemeral state directory to avoid polluting session list
             opencode_env = os.environ.copy()
             opencode_env['XDG_STATE_HOME'] = '/tmp/ralph-opencode-state'
-            # Deny external directory access to fail fast instead of hanging on permission prompts
-            opencode_env['OPENCODE_PERMISSION'] = json.dumps({
+            # Permission config:
+            # - Deny external_directory by default to fail fast instead of hanging on prompts
+            # - But allow reading /tmp/ralph-logs/* for DECOMPOSE stage to review failed iteration
+            permission_config = {
                 "external_directory": "deny",
                 "doom_loop": "deny"
-            })
+            }
+            if stage == 'DECOMPOSE':
+                # Allow reading ralph logs so decompose can analyze the killed iteration
+                permission_config["read"] = {
+                    "*": "allow",
+                    "/tmp/ralph-logs/*": "allow"
+                }
+                permission_config["external_directory"] = {
+                    "*": "deny",
+                    "/tmp/ralph-logs/*": "allow"
+                }
+            opencode_env['OPENCODE_PERMISSION'] = json.dumps(permission_config)
             
             # opencode | ralph stream, capture stdout
+            # Use DEVNULL for stdin to prevent any prompts from blocking
             opencode_proc = subprocess.Popen(
                 cmd,
+                stdin=subprocess.DEVNULL,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
                 cwd=config.repo_root,
@@ -2752,51 +3228,178 @@ def cmd_run(config: RalphConfig, mode: str, max_iterations: int, max_cost: float
             if opencode_proc.stdout:
                 opencode_proc.stdout.close()
             
-            # Start reader thread
+            # Track if we killed this iteration (shared state for monitor thread)
+            kill_state = {"killed": False, "reason": "none", "info": None}
+            soft_warned = [False]  # Use list for mutability in closure
+            reader_stop = threading.Event()
+            
+            # Start reader thread with stop event for clean shutdown
             reader_thread = threading.Thread(
                 target=stream_output,
-                args=(ralph_stream_proc.stdout, output_buffer, metrics, not interactive, config.output_fifo)
+                args=(ralph_stream_proc.stdout, output_buffer, metrics, not interactive, config.output_fifo, reader_stop)
             )
             reader_thread.daemon = True
             reader_thread.start()
+            
+            def monitor_limits():
+                """Monitor thread that checks timeout and context limits."""
+                deadline = time.time() + iteration_timeout
+                check_interval = 2.0
+                
+                while ralph_stream_proc.poll() is None and opencode_proc.poll() is None:
+                    if kill_state["killed"]:
+                        break
+                        
+                    elapsed = int(time.time() - start_time)
+                    current_tokens = output_buffer.get_iteration_tokens()
+                    
+                    # Check timeout
+                    if time.time() >= deadline:
+                        kill_state["killed"] = True
+                        kill_state["reason"] = "timeout"
+                        kill_state["info"] = IterationKillInfo(
+                            reason="timeout",
+                            task_name=current_task_name,
+                            timeout_seconds=iteration_timeout,
+                            elapsed_seconds=elapsed,
+                            last_activity=output_buffer.get_last_activity()
+                        )
+                        # Kill the processes
+                        try:
+                            opencode_proc.terminate()
+                            ralph_stream_proc.terminate()
+                        except:
+                            pass
+                        break
+                    
+                    # Check context hard limit
+                    if current_tokens >= hard_limit:
+                        kill_state["killed"] = True
+                        kill_state["reason"] = "context_limit"
+                        kill_state["info"] = IterationKillInfo(
+                            reason="context_limit",
+                            task_name=current_task_name,
+                            tokens_used=current_tokens,
+                            context_limit=context_limit,
+                            elapsed_seconds=elapsed,
+                            last_activity=output_buffer.get_last_activity()
+                        )
+                        # Kill the processes
+                        try:
+                            opencode_proc.terminate()
+                            ralph_stream_proc.terminate()
+                        except:
+                            pass
+                        break
+                    
+                    # Soft warning at 50% (only in non-interactive mode)
+                    if not interactive and current_tokens >= soft_limit and not soft_warned[0]:
+                        pct = current_tokens / context_limit * 100
+                        print(f"\n{Colors.YELLOW}WARNING: Context at {pct:.0f}% ({current_tokens:,}/{context_limit:,} tokens){Colors.NC}")
+                        soft_warned[0] = True
+                    
+                    time.sleep(check_interval)
+            
+            # Start monitor thread
+            monitor_thread = threading.Thread(target=monitor_limits, daemon=True)
+            monitor_thread.start()
             
             if interactive:
                 exit_code = run_with_live_ui(ralph_stream_proc, config, iteration, 
                                               metrics, branch, output_buffer)
             else:
-                ralph_stream_proc.wait()
-                exit_code = ralph_stream_proc.returncode
+                # Poll instead of blocking wait, so monitor thread can kill us
+                while ralph_stream_proc.poll() is None:
+                    if kill_state["killed"]:
+                        break
+                    time.sleep(0.1)
+                exit_code = ralph_stream_proc.returncode if ralph_stream_proc.returncode is not None else -1
             
-            reader_thread.join(timeout=1.0)
-            opencode_proc.wait()
+            # Wait for monitor to finish
+            monitor_thread.join(timeout=1.0)
+            
+            # Check if we were killed by the monitor
+            if kill_state["killed"]:
+                print(f"\n{Colors.RED}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━{Colors.NC}")
+                if kill_state["reason"] == "timeout":
+                    print(f"{Colors.RED}TIMEOUT: Iteration killed after {iteration_timeout}s{Colors.NC}")
+                else:
+                    pct = kill_state["info"].tokens_used / context_limit * 100
+                    print(f"{Colors.RED}CONTEXT LIMIT: Iteration killed at {kill_state['info'].tokens_used:,} tokens ({pct:.0f}%){Colors.NC}")
+                print(f"Last activity: {output_buffer.get_last_activity() or 'unknown'}")
+                
+                print(f"{Colors.RED}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━{Colors.NC}")
+                # Signal reader thread to stop and ensure processes are dead
+                reader_stop.set()
+                try:
+                    ralph_stream_proc.kill()
+                    opencode_proc.kill()
+                except:
+                    pass
+                exit_code = -1
+            
+            # Signal reader to stop (in case of normal exit too)
+            reader_stop.set()
+            reader_thread.join(timeout=2.0)
+            if opencode_proc.poll() is None:
+                opencode_proc.wait()
 
             duration = int(time.time() - start_time)
 
             # Track success/failure
+            # Context/timeout kills are NOT failures - they're expected behavior that triggers retry
             if exit_code == 0:
                 consecutive_failures = 0
                 metrics.successes += 1
+            elif kill_state["killed"]:
+                # Killed by monitor (timeout or context limit) - don't count as failure
+                # The next iteration will get guidance to break down the problem
+                if kill_state["reason"] == "timeout":
+                    metrics.kills_timeout += 1
+                elif kill_state["reason"] == "context_limit":
+                    metrics.kills_context += 1
             else:
                 consecutive_failures += 1
                 metrics.failures += 1
 
             # Log iteration output to /tmp (auto-cleaned on reboot)
+            # Filename format: {stage}_{taskid}_{iteration}_{timestamp}.log
+            # This allows finding the log for a specific task during DECOMPOSE
             tmp_log_dir = Path('/tmp/ralph-logs')
             tmp_log_dir.mkdir(parents=True, exist_ok=True)
-            log_file = tmp_log_dir / f"{mode}_{iteration:04d}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log"
+            task_suffix = f"_{current_task_id}" if current_task_id else ""
+            log_file = tmp_log_dir / f"{stage}{task_suffix}_{iteration:04d}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log"
             try:
                 with log_file.open('w') as f:
-                    f.write(f"# Ralph {mode} iteration {iteration}\n")
+                    f.write(f"# Ralph {mode} iteration {iteration} - {stage}\n")
                     f.write(f"# Date: {datetime.now().isoformat()}\n")
                     f.write(f"# Exit code: {exit_code}\n")
                     f.write(f"# Duration: {duration}s\n")
                     f.write(f"# Spec: {spec_file or 'N/A'}\n")
                     f.write(f"# Stage: {stage}\n")
+                    f.write(f"# Task: {current_task_name or 'N/A'}\n")
                     f.write(f"# Repo: {config.repo_root}\n")
+                    if kill_state["killed"]:
+                        f.write(f"# Kill reason: {kill_state['reason']}\n")
                     f.write("\n")
                     f.write(output_buffer.get_all())
+                log_file_written = str(log_file)
             except Exception as e:
-                pass  # Don't warn on log failure - it's just convenience
+                log_file_written = None
+
+            # Mark task for decomposition AFTER writing log so we can reference it
+            if kill_state["killed"] and current_task_name and stage == 'BUILD':
+                current_state = load_state(config)
+                task = current_state.get_next_task()
+                if task and task.name == current_task_name:
+                    task.needs_decompose = True
+                    task.kill_reason = kill_state["reason"]
+                    task.kill_log = log_file_written
+                    save_state(config, current_state)
+                    print(f"{Colors.YELLOW}Task marked for decomposition: {task.id}{Colors.NC}")
+                    if log_file_written:
+                        print(f"{Colors.YELLOW}Kill log: {log_file_written}{Colors.NC}")
+                    print(f"{Colors.YELLOW}Next iteration will break it into smaller tasks{Colors.NC}")
 
             if not interactive:
                 print()
@@ -3025,10 +3628,24 @@ def cmd_task(config: RalphConfig, action: str, desc: Optional[str] = None):
         print(f"{Colors.YELLOW}Task rejected:{Colors.NC} {task.name}")
         print(f"  {Colors.DIM}Reason: {desc}{Colors.NC}")
         print(json.dumps(state.to_dict(), indent=2))
+    
+    elif action == 'delete':
+        if not desc:
+            print(f"{Colors.RED}Usage: ralph task delete <task-id>{Colors.NC}")
+            return 1
+        task_id = desc
+        task = next((t for t in state.tasks if t.id == task_id), None)
+        if not task:
+            print(f"{Colors.RED}Task not found: {task_id}{Colors.NC}")
+            return 1
+        task_name = task.name
+        state.tasks = [t for t in state.tasks if t.id != task_id]
+        save_state(config, state)
+        print(f"{Colors.GREEN}Task deleted:{Colors.NC} {task_id} - {task_name}")
         
     else:
         print(f"{Colors.RED}Unknown task action: {action}{Colors.NC}")
-        print("Usage: ralph task [done|add|accept|reject]")
+        print("Usage: ralph task [done|add|accept|reject|delete]")
         return 1
 
 
@@ -3043,6 +3660,34 @@ def cmd_issue(config: RalphConfig, action: str, desc: Optional[str] = None):
         issue = state.issues.pop(0)
         save_state(config, state)  # No auto-commit, issues are transient
         print(f"{Colors.GREEN}Issue resolved:{Colors.NC} {issue.desc}")
+    
+    elif action == 'done-all':
+        if not state.issues:
+            print(f"{Colors.YELLOW}No issues{Colors.NC}")
+            return 1
+        count = len(state.issues)
+        state.issues = []
+        save_state(config, state)
+        print(f"{Colors.GREEN}All issues resolved:{Colors.NC} {count} issues cleared")
+    
+    elif action == 'done-ids':
+        # Batch resolve specific issues by ID: ralph issue done-ids i-abc1 i-def2 i-ghi3
+        if not desc:
+            print(f"{Colors.RED}Usage: ralph issue done-ids <id1> <id2> ...{Colors.NC}")
+            return 1
+        ids_to_remove = set(desc.split())
+        if not state.issues:
+            print(f"{Colors.YELLOW}No issues{Colors.NC}")
+            return 1
+        original_count = len(state.issues)
+        state.issues = [i for i in state.issues if i.id not in ids_to_remove]
+        removed_count = original_count - len(state.issues)
+        if removed_count > 0:
+            save_state(config, state)
+            print(f"{Colors.GREEN}Issues resolved:{Colors.NC} {removed_count} issues cleared")
+        else:
+            print(f"{Colors.YELLOW}No matching issue IDs found{Colors.NC}")
+            return 1
         
     elif action == 'add':
         if not desc:
@@ -3058,7 +3703,7 @@ def cmd_issue(config: RalphConfig, action: str, desc: Optional[str] = None):
         
     else:
         print(f"{Colors.RED}Unknown issue action: {action}{Colors.NC}")
-        print("Usage: ralph issue [done|add]")
+        print("Usage: ralph issue [done|done-all|done-ids|add]")
         return 1
 
 
@@ -3242,6 +3887,10 @@ Examples:
                        help='Circuit breaker: stop after N consecutive failures')
     parser.add_argument('--completion-promise', type=str, default='',
                        help='Stop when output contains this text')
+    parser.add_argument('--timeout', type=int, default=DEFAULT_ITERATION_TIMEOUT,
+                       help=f'Kill iteration after N seconds (default: {DEFAULT_ITERATION_TIMEOUT}s)')
+    parser.add_argument('--context-limit', type=int, default=DEFAULT_CONTEXT_WINDOW,
+                       help=f'Context window size in tokens (default: {DEFAULT_CONTEXT_WINDOW})')
     parser.add_argument('--no-ui', action='store_true',
                        help='Disable interactive dashboard, show streaming output')
     parser.add_argument('--all', action='store_true',
@@ -3349,7 +3998,8 @@ Examples:
         cmd_set_spec(config, spec_path.name)
         
         cmd_run(config, 'plan', 1, args.max_cost, args.max_failures, 
-                args.completion_promise, args.no_ui, spec_file=spec_path.name)
+                args.completion_promise, args.no_ui, spec_file=spec_path.name,
+                iteration_timeout=args.timeout, context_limit=args.context_limit)
     elif args.command in ('build', ''):
         # Ensure plan.jsonl is committed before starting build
         if has_uncommitted_plan(config):
@@ -3370,7 +4020,8 @@ Examples:
                 sys.exit(1)
         
         cmd_run(config, 'build', iterations, args.max_cost, args.max_failures, 
-                args.completion_promise, args.no_ui)
+                args.completion_promise, args.no_ui,
+                iteration_timeout=args.timeout, context_limit=args.context_limit)
     elif args.command == 'help':
         parser.print_help()
     else:

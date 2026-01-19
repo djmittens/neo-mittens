@@ -7,18 +7,25 @@ WALL_DIR="$HOME/Pictures/Waifu"
 INTERVAL=300  # seconds
 TRANSITION="random"
 
-# Start swww daemon if not running, wait for it to be ready
-if ! pgrep -x swww-daemon >/dev/null; then
-    swww-daemon 2>/dev/null &
-    sleep 1  # Wait for daemon to initialize
-fi
+# Kill and restart swww daemon for clean state
+pkill -x swww-daemon 2>/dev/null
+sleep 0.5
+swww-daemon 2>/dev/null &
+sleep 1  # Wait for daemon to initialize
+
+set_wallpaper() {
+    local img="$1"
+    for output in $(swww query | cut -d: -f1); do
+        swww img -o "$output" "$img" --resize fit --transition-type "$TRANSITION" 2>/dev/null
+    done
+}
 
 # Pick ONE image and set it
 IMG="$(find "$WALL_DIR" -type f \( -name '*.jpg' -o -name '*.png' -o -name '*.webp' \) | shuf -n 1)"
-swww img "$IMG" --resize fit --transition-type "$TRANSITION" 2>/dev/null
+set_wallpaper "$IMG"
 
 while true; do
     sleep $INTERVAL
     IMG="$(find "$WALL_DIR" -type f \( -name '*.jpg' -o -name '*.png' -o -name '*.webp' \) | shuf -n 1)"
-    swww img "$IMG" --resize fit --transition-type "$TRANSITION" 2>/dev/null
+    set_wallpaper "$IMG"
 done
