@@ -256,9 +256,11 @@ class RalphConfig:
     log_dir: Path
     prompt_plan: Path
     prompt_build: Path
-    impl_plan: Path
+    prompt_verify: Path
+    prompt_investigate: Path
     specs_dir: Path
     output_fifo: Path
+    plan_file: Path
 
     @classmethod
     def from_repo(cls, repo_root: Path) -> 'RalphConfig':
@@ -270,10 +272,312 @@ class RalphConfig:
             log_dir=log_dir,
             prompt_plan=ralph_dir / 'PROMPT_plan.md',
             prompt_build=ralph_dir / 'PROMPT_build.md',
-            impl_plan=ralph_dir / 'IMPLEMENTATION_PLAN.md',
+            prompt_verify=ralph_dir / 'PROMPT_verify.md',
+            prompt_investigate=ralph_dir / 'PROMPT_investigate.md',
             specs_dir=ralph_dir / 'specs',
             output_fifo=log_dir / 'output.fifo',
+            plan_file=ralph_dir / 'plan.jsonl',
         )
+
+
+# =============================================================================
+# State Management (JSONL-based)
+# =============================================================================
+# 
+# plan.jsonl format - each line is an independent record:
+#   {"t": "spec", "spec": "coverage.md"}
+#   {"t": "task", "id": "t-xxxx", "desc": "...", "s": "p"}        # pending
+#   {"t": "task", "id": "t-yyyy", "desc": "...", "s": "d", "done_at": "abc"}  # done
+#   {"t": "issue", "id": "i-zzzz", "desc": "..."}
+#
+# Benefits: Git-friendly merges (line-based), clean diffs, no conflicts on parallel adds
+
+def _generate_id(prefix: str = 't') -> str:
+    """Generate a short random ID like t-a1b2 or i-c3d4."""
+    import random
+    import string
+    chars = string.ascii_lowercase + string.digits
+    suffix = ''.join(random.choice(chars) for _ in range(4))
+    return f"{prefix}-{suffix}"
+
+
+@dataclass
+class Task:
+    id: str
+    name: str  # Short task name (what to do)
+    spec: str  # Spec file this task belongs to
+    notes: Optional[str] = None  # Implementation notes/context (how to do it)
+    accept: Optional[str] = None  # Acceptance criteria / test plan (how to verify)
+    deps: Optional[list] = None  # List of task IDs this depends on
+    status: str = "p"  # "p" = pending, "d" = done
+    done_at: Optional[str] = None  # Commit hash when marked done
+    
+    def to_jsonl(self) -> str:
+        d = {"t": "task", "id": self.id, "spec": self.spec, "name": self.name, "s": self.status}
+        if self.notes:
+            d["notes"] = self.notes
+        if self.accept:
+            d["accept"] = self.accept
+        if self.deps:
+            d["deps"] = self.deps
+        if self.done_at:
+            d["done_at"] = self.done_at
+        return json.dumps(d)
+    
+    @classmethod
+    def from_jsonl(cls, d: dict) -> 'Task':
+        # Support legacy 'desc' field as 'name'
+        name = d.get("name") or d.get("desc", "")
+        return cls(
+            id=d["id"], 
+            name=name,
+            spec=d.get("spec", ""),  # Empty for legacy tasks
+            notes=d.get("notes"),
+            accept=d.get("accept"),
+            deps=d.get("deps"),
+            status=d.get("s", "p"),
+            done_at=d.get("done_at")
+        )
+
+
+@dataclass 
+class Issue:
+    id: str
+    desc: str
+    spec: str  # Spec file this issue belongs to
+    
+    def to_jsonl(self) -> str:
+        return json.dumps({"t": "issue", "id": self.id, "spec": self.spec, "desc": self.desc})
+    
+    @classmethod
+    def from_jsonl(cls, d: dict) -> 'Issue':
+        return cls(id=d["id"], desc=d["desc"], spec=d.get("spec", ""))
+
+
+@dataclass
+class RalphState:
+    spec: Optional[str] = None
+    tasks: list = field(default_factory=list)   # List of Task (both pending and done)
+    issues: list = field(default_factory=list)  # List of Issue
+    
+    @property
+    def pending(self) -> list:
+        return [t for t in self.tasks if t.status == "p"]
+    
+    @property
+    def done(self) -> list:
+        return [t for t in self.tasks if t.status == "d"]
+    
+    @property
+    def done_ids(self) -> set:
+        """Set of completed task IDs."""
+        return {t.id for t in self.done}
+    
+    def get_next_task(self) -> Optional[Task]:
+        """Get next task respecting dependencies (topological order)."""
+        done_ids = self.done_ids
+        for task in self.pending:
+            # Task is ready if it has no deps, or all deps are done
+            if not task.deps or all(dep in done_ids for dep in task.deps):
+                return task
+        # No task ready (circular dep or all blocked)
+        return self.pending[0] if self.pending else None
+    
+    def get_sorted_pending(self) -> list:
+        """Return pending tasks in topological order."""
+        done_ids = self.done_ids
+        result = []
+        remaining = list(self.pending)
+        seen = set()
+        
+        # Keep pulling tasks whose deps are satisfied
+        changed = True
+        while changed and remaining:
+            changed = False
+            for task in remaining[:]:
+                if not task.deps or all(dep in done_ids or dep in seen for dep in task.deps):
+                    result.append(task)
+                    seen.add(task.id)
+                    remaining.remove(task)
+                    changed = True
+        
+        # Add any remaining tasks (circular deps) at the end
+        result.extend(remaining)
+        return result
+    
+    def to_dict(self) -> dict:
+        """For JSON output (ralph query)."""
+        def task_to_dict(t: Task) -> dict:
+            d = {"id": t.id, "name": t.name}
+            if t.notes:
+                d["notes"] = t.notes
+            if t.accept:
+                d["accept"] = t.accept
+            if t.deps:
+                d["deps"] = t.deps
+            if t.done_at:
+                d["done_at"] = t.done_at
+            return d
+        
+        return {
+            "spec": self.spec,
+            "tasks": {
+                "pending": [task_to_dict(t) for t in self.get_sorted_pending()],
+                "done": [task_to_dict(t) for t in self.done],
+            },
+            "issues": [{"id": i.id, "desc": i.desc} for i in self.issues],
+        }
+    
+    def get_stage(self) -> str:
+        """Compute current stage based on state."""
+        if self.spec is None:
+            return "PLAN"
+        if self.pending:
+            return "BUILD"
+        if self.done:
+            return "VERIFY"
+        if self.issues:
+            return "INVESTIGATE"
+        return "COMPLETE"
+    
+    def get_next(self) -> dict:
+        """Get next action to take."""
+        stage = self.get_stage()
+        if stage == "PLAN":
+            return {"action": "PLAN", "item": None}
+        elif stage == "BUILD":
+            task = self.get_next_task()
+            return {"action": "BUILD", "task": task_to_query_dict(task) if task else None}
+        elif stage == "VERIFY":
+            return {"action": "VERIFY", "item": f"Verify {len(self.done)} completed tasks against spec"}
+        elif stage == "INVESTIGATE":
+            return {"action": "INVESTIGATE", "item": self.issues[0].desc if self.issues else None}
+        else:
+            return {"action": "COMPLETE", "item": None}
+
+
+def task_to_query_dict(t: Task) -> dict:
+    """Convert task to dict for query output."""
+    d = {"id": t.id, "name": t.name}
+    if t.notes:
+        d["notes"] = t.notes
+    if t.accept:
+        d["accept"] = t.accept
+    if t.deps:
+        d["deps"] = t.deps
+    if t.done_at:
+        d["done_at"] = t.done_at
+    return d
+
+
+def load_state(config: RalphConfig) -> RalphState:
+    """Load state from plan.jsonl by reading all lines."""
+    state = RalphState()
+    
+    if not config.plan_file.exists():
+        return state
+    
+    try:
+        for line in config.plan_file.read_text().strip().split('\n'):
+            if not line.strip():
+                continue
+            d = json.loads(line)
+            t = d.get("t")
+            if t == "spec":
+                state.spec = d.get("spec")
+            elif t == "task":
+                state.tasks.append(Task.from_jsonl(d))
+            elif t == "issue":
+                state.issues.append(Issue.from_jsonl(d))
+    except (json.JSONDecodeError, KeyError):
+        pass
+    
+    return state
+
+
+def save_state(config: RalphConfig, state: RalphState, commit_msg: Optional[str] = None):
+    """Save state to plan.jsonl, optionally commit."""
+    lines = []
+    
+    if state.spec:
+        lines.append(json.dumps({"t": "spec", "spec": state.spec}))
+    
+    for task in state.tasks:
+        lines.append(task.to_jsonl())
+    
+    for issue in state.issues:
+        lines.append(issue.to_jsonl())
+    
+    config.plan_file.write_text('\n'.join(lines) + '\n' if lines else '')
+    
+    if commit_msg:
+        subprocess.run(['git', 'add', str(config.plan_file)], 
+                      cwd=config.repo_root, capture_output=True)
+        subprocess.run(['git', 'commit', '-m', commit_msg],
+                      cwd=config.repo_root, capture_output=True)
+
+
+def get_current_commit(config: RalphConfig) -> str:
+    """Get current HEAD commit hash (short)."""
+    result = subprocess.run(
+        ['git', 'rev-parse', '--short', 'HEAD'],
+        capture_output=True, text=True, cwd=config.repo_root
+    )
+    return result.stdout.strip() if result.returncode == 0 else "unknown"
+
+
+def check_unfinished_tasks(config: RalphConfig, new_spec: str) -> bool:
+    """Check for unfinished tasks and prompt user. Returns True if OK to proceed."""
+    state = load_state(config)
+    
+    if not state.tasks:
+        return True
+    
+    current_spec = state.spec or "unknown"
+    if current_spec == new_spec:
+        return True
+    
+    pending_tasks = state.pending
+    done_tasks = state.done
+    
+    if not pending_tasks and not done_tasks:
+        return True
+    
+    print(f"{Colors.YELLOW}Found unfinished tasks from spec '{current_spec}':{Colors.NC}")
+    for t in pending_tasks:
+        print(f"  - [pending] {t.id}: {t.name}")
+    for t in done_tasks:
+        print(f"  - [done] {t.id}: {t.name}")
+    print()
+    print("What would you like to do?")
+    print("  [c] Cancel existing tasks and start fresh")
+    print("  [a] Abort (keep current plan)")
+    
+    try:
+        response = input(f"Choice [c/a]: ").strip().lower()
+        if response == 'c':
+            return True
+        else:
+            print(f"{Colors.YELLOW}Aborted. Keeping current plan.{Colors.NC}")
+            return False
+    except (KeyboardInterrupt, EOFError):
+        print()
+        print(f"{Colors.YELLOW}Aborted. Keeping current plan.{Colors.NC}")
+        return False
+
+
+def has_uncommitted_plan(config: RalphConfig) -> bool:
+    """Check if plan.jsonl has uncommitted changes (staged or unstaged)."""
+    if not config.plan_file.exists():
+        return False
+    
+    # Check for both staged and unstaged changes
+    result = subprocess.run(
+        ['git', 'status', '--porcelain', str(config.plan_file)],
+        capture_output=True, text=True, cwd=config.repo_root
+    )
+    # Porcelain output is empty if file is clean
+    return bool(result.stdout.strip())
 
 
 def find_repo_root() -> Optional[Path]:
@@ -369,50 +673,6 @@ def count_running_opencode(repo_root: Path) -> int:
     except subprocess.CalledProcessError:
         pass
     return count
-
-
-def parse_impl_plan(path: Path) -> dict:
-    """Parse implementation plan for task counts."""
-    result = {'pending': 0, 'done': 0, 'next_task': None, 'current_spec': None, 'issues': {'open': 0, 'fixed': 0, 'items': []}}
-    
-    if not path.exists():
-        return result
-    
-    content = path.read_text()
-    
-    # Count tasks
-    result['pending'] = len(re.findall(r'^- \[ \]', content, re.MULTILINE))
-    result['done'] = len(re.findall(r'^- \[x\]', content, re.MULTILINE | re.IGNORECASE))
-    
-    # Get the spec name from "## Spec: filename.md" line
-    spec_match = re.search(r'^## Spec:\s*(.+?)\s*$', content, re.MULTILINE)
-    if spec_match:
-        result['current_spec'] = spec_match.group(1)
-    
-    # Get next task (first uncompleted task)
-    task_match = re.search(r'^- \[ \] (.+)$', content, re.MULTILINE)
-    if task_match:
-        result['next_task'] = task_match.group(1)
-    
-    # Parse discovered issues section
-    issues_match = re.search(r'## Discovered Issues\n(.*?)(?=\n## |\Z)', content, re.DOTALL)
-    if issues_match:
-        issues_section = issues_match.group(1)
-        result['issues']['open'] = len(re.findall(r'^- \[ \]', issues_section, re.MULTILINE))
-        result['issues']['open'] += len(re.findall(r'^- [^\[]', issues_section, re.MULTILINE))
-        result['issues']['fixed'] = len(re.findall(r'^- \[[xX]\]', issues_section, re.MULTILINE))
-        # Extract individual issue items with their status
-        for line in issues_section.split('\n'):
-            line = line.strip()
-            if line.startswith('- [ ] '):
-                result['issues']['items'].append(('open', line[6:]))
-            elif re.match(r'^- \[[xX]\] ', line):
-                result['issues']['items'].append(('fixed', line[6:]))
-            elif line.startswith('- ') and not line.startswith('- ('):
-                # Plain bullet (not placeholder text)
-                result['issues']['items'].append(('open', line[2:]))
-    
-    return result
 
 
 def parse_cost_line(line: str) -> Optional[tuple[float, int, int]]:
@@ -562,146 +822,241 @@ def cmd_init(config: RalphConfig):
     config.log_dir.mkdir(parents=True, exist_ok=True)
 
     # Define prompt templates
+    # Note: {{SPEC_FILE}} is replaced at runtime with the target spec filename
     plan_prompt_template = '''\
-0a. Run `git branch --show-current` to identify the current branch.
-0b. Study `ralph/specs/*` to learn the project specifications.
-0c. Study the source code to understand the current implementation.
+## Target Spec: {{SPEC_FILE}}
 
-## Task: Gap Analysis
+1. Run `ralph query` to see current state
+2. Read the spec file: `ralph/specs/{{SPEC_FILE}}`
+3. Study the source code to understand the current implementation
 
-Compare specs against the CURRENT codebase and generate a fresh task list:
+## Task: Gap Analysis for {{SPEC_FILE}}
 
-1. Use subagents to study specs and source code thoroughly
-2. For each spec requirement, check if it's already implemented
+Compare the spec against the CURRENT codebase and generate a task list:
+
+1. Use subagents to study the spec and relevant source code thoroughly
+2. For each requirement in the spec, check if it's already implemented
 3. Create tasks ONLY for what's missing or broken
 4. DO NOT implement anything - planning only
 
-## Updating an Existing Plan
-
-The plan is disposable - regenerate it based on current reality, not the old plan.
-
-If @ralph/IMPLEMENTATION_PLAN.md exists:
-- IGNORE the old pending tasks (they may be stale)
-- KEEP the "## Completed" section as historical record
-- KEEP the "## Discovered Issues" section
-- Generate NEW pending tasks from fresh gap analysis
-
 ## Output
 
-Write @ralph/IMPLEMENTATION_PLAN.md with:
-
-```markdown
-# Implementation Plan
-
-**Branch:** `<current branch>`
-**Last updated:** <timestamp>
-
-## Spec: <spec-filename.md>
-
-- [ ] Task 1 for this spec
-- [ ] Task 2 for this spec
-
-## Spec: <another-spec.md>
-
-- [ ] Task 1 for another spec
-
-## Completed
-
-- [x] Previous completed tasks (preserve from old plan)
-
-## Discovered Issues
-
-- Issues found during implementation (preserve from old plan)
+For each task identified, run:
 ```
+ralph task add '{"name": "Short task name", "notes": "Implementation details", "accept": "How to verify", "deps": ["t-xxxx"]}'
+```
+
+Task fields:
+- `name` (required): Short description of what to do (e.g., "Add unit tests for parser")
+- `notes` (optional): Implementation context, hints, relevant files
+- `accept` (optional): Acceptance criteria / test plan (e.g., "pytest tests/test_parser.py passes")
+- `deps` (optional): List of task IDs this task depends on
+
+The command returns the new task ID (e.g., "Task added: t-1a2b - ..."). Use this ID when other tasks depend on it.
 
 Rules:
 - Each task should be completable in ONE iteration
-- Order by priority (most important first)
+- Add tasks in dependency order - add prerequisite tasks first so you have their IDs
 - Be specific - "Add X to Y" not "Improve Z"
-- Group tasks under their source spec using `## Spec: <filename>`
+- Tasks are for {{SPEC_FILE}} only
+- Include `accept` criteria when testable
+- Use `deps` when a task requires another task to be done first
+
+When done adding tasks, output:
+```
+[RALPH] PLAN_COMPLETE: Added N tasks for {{SPEC_FILE}}
+```
 '''
 
     build_prompt_template = '''\
-0a. Run `git branch --show-current` to identify the current branch.
-0b. Study @ralph/IMPLEMENTATION_PLAN.md for current task list.
+# BUILD Stage
 
-## Branch Awareness
+Implement the next pending task.
 
-IMPORTANT: Check the **Branch:** field in @ralph/IMPLEMENTATION_PLAN.md.
-- If it matches current branch, continue with tasks.
-- If it doesn't match, the plan is from different work - proceed carefully or run `ralph plan` first.
-- Update **Last updated:** when you complete a task.
+## Step 1: Get Task
 
-## CRITICAL: ONE TASK, THEN EXIT
+Run `ralph query` to get current state. The `next.task` field shows:
+- `name`: what to do
+- `notes`: implementation hints (if provided)
+- `accept`: how to verify it works (if provided)
 
-1. Pick ONE incomplete item from @ralph/IMPLEMENTATION_PLAN.md
-2. Identify which `## Spec:` section the task belongs to
-3. Read ONLY that specific spec file from `ralph/specs/` - do NOT read all specs
-4. Implement the task (search first - don't assume not implemented)
-5. Run tests to validate ONLY the functionality related to this spec
-6. Update @ralph/IMPLEMENTATION_PLAN.md (mark complete, update timestamp)
-7. `git add -A && git commit && git push`
-8. **EXIT** - the loop restarts you fresh
+## Step 2: Understand Context
+
+1. Read the spec file: `ralph/specs/<spec>`
+2. Search codebase first - don't assume something isn't implemented
+3. Review `notes` for implementation hints
+
+## Step 3: Implement
+
+Build the feature/fix. Rules:
+- Complete implementations only, no stubs
+- No code comments unless explicitly requested
+
+## Step 4: Validate
+
+Before marking done, verify the implementation:
+1. If `accept` criteria provided, verify those specifically
+2. Run relevant tests
+3. Ensure the implementation matches the spec
+
+## Step 5: Complete
+
+```
+ralph task done
+```
+
+This marks the task done and auto-commits.
+
+## Discovering Issues
+
+If you find a problem unrelated to the current task:
+```
+ralph issue add "description of issue"
+```
+
+Issues are investigated later in the INVESTIGATE stage.
 
 ## Progress Reporting
 
 ```
-[RALPH] BRANCH: <current branch>
-[RALPH] SPEC: <spec-filename.md>
-[RALPH] === START: <task> ===
-[RALPH] FILE: <file>
+[RALPH] === START: <task name> ===
 ```
 
 ```
-[RALPH] === DONE: <task> ===
+[RALPH] === DONE: <task name> ===
 [RALPH] RESULT: <summary>
 ```
 
-## Issue Handling
+## EXIT after marking task done
+'''
 
-1. Document issues in @ralph/IMPLEMENTATION_PLAN.md under "## Discovered Issues"
-2. DO NOT work around problems - fix them or document them
-3. If stuck >5 min, document and EXIT
+    verify_prompt_template = '''\
+# VERIFY Stage
 
-## Rules
+All tasks are done. Verify the spec is actually complete.
 
-- ONE task, then EXIT
-- Complete implementations only, no stubs
-- No comments in code unless asked
-- Only validate against the specific spec being worked on, not all specs
+## Step 1: Get Context
+
+Run `ralph query` to see completed tasks.
+
+Read the spec file: `ralph/specs/<spec>`
+
+## Step 2: Verify Each Requirement
+
+For EACH requirement/acceptance criterion in the spec:
+
+1. **Check implementation exists** - search codebase, read relevant files
+2. **Check tests exist and pass** - run the test suite
+3. **Check edge cases** - verify the implementation handles them
+
+Be thorough. The goal is to catch gaps before marking the spec complete.
+
+## Step 3: Decision
+
+### If ALL requirements are met:
+
+```
+ralph task accept
+```
+
+Then output:
+```
+[RALPH] SPEC_COMPLETE
+```
+
+### If requirements are NOT met:
+
+For each gap found, add a task:
+```
+ralph task add '{"name": "what's missing", "accept": "how to verify"}'
+```
+
+Then output:
+```
+[RALPH] SPEC_INCOMPLETE: <summary of what's missing>
+```
+
+The loop will continue with BUILD stage to implement the new tasks.
+
+## Progress Reporting
+
+```
+[RALPH] === VERIFY: <spec name> ===
+[RALPH] Checking: <requirement being verified>
+```
+
+## EXIT after either accepting or adding tasks
+'''
+
+    investigate_prompt_template = '''\
+# INVESTIGATE Stage
+
+An issue was discovered during build. Research and resolve it.
+
+## Step 1: Get Issue
+
+Run `ralph query` to see current state. The `next.item` shows the issue description.
+
+## Step 2: Research
+
+Investigate thoroughly:
+1. Read relevant code
+2. Run tests to understand the failure
+3. Check git history if relevant
+4. Understand root cause before acting
+
+## Step 3: Resolve
+
+Choose ONE approach:
+
+### Option A: Create a fix task
+
+If the fix is non-trivial:
+```
+ralph task add '{"name": "fix for issue", "notes": "root cause analysis", "accept": "how to verify fix"}'
+ralph issue done
+```
+
+### Option B: Fix directly
+
+If the fix is trivial (typo, simple bug):
+1. Make the fix
+2. Run tests to verify
+3. Mark resolved:
+```
+ralph issue done
+```
+
+### Option C: Out of scope
+
+If the issue is outside the current spec's scope:
+```
+ralph issue done
+```
+Note in the commit message why it's being deferred.
+
+## Progress Reporting
+
+```
+[RALPH] === INVESTIGATE: <issue description> ===
+[RALPH] Root cause: <what you found>
+[RALPH] Resolution: <what you're doing about it>
+```
+
+## EXIT after resolving the issue
 '''
 
     # Handle prompt files (with merge options if updating)
     if is_update:
         handle_prompt_file(config.prompt_plan, plan_prompt_template, config.repo_root)
         handle_prompt_file(config.prompt_build, build_prompt_template, config.repo_root)
+        handle_prompt_file(config.prompt_verify, verify_prompt_template, config.repo_root)
+        handle_prompt_file(config.prompt_investigate, investigate_prompt_template, config.repo_root)
     else:
         config.prompt_plan.write_text(plan_prompt_template)
         config.prompt_build.write_text(build_prompt_template)
-
-    # Create implementation plan only on fresh init (preserve existing)
-    if not is_update or not config.impl_plan.exists():
-        branch = get_current_branch()
-        config.impl_plan.write_text(f'''\
-# Implementation Plan
-
-**Branch:** `{branch}`
-**Last updated:** {datetime.now().strftime('%Y-%m-%d %H:%M')}
-
-Run `ralph plan` to generate this from specs.
-
-## Pending Tasks
-
-- [ ] (Add tasks here or run `ralph plan`)
-
-## Completed
-
-- (Tasks move here when done)
-
-## Discovered Issues
-
-- (Document issues found during implementation)
-''')
+        config.prompt_verify.write_text(verify_prompt_template)
+        config.prompt_investigate.write_text(investigate_prompt_template)
 
     # Create example spec only on fresh init (preserve existing specs)
     if not is_update:
@@ -725,6 +1080,10 @@ Describe what you want to build.
 - [ ] Criterion 2
 ''')
 
+    # Initialize empty plan.jsonl on fresh init
+    if not is_update and not config.plan_file.exists():
+        save_state(config, RalphState())
+
     # Add logs to gitignore
     gitignore = config.repo_root / '.gitignore'
     if gitignore.exists():
@@ -738,27 +1097,31 @@ Describe what you want to build.
         print()
         print("Updated files:")
         print(f"  {config.ralph_dir}/")
-        print("  ├── PROMPT_plan.md    (planning mode prompt)")
-        print("  └── PROMPT_build.md   (build mode prompt)")
+        print("  ├── PROMPT_plan.md        (planning mode)")
+        print("  ├── PROMPT_build.md       (build stage)")
+        print("  ├── PROMPT_verify.md      (verify stage)")
+        print("  └── PROMPT_investigate.md (investigate stage)")
         print()
         print("Preserved:")
-        print("  ├── IMPLEMENTATION_PLAN.md")
+        print("  ├── plan.jsonl")
         print("  └── specs/*")
     else:
         print(f"{Colors.GREEN}Ralph initialized!{Colors.NC}")
         print()
         print("Next steps:")
         print("  1. Write specs in ralph/specs/")
-        print("  2. Run 'ralph plan' to generate implementation plan")
+        print("  2. Run 'ralph plan <spec.md>' to generate tasks")
         print("  3. Run 'ralph' to start building")
         print()
         print("Files created:")
         print(f"  {config.ralph_dir}/")
-        print("  ├── PROMPT_plan.md    (planning mode prompt)")
-        print("  ├── PROMPT_build.md   (build mode prompt)")
-        print("  ├── IMPLEMENTATION_PLAN.md")
+        print("  ├── PROMPT_plan.md        (planning mode)")
+        print("  ├── PROMPT_build.md       (build stage)")
+        print("  ├── PROMPT_verify.md      (verify stage)")
+        print("  ├── PROMPT_investigate.md (investigate stage)")
+        print("  ├── plan.jsonl            (task/issue state)")
         print("  └── specs/")
-        print("      └── example.md    (delete and add your own)")
+        print("      └── example.md        (delete and add your own)")
 
 
 def cmd_status(config: RalphConfig):
@@ -769,7 +1132,42 @@ def cmd_status(config: RalphConfig):
 
     print(f"{Colors.BLUE}Ralph Status{Colors.NC}")
     print(f"  Repo: {config.repo_root}")
-    print(f"  Ralph dir: {config.ralph_dir}")
+    print(f"  Branch: {get_current_branch()}")
+    print()
+    
+    # Load state
+    state = load_state(config)
+    
+    # Current spec
+    if state.spec:
+        print(f"  Spec: {Colors.CYAN}{state.spec}{Colors.NC}")
+    else:
+        print(f"  Spec: {Colors.YELLOW}None - run 'ralph plan <spec.md>'{Colors.NC}")
+    
+    # Stage
+    stage = state.get_stage()
+    stage_colors = {
+        'PLAN': Colors.YELLOW,
+        'BUILD': Colors.GREEN,
+        'VERIFY': Colors.CYAN,
+        'INVESTIGATE': Colors.RED,
+        'COMPLETE': Colors.GREEN,
+    }
+    print(f"  Stage: {stage_colors.get(stage, '')}{stage}{Colors.NC}")
+    
+    # Tasks
+    pending = len(state.pending)
+    done = len(state.done)
+    print(f"  Tasks: {pending} pending, {done} done (awaiting verification)")
+    
+    # Issues
+    if state.issues:
+        print(f"  Issues: {Colors.RED}{len(state.issues)} discovered{Colors.NC}")
+    
+    # Count specs
+    spec_count = len(list(config.specs_dir.glob('*.md'))) if config.specs_dir.exists() else 0
+    print(f"  Specs available: {spec_count} files")
+    
     print()
     
     # Check for project rules
@@ -780,16 +1178,6 @@ def cmd_status(config: RalphConfig):
             break
     if rules_file:
         print(f"  Rules: {Colors.GREEN}{rules_file}{Colors.NC}")
-    else:
-        print(f"  Rules: {Colors.YELLOW}None (no AGENTS.md or CLAUDE.md){Colors.NC}")
-    
-    # Count specs
-    spec_count = len(list(config.specs_dir.glob('*.md'))) if config.specs_dir.exists() else 0
-    print(f"  Specs: {spec_count} files")
-    
-    # Count tasks
-    plan = parse_impl_plan(config.impl_plan)
-    print(f"  Tasks: {plan['pending']} pending, {plan['done']} completed")
     
     # Running status
     running = count_running_opencode(config.repo_root)
@@ -798,9 +1186,16 @@ def cmd_status(config: RalphConfig):
     else:
         print(f"  Status: {Colors.YELLOW}Stopped{Colors.NC}")
     
-    # Hint about watching
+    # Next action
+    next_action = state.get_next()
+    if next_action['item']:
+        print()
+        print(f"{Colors.CYAN}Next: {next_action['action']}{Colors.NC}")
+        print(f"  {next_action['item']}")
+    
+    # Hint
     print()
-    print(f"{Colors.DIM}Use 'ralph watch' to see live metrics during a run{Colors.NC}")
+    print(f"{Colors.DIM}Use 'ralph query' for JSON output, 'ralph watch' for live dashboard{Colors.NC}")
 
 
 @dataclass
@@ -1234,7 +1629,7 @@ def _create_textual_app():
         def _update_status_panel(self):
             """Update the status panel."""
             status = self.query_one("#status", StatusPanel)
-            plan = parse_impl_plan(self._config.impl_plan)
+            state = load_state(self._config)
             
             status.branch = self._branch
             
@@ -1251,7 +1646,9 @@ def _create_textual_app():
             else:
                 status.cost_text = f"[cyan]Cost:[/] --"
             
-            status.progress_text = f"[green]Progress:[/] {plan['done']} done, {plan['pending']} pending"
+            pending = len(state.pending)
+            done = len(state.done)
+            status.progress_text = f"[green]Progress:[/] {done} done, {pending} pending"
             
             if plan['current_spec']:
                 status.spec_text = f"[green]Spec:[/] {plan['current_spec']}"
@@ -1359,8 +1756,8 @@ def render_dashboard(state: DashboardState, term_width: int, term_height: int) -
     add(f"{Colors.BLUE}{header_bar}{Colors.NC}")
     add()
     
-    # Parse plan data
-    plan = parse_impl_plan(state.config.impl_plan)
+    # Load state data
+    ralph_state = load_state(state.config)
     
     # Build status lines to display next to Ralph
     status_lines = []
@@ -1379,14 +1776,17 @@ def render_dashboard(state: DashboardState, term_width: int, term_height: int) -
     else:
         status_lines.append(f"💰 {Colors.CYAN}Cost:{Colors.NC} --")
     
+    pending = len(ralph_state.pending)
+    done = len(ralph_state.done)
     status_lines.append(f"")
-    status_lines.append(f"📊 {Colors.GREEN}Progress:{Colors.NC} {plan['done']} done, {plan['pending']} pending")
+    status_lines.append(f"📊 {Colors.GREEN}Progress:{Colors.NC} {done} done, {pending} pending")
     status_lines.append(f"")
-    if plan['current_spec']:
-        status_lines.append(f"📋 {Colors.GREEN}Spec:{Colors.NC} {plan['current_spec']}")
+    if ralph_state.spec:
+        status_lines.append(f"📋 {Colors.GREEN}Spec:{Colors.NC} {ralph_state.spec}")
     status_lines.append(f"🎯 {Colors.GREEN}Task:{Colors.NC}")
-    if plan['next_task']:
-        status_lines.append(f"   {truncate(plan['next_task'], term_width - RALPH_WIDTH - 6, 3)}")
+    next_task = ralph_state.pending[0].name if ralph_state.pending else None
+    if next_task:
+        status_lines.append(f"   {truncate(next_task, term_width - RALPH_WIDTH - 6, 3)}")
     else:
         status_lines.append(f"   (no pending tasks)")
     
@@ -1407,21 +1807,13 @@ def render_dashboard(state: DashboardState, term_width: int, term_height: int) -
     add(f"{Colors.DIM}{t_join_separator}{Colors.NC}")
     
     # Discovered Issues
-    total_issues = plan['issues']['open'] + plan['issues']['fixed']
-    if total_issues > 0:
-        add(f"{Colors.YELLOW}Discovered Issues:{Colors.NC} ({plan['issues']['open']} open, {plan['issues']['fixed']} fixed)")
-        for i, (status, text) in enumerate(plan['issues']['items'][:5]):
-            # Strip **[STATUS]** markers from text (e.g., **[RESOLVED]**, **[OPEN]**)
-            text = re.sub(r'^\*\*\[[A-Z_]+\]\*\*\s*', '', text)
-            # Prefix: "  " (2) + status (4-5) + " " (1) = 7-8 chars
-            if status == 'fixed':
-                truncated_text = truncate(text, term_width, 9)  # "  FIXED  " = 9
-                add(f"  {Colors.GREEN}FIXED{Colors.NC}  {truncated_text}")
-            else:
-                truncated_text = truncate(text, term_width, 9)  # "  OPEN   " = 9
-                add(f"  {Colors.RED}OPEN{Colors.NC}   {truncated_text}")
-        if len(plan['issues']['items']) > 5:
-            add(f"  {Colors.YELLOW}... and {len(plan['issues']['items']) - 5} more{Colors.NC}")
+    if ralph_state.issues:
+        add(f"{Colors.YELLOW}Discovered Issues:{Colors.NC} ({len(ralph_state.issues)} open)")
+        for issue in ralph_state.issues[:5]:
+            truncated_text = truncate(issue.desc, term_width, 9)
+            add(f"  {Colors.RED}OPEN{Colors.NC}   {truncated_text}")
+        if len(ralph_state.issues) > 5:
+            add(f"  {Colors.YELLOW}... and {len(ralph_state.issues) - 5} more{Colors.NC}")
         add(f"{Colors.DIM}{section_bar}{Colors.NC}")
     
     # Latest output - fill rest of screen
@@ -1992,16 +2384,101 @@ def stream_output(pipe, output_buffer: OutputBuffer, metrics: Metrics,
             pass
 
 
+def get_prompt_for_stage(config: RalphConfig, mode: str, stage: str) -> Path:
+    """Get the appropriate prompt file based on mode and stage."""
+    if mode == 'plan':
+        return config.prompt_plan
+    
+    # Build mode - select based on stage
+    if stage == 'VERIFY':
+        return config.prompt_verify
+    elif stage == 'INVESTIGATE':
+        return config.prompt_investigate
+    else:
+        # BUILD, PLAN, COMPLETE all use build prompt
+        return config.prompt_build
+
+
+def print_plan_report(state: RalphState, mode: str):
+    """Print a detailed plan report for developer review."""
+    print(f"{Colors.BLUE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━{Colors.NC}")
+    
+    if mode == 'plan':
+        print(f"{Colors.CYAN}PLAN REVIEW{Colors.NC} - {state.spec or 'no spec'}")
+        print()
+    
+    # Build task ID to name map for dependency display
+    task_names = {t.id: t.name for t in state.tasks}
+    done_ids = state.done_ids
+    
+    # Show pending tasks in topological order with full details
+    if state.pending:
+        sorted_pending = state.get_sorted_pending()
+        print(f"{Colors.YELLOW}PENDING TASKS ({len(sorted_pending)}){Colors.NC}")
+        print()
+        for i, t in enumerate(sorted_pending, 1):
+            # Check if task is blocked
+            blocked = t.deps and not all(dep in done_ids for dep in t.deps)
+            if blocked:
+                print(f"  {Colors.DIM}{i}. {t.name}{Colors.NC} [{t.id}] {Colors.RED}(blocked){Colors.NC}")
+            else:
+                print(f"  {Colors.WHITE}{i}. {t.name}{Colors.NC} [{t.id}]")
+            
+            if t.deps:
+                dep_strs = []
+                for dep in t.deps:
+                    dep_name = task_names.get(dep, dep)[:30]
+                    if dep in done_ids:
+                        dep_strs.append(f"{Colors.GREEN}✓ {dep_name}{Colors.NC}")
+                    else:
+                        dep_strs.append(f"{Colors.RED}○ {dep_name}{Colors.NC}")
+                print(f"     {Colors.CYAN}Deps:{Colors.NC} {', '.join(dep_strs)}")
+            
+            if t.notes:
+                # Wrap notes nicely
+                for line in t.notes.split('\n'):
+                    print(f"     {Colors.DIM}{line}{Colors.NC}")
+            if t.accept:
+                print(f"     {Colors.GREEN}Verify:{Colors.NC} {t.accept}")
+            print()
+    
+    # Show done tasks (completed but not yet accepted)
+    if state.done:
+        print(f"{Colors.GREEN}DONE ({len(state.done)}){Colors.NC} - awaiting verification")
+        print()
+        for i, t in enumerate(state.done, 1):
+            print(f"  {Colors.DIM}{i}. {t.name}{Colors.NC} [{t.id}]")
+            if t.accept:
+                print(f"     {Colors.GREEN}Verify:{Colors.NC} {t.accept}")
+            if t.done_at:
+                print(f"     {Colors.DIM}Completed at: {t.done_at}{Colors.NC}")
+            print()
+    
+    # Show issues
+    if state.issues:
+        print(f"{Colors.RED}ISSUES ({len(state.issues)}){Colors.NC}")
+        print()
+        for i in state.issues:
+            print(f"  - {i.desc} [{i.id}]")
+        print()
+    
+    # Summary
+    total = len(state.pending) + len(state.done)
+    if total > 0:
+        print(f"{Colors.DIM}Total: {len(state.pending)} pending, {len(state.done)} done{Colors.NC}")
+
+
 def cmd_run(config: RalphConfig, mode: str, max_iterations: int, max_cost: float,
-            max_failures: int, completion_promise: str, no_ui: bool = False):
+            max_failures: int, completion_promise: str, no_ui: bool = False,
+            spec_file: Optional[str] = None):
     """Run the main loop."""
     if not config.ralph_dir.exists():
         print(f"{Colors.RED}Ralph not initialized. Run 'ralph init' first.{Colors.NC}")
         return 1
 
-    prompt_file = config.prompt_plan if mode == 'plan' else config.prompt_build
-    if not prompt_file.exists():
-        print(f"{Colors.RED}Prompt file not found: {prompt_file}{Colors.NC}")
+    # For plan mode, spec_file is required
+    if mode == 'plan' and not spec_file:
+        print(f"{Colors.RED}Plan mode requires a spec file: ralph plan <spec.md>{Colors.NC}")
         return 1
 
     # Initialize metrics
@@ -2033,6 +2510,8 @@ def cmd_run(config: RalphConfig, mode: str, max_iterations: int, max_cost: float
 
     print(f"{Colors.BLUE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━{Colors.NC}")
     print(f"Mode:   {Colors.GREEN}{mode}{Colors.NC}")
+    if spec_file:
+        print(f"Spec:   {Colors.CYAN}{spec_file}{Colors.NC}")
     print(f"Branch: {branch}")
     if rules_source:
         print(f"Rules:  {Colors.GREEN}{rules_source}{Colors.NC}")
@@ -2042,7 +2521,7 @@ def cmd_run(config: RalphConfig, mode: str, max_iterations: int, max_cost: float
         print(f"Max iterations: {max_iterations}")
     if max_cost > 0:
         print(f"Max cost:       ${max_cost}")
-    print(f"Circuit breaker: {max_failures} consecutive failures")
+    print(f"Max failures:   {max_failures} (circuit breaker)")
     if completion_promise:
         print(f"Completion:     \"{completion_promise}\"")
     print(f"{Colors.BLUE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━{Colors.NC}")
@@ -2091,8 +2570,20 @@ def cmd_run(config: RalphConfig, mode: str, max_iterations: int, max_cost: float
                 print(f"{Colors.GREEN}╚═══════════════════════════════════════════════════════════════╝{Colors.NC}")
                 print()
 
-            # Run opencode
+            # Determine prompt based on current stage
+            state = load_state(config)
+            stage = state.get_stage()
+            prompt_file = get_prompt_for_stage(config, mode, stage)
+            
+            if not prompt_file.exists():
+                print(f"{Colors.RED}Prompt file not found: {prompt_file}{Colors.NC}")
+                return 1
+            
             prompt_content = prompt_file.read_text()
+            
+            # Substitute spec file placeholder for plan mode
+            if spec_file:
+                prompt_content = prompt_content.replace('{{SPEC_FILE}}', spec_file)
             
             # Incorporate project rules (already loaded above, reuse for efficiency)
             prompt_content = build_prompt_with_rules(prompt_content, project_rules)
@@ -2149,6 +2640,24 @@ def cmd_run(config: RalphConfig, mode: str, max_iterations: int, max_cost: float
                 consecutive_failures += 1
                 metrics.failures += 1
 
+            # Log iteration output to /tmp (auto-cleaned on reboot)
+            tmp_log_dir = Path('/tmp/ralph-logs')
+            tmp_log_dir.mkdir(parents=True, exist_ok=True)
+            log_file = tmp_log_dir / f"{mode}_{iteration:04d}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log"
+            try:
+                with log_file.open('w') as f:
+                    f.write(f"# Ralph {mode} iteration {iteration}\n")
+                    f.write(f"# Date: {datetime.now().isoformat()}\n")
+                    f.write(f"# Exit code: {exit_code}\n")
+                    f.write(f"# Duration: {duration}s\n")
+                    f.write(f"# Spec: {spec_file or 'N/A'}\n")
+                    f.write(f"# Stage: {stage}\n")
+                    f.write(f"# Repo: {config.repo_root}\n")
+                    f.write("\n")
+                    f.write(output_buffer.get_all())
+            except Exception as e:
+                pass  # Don't warn on log failure - it's just convenience
+
             if not interactive:
                 print()
                 print(f"{Colors.BLUE}┌───────────────────────────────────────────────────────────────┐{Colors.NC}")
@@ -2164,6 +2673,19 @@ def cmd_run(config: RalphConfig, mode: str, max_iterations: int, max_cost: float
                     print(f"Found: {completion_promise}")
                     print(f"{Colors.GREEN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━{Colors.NC}")
                     break
+
+            # Check for spec complete signals
+            output_text = output_buffer.get_all()
+            if '[RALPH] SPEC_COMPLETE' in output_text or '[RALPH] SPEC_VERIFIED' in output_text:
+                # Extract spec name if present
+                spec_match = re.search(r'\[RALPH\] SPEC_(?:COMPLETE|VERIFIED):?\s*(\S+)?', output_text)
+                spec_name = spec_match.group(1) if spec_match and spec_match.group(1) else spec_file or 'unknown'
+                print(f"{Colors.GREEN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━{Colors.NC}")
+                print(f"{Colors.GREEN}SPEC COMPLETE: {spec_name}{Colors.NC}")
+                print(f"Total cost: ${metrics.total_cost:.4f}")
+                print(f"Iterations: {metrics.total_iterations}")
+                print(f"{Colors.GREEN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━{Colors.NC}")
+                break
 
             # Push changes
             try:
@@ -2192,7 +2714,282 @@ def cmd_run(config: RalphConfig, mode: str, max_iterations: int, max_cost: float
     except KeyboardInterrupt:
         print(f"\n{Colors.YELLOW}Interrupted by user{Colors.NC}")
     finally:
-        print(f"{Colors.CYAN}Session: ${metrics.total_cost:.4f} across {metrics.total_iterations} iterations{Colors.NC}")
+        # Summary with success/failure status
+        if metrics.failures == 0 and metrics.successes > 0:
+            status = f"{Colors.GREEN}SUCCESS{Colors.NC}"
+        elif metrics.failures > 0 and metrics.successes == 0:
+            status = f"{Colors.RED}FAILED{Colors.NC}"
+        elif metrics.failures > 0:
+            status = f"{Colors.YELLOW}PARTIAL{Colors.NC} ({metrics.successes} ok, {metrics.failures} failed)"
+        else:
+            status = f"{Colors.YELLOW}NO RUNS{Colors.NC}"
+        
+        print(f"{Colors.BLUE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━{Colors.NC}")
+        print(f"{status} | ${metrics.total_cost:.4f} | {metrics.total_iterations} iterations")
+        
+        # Show current plan state
+        final_state = load_state(config)
+        if final_state.tasks or final_state.issues:
+            print_plan_report(final_state, mode)
+        print(f"{Colors.BLUE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━{Colors.NC}")
+
+
+# =============================================================================
+# State CLI Commands
+# =============================================================================
+
+def cmd_query(config: RalphConfig, subquery: Optional[str] = None):
+    """Query current state."""
+    state = load_state(config)
+    
+    if subquery == 'stage':
+        print(state.get_stage())
+    elif subquery == 'next':
+        print(json.dumps(state.get_next(), indent=2))
+    elif subquery == 'tasks':
+        print(json.dumps({
+            "pending": [task_to_query_dict(t) for t in state.pending],
+            "done": [task_to_query_dict(t) for t in state.done],
+        }, indent=2))
+    elif subquery == 'issues':
+        print(json.dumps([{"id": i.id, "desc": i.desc} for i in state.issues], indent=2))
+    else:
+        # Full state with computed fields
+        output = state.to_dict()
+        output["stage"] = state.get_stage()
+        output["next"] = state.get_next()
+        print(json.dumps(output, indent=2))
+
+
+def cmd_task(config: RalphConfig, action: str, desc: Optional[str] = None):
+    """Task mutations: done, add, accept."""
+    state = load_state(config)
+    
+    if action == 'done':
+        pending = state.pending
+        if not pending:
+            print(f"{Colors.YELLOW}No pending tasks{Colors.NC}")
+            return 1
+        # Find the first pending task and mark it done
+        task = pending[0]
+        task.status = "d"
+        task.done_at = get_current_commit(config)
+        save_state(config, state, f"ralph: task done - {task.name[:50]}")
+        print(f"{Colors.GREEN}Task done:{Colors.NC} {task.name}")
+        print(json.dumps(state.to_dict(), indent=2))
+        
+    elif action == 'add':
+        if not desc:
+            print(f"{Colors.RED}Usage: ralph task add \"name\" or ralph task add '{{\"name\": ..., \"notes\": ..., \"accept\": ...}}'{Colors.NC}")
+            return 1
+        if not state.spec:
+            print(f"{Colors.RED}No spec set. Run 'ralph set-spec <file>' first.{Colors.NC}")
+            return 1
+        
+        # Try parsing as JSON for structured task, otherwise treat as simple name
+        try:
+            if desc.startswith('{'):
+                d = json.loads(desc)
+                name = d.get("name", "")
+                notes = d.get("notes")
+                accept = d.get("accept")
+                deps = d.get("deps")  # List of task IDs
+            else:
+                name = desc
+                notes = None
+                accept = None
+                deps = None
+        except json.JSONDecodeError:
+            name = desc
+            notes = None
+            accept = None
+            deps = None
+        
+        if not name:
+            print(f"{Colors.RED}Task name is required{Colors.NC}")
+            return 1
+            
+        task = Task(id=_generate_id('t'), name=name, spec=state.spec, notes=notes, accept=accept, deps=deps, status="p")
+        state.tasks.append(task)
+        save_state(config, state)  # No auto-commit, let caller batch
+        print(f"{Colors.GREEN}Task added:{Colors.NC} {task.id} - {name}")
+        if deps:
+            print(f"  {Colors.DIM}Depends on: {', '.join(deps)}{Colors.NC}")
+        
+    elif action == 'accept':
+        done = state.done
+        if not done:
+            print(f"{Colors.YELLOW}No done tasks to accept{Colors.NC}")
+            return 1
+        count = len(done)
+        # Remove all done tasks from state.tasks
+        done_ids = {t.id for t in done}
+        state.tasks = [t for t in state.tasks if t.id not in done_ids]
+        save_state(config, state)  # No auto-commit, let caller batch
+        print(f"{Colors.GREEN}Accepted {count} tasks{Colors.NC}")
+        
+    else:
+        print(f"{Colors.RED}Unknown task action: {action}{Colors.NC}")
+        print("Usage: ralph task [done|add|accept]")
+        return 1
+
+
+def cmd_issue(config: RalphConfig, action: str, desc: Optional[str] = None):
+    """Issue mutations: done, add."""
+    state = load_state(config)
+    
+    if action == 'done':
+        if not state.issues:
+            print(f"{Colors.YELLOW}No issues{Colors.NC}")
+            return 1
+        issue = state.issues.pop(0)
+        save_state(config, state)  # No auto-commit, issues are transient
+        print(f"{Colors.GREEN}Issue resolved:{Colors.NC} {issue.desc}")
+        
+    elif action == 'add':
+        if not desc:
+            print(f"{Colors.RED}Usage: ralph issue add \"description\"{Colors.NC}")
+            return 1
+        if not state.spec:
+            print(f"{Colors.RED}No spec set. Run 'ralph set-spec <file>' first.{Colors.NC}")
+            return 1
+        issue = Issue(id=_generate_id('i'), desc=desc, spec=state.spec)
+        state.issues.append(issue)
+        save_state(config, state)  # No auto-commit, issues are transient
+        print(f"{Colors.GREEN}Issue added:{Colors.NC} {issue.id} - {desc}")
+        
+    else:
+        print(f"{Colors.RED}Unknown issue action: {action}{Colors.NC}")
+        print("Usage: ralph issue [done|add]")
+        return 1
+
+
+def cmd_set_spec(config: RalphConfig, spec_file: str):
+    """Set current spec."""
+    # Validate spec exists - handle full path, relative path, or just filename
+    spec_path = Path(spec_file)
+    if spec_path.is_absolute() or spec_path.exists():
+        # Full or relative path provided
+        if not spec_path.exists():
+            print(f"{Colors.RED}Spec not found: {spec_file}{Colors.NC}")
+            return 1
+    else:
+        # Just filename - look in specs_dir
+        spec_path = config.specs_dir / spec_file
+        if not spec_path.exists():
+            if not spec_file.endswith('.md'):
+                spec_path = config.specs_dir / f"{spec_file}.md"
+            if not spec_path.exists():
+                print(f"{Colors.RED}Spec not found: {spec_file}{Colors.NC}")
+                return 1
+    
+    state = load_state(config)
+    state.spec = spec_path.name
+    # Clear tasks when switching specs
+    state.tasks = []
+    # Keep issues - they may be relevant across specs
+    save_state(config, state, f"ralph: set spec {spec_path.name}")
+    print(f"{Colors.GREEN}Spec set:{Colors.NC} {spec_path.name}")
+
+
+def cmd_log(config: RalphConfig, show_all: bool = False, spec_filter: Optional[str] = None, 
+            branch_filter: Optional[str] = None, since: Optional[str] = None):
+    """Query git history for task lifecycle data."""
+    cmd = ['git', 'log', '--format=%H|%aI|%an <%ae>|%s', '--reverse', '--follow', '--', 'ralph/plan.jsonl']
+    
+    if since:
+        cmd.insert(2, f'--since={since}')
+    if branch_filter:
+        cmd.insert(2, branch_filter)
+    
+    result = subprocess.run(cmd, capture_output=True, text=True, cwd=config.repo_root)
+    
+    if result.returncode != 0 or not result.stdout.strip():
+        print(json.dumps({"tasks": []}, indent=2))
+        return
+    
+    tasks: Dict[str, dict] = {}
+    prev_task_ids: set = set()
+    
+    for line in result.stdout.strip().split('\n'):
+        if not line or '|' not in line:
+            continue
+        parts = line.split('|', 3)
+        if len(parts) != 4:
+            continue
+        
+        full_commit = parts[0]
+        commit = full_commit[:7]
+        date = parts[1].strip()
+        author = parts[2].strip()
+        
+        plan_result = subprocess.run(
+            ['git', 'show', f'{full_commit}:ralph/plan.jsonl'],
+            capture_output=True, text=True, cwd=config.repo_root
+        )
+        
+        if plan_result.returncode != 0:
+            continue
+        
+        current_tasks: Dict[str, dict] = {}
+        for plan_line in plan_result.stdout.strip().split('\n'):
+            if not plan_line:
+                continue
+            try:
+                entry = json.loads(plan_line)
+                if entry.get('t') == 'task':
+                    task_id = entry.get('id')
+                    if task_id:
+                        current_tasks[task_id] = entry
+            except json.JSONDecodeError:
+                continue
+        
+        current_task_ids = set(current_tasks.keys())
+        
+        for task_id, task_data in current_tasks.items():
+            if task_id not in tasks:
+                branch_result = subprocess.run(
+                    ['git', 'branch', '--contains', full_commit, '--format=%(refname:short)'],
+                    capture_output=True, text=True, cwd=config.repo_root
+                )
+                branch = branch_result.stdout.strip().split('\n')[0] if branch_result.returncode == 0 else None
+                
+                tasks[task_id] = {
+                    "id": task_id,
+                    "desc": task_data.get("name", ""),
+                    "notes": task_data.get("notes"),
+                    "accept": task_data.get("accept"),
+                    "deps": task_data.get("deps"),
+                    "spec": task_data.get("spec"),
+                    "branch": branch,
+                    "author": author,
+                    "created": {"commit": commit, "date": date},
+                    "done": None,
+                    "accepted": None
+                }
+            
+            if task_data.get("s") == "d" and task_data.get("done_at"):
+                if tasks[task_id]["done"] is None:
+                    tasks[task_id]["done"] = {"commit": task_data["done_at"][:7], "date": date}
+        
+        removed_ids = prev_task_ids - current_task_ids
+        for task_id in removed_ids:
+            if task_id in tasks and tasks[task_id]["accepted"] is None:
+                tasks[task_id]["accepted"] = {"commit": commit, "date": date}
+        
+        prev_task_ids = current_task_ids
+    
+    task_list = list(tasks.values())
+    
+    if spec_filter:
+        task_list = [t for t in task_list if t.get("spec") == spec_filter]
+    
+    if not show_all:
+        current_state = load_state(config)
+        current_ids = {t.id for t in current_state.tasks}
+        task_list = [t for t in task_list if t["id"] in current_ids]
+    
+    print(json.dumps({"tasks": task_list}, indent=2))
 
 
 def main():
@@ -2202,20 +2999,29 @@ def main():
         epilog='''
 Examples:
   ralph init                    Initialize in current repo
-  ralph plan                    Generate implementation plan
+  ralph plan spec.md            Plan tasks for a specific spec
   ralph                         Build mode, unlimited (Ctrl+C to stop)
   ralph 10                      Build mode, max 10 iterations
-  ralph 50 --max-cost 25        Max 50 iterations or $25
-  ralph --completion-promise DONE  Stop when DONE appears
+  ralph query                   Show current state as JSON
+  ralph query stage             Show current stage (PLAN/BUILD/VERIFY/etc)
+  ralph task done               Mark first pending task as done
+  ralph task add "description"  Add a new task
+  ralph task accept             Accept all done tasks (after verification)
+  ralph issue add "description" Add a discovered issue
+  ralph issue done              Resolve first issue
+  ralph set-spec spec.md        Set current spec
+  ralph log                     Show state change history
   ralph watch                   Live progress dashboard
   ralph stream                  Pipe opencode JSON for pretty output
         '''
     )
     
     parser.add_argument('command', nargs='?', default='build',
-                       help='Command: init, plan, build, status, watch, stream, help')
-    parser.add_argument('iterations', nargs='?', type=int, default=0,
-                       help='Max iterations (0 = unlimited)')
+                       help='Command: init, plan, build, query, task, issue, set-spec, log, status, watch, stream')
+    parser.add_argument('arg', nargs='?', default=None,
+                       help='Subcommand or argument')
+    parser.add_argument('arg2', nargs='?', default=None,
+                       help='Additional argument (e.g., task description)')
     parser.add_argument('--max-cost', type=float, default=0,
                        help='Stop when cost exceeds $N')
     parser.add_argument('--max-failures', type=int, default=3,
@@ -2224,13 +3030,26 @@ Examples:
                        help='Stop when output contains this text')
     parser.add_argument('--no-ui', action='store_true',
                        help='Disable interactive dashboard, show streaming output')
+    parser.add_argument('--all', action='store_true',
+                       help='For log: show all history')
+    parser.add_argument('--spec', type=str, default=None,
+                       help='For log: filter by spec')
+    parser.add_argument('--branch', type=str, default=None,
+                       help='For log: filter by branch')
+    parser.add_argument('--since', type=str, default=None,
+                       help='For log: filter since date/commit')
 
     args = parser.parse_args()
 
     # Handle numeric first arg (e.g., "ralph 10")
     if args.command and args.command.isdigit():
-        args.iterations = int(args.command)
+        args.arg = args.command
         args.command = 'build'
+
+    # Parse iterations from arg if numeric
+    iterations = 0
+    if args.arg and args.arg.isdigit():
+        iterations = int(args.arg)
 
     # Stream command doesn't need a repo
     if args.command == 'stream':
@@ -2252,10 +3071,92 @@ Examples:
         cmd_status(config)
     elif args.command == 'watch':
         cmd_watch(config)
+    elif args.command == 'query':
+        cmd_query(config, args.arg)
+    elif args.command == 'task':
+        if not args.arg:
+            print(f"{Colors.RED}Usage: ralph task [done|add|accept]{Colors.NC}")
+            sys.exit(1)
+        cmd_task(config, args.arg, args.arg2)
+    elif args.command == 'issue':
+        if not args.arg:
+            print(f"{Colors.RED}Usage: ralph issue [done|add]{Colors.NC}")
+            sys.exit(1)
+        cmd_issue(config, args.arg, args.arg2)
+    elif args.command == 'set-spec':
+        if not args.arg:
+            print(f"{Colors.RED}Usage: ralph set-spec <spec.md>{Colors.NC}")
+            sys.exit(1)
+        cmd_set_spec(config, args.arg)
+    elif args.command == 'log':
+        cmd_log(config, show_all=args.all, spec_filter=args.spec, 
+                branch_filter=args.branch, since=args.since)
     elif args.command == 'plan':
-        cmd_run(config, 'plan', 1, args.max_cost, args.max_failures, args.completion_promise, args.no_ui)
+        # Plan requires a spec file
+        spec_file = args.arg
+        if not spec_file:
+            # List available specs
+            specs = list(config.specs_dir.glob('*.md')) if config.specs_dir.exists() else []
+            if not specs:
+                print(f"{Colors.RED}No specs found in ralph/specs/{Colors.NC}")
+                print("Create a spec file first, e.g.: ralph/specs/my-feature.md")
+                sys.exit(1)
+            print(f"{Colors.YELLOW}Usage: ralph plan <spec.md>{Colors.NC}")
+            print()
+            print("Available specs:")
+            for spec in sorted(specs):
+                print(f"  {spec.name}")
+            sys.exit(1)
+        
+        # Validate spec exists - handle full path, relative path, or just filename
+        spec_path = Path(spec_file)
+        if spec_path.is_absolute() or spec_path.exists():
+            # Full or relative path provided
+            if not spec_path.exists():
+                print(f"{Colors.RED}Spec not found: {spec_file}{Colors.NC}")
+                sys.exit(1)
+        else:
+            # Just filename - look in specs_dir
+            spec_path = config.specs_dir / spec_file
+            if not spec_path.exists():
+                # Try without .md extension
+                if not spec_file.endswith('.md'):
+                    spec_path = config.specs_dir / f"{spec_file}.md"
+                if not spec_path.exists():
+                    print(f"{Colors.RED}Spec not found: {spec_file}{Colors.NC}")
+                    print(f"Expected at: {config.specs_dir / spec_file}")
+                    sys.exit(1)
+        
+        # Check for unfinished tasks before switching specs
+        if not check_unfinished_tasks(config, spec_path.name):
+            sys.exit(0)
+        
+        # Set the spec in state before running plan
+        cmd_set_spec(config, spec_path.name)
+        
+        cmd_run(config, 'plan', 1, args.max_cost, args.max_failures, 
+                args.completion_promise, args.no_ui, spec_file=spec_path.name)
     elif args.command in ('build', ''):
-        cmd_run(config, 'build', args.iterations, args.max_cost, args.max_failures, args.completion_promise, args.no_ui)
+        # Ensure plan.jsonl is committed before starting build
+        if has_uncommitted_plan(config):
+            print(f"{Colors.YELLOW}plan.jsonl has uncommitted changes.{Colors.NC}")
+            try:
+                response = input(f"Commit now? [Y/n] ").strip().lower()
+                if response in ('', 'y', 'yes'):
+                    subprocess.run(['git', 'add', str(config.plan_file)], 
+                                  cwd=config.repo_root, check=True)
+                    subprocess.run(['git', 'commit', '-m', 'ralph: update plan'],
+                                  cwd=config.repo_root, check=True)
+                    print(f"{Colors.GREEN}Committed.{Colors.NC}")
+                else:
+                    print(f"{Colors.RED}Aborted.{Colors.NC}")
+                    sys.exit(1)
+            except KeyboardInterrupt:
+                print(f"\n{Colors.RED}Aborted.{Colors.NC}")
+                sys.exit(1)
+        
+        cmd_run(config, 'build', iterations, args.max_cost, args.max_failures, 
+                args.completion_promise, args.no_ui)
     elif args.command == 'help':
         parser.print_help()
     else:

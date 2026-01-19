@@ -1,20 +1,9 @@
 # Zsh completion for ralph
 # Source this file from ~/.zshrc
 
-_ralph_get_issues() {
-  local plan="ralph/IMPLEMENTATION_PLAN.md"
-  if [[ -f "$plan" ]]; then
-    # First try explicit ISSUE-N tags
-    local explicit=$(grep -oE 'ISSUE-[0-9]+' "$plan" 2>/dev/null | sort -u)
-    if [[ -n "$explicit" ]]; then
-      echo "$explicit"
-    else
-      # Count all bullets (including indented) in Discovered Issues section
-      local count=$(sed -n '/## Discovered Issues/,/^## /p' "$plan" 2>/dev/null | grep -cE '^\s*- ' || echo 0)
-      for i in $(seq 1 $count); do
-        echo "ISSUE-$i"
-      done
-    fi
+_ralph_get_specs() {
+  if [[ -d "ralph/specs" ]]; then
+    ls ralph/specs/*.md 2>/dev/null | xargs -n1 basename 2>/dev/null
   fi
 }
 
@@ -22,13 +11,16 @@ _ralph() {
   local -a subcommands
   subcommands=(
     'init:Initialize ralph in current repo'
-    'plan:Run planning mode (generate implementation plan)'
+    'plan:Run planning mode for a spec file'
     'build:Run build mode (implement from plan)'
-    'status:Show current status and metrics'
+    'status:Show current status'
     'watch:Live dashboard with metrics'
     'stream:Pretty-print opencode JSON stream'
-    'investigate:Deep-dive on a specific blocker issue'
-    'metrics:Show session metrics'
+    'query:Query current state (stage, next, tasks, issues)'
+    'task:Task mutations (done, add, accept)'
+    'issue:Issue mutations (done, add)'
+    'set-spec:Set current spec file'
+    'log:Query git history for state changes'
     'help:Show help'
   )
 
@@ -41,12 +33,21 @@ _ralph() {
   local -a failure_values
   failure_values=(1 3 5 10)
 
+  local -a query_subcommands
+  query_subcommands=(stage next tasks issues)
+
+  local -a task_subcommands
+  task_subcommands=(done add accept)
+
+  local -a issue_subcommands
+  issue_subcommands=(done add)
+
   _arguments -C \
     '1: :->cmd' \
     '*: :->args' \
     '--max-cost[Stop when cost exceeds N dollars]:cost:($cost_values)' \
     '--max-failures[Circuit breaker - stop after N consecutive failures]:failures:($failure_values)' \
-    '--completion-promise[Stop when output contains this text]:promise:(DONE COMPLETE FINISHED)' \
+    '--completion-promise[Stop when output contains this text]:promise:(DONE COMPLETE FINISHED SPEC_COMPLETE)' \
     '--no-ui[Disable interactive dashboard]' \
     && return
 
@@ -57,18 +58,34 @@ _ralph() {
       ;;
     args)
       case $words[2] in
-        plan|build|"")
+        plan|set-spec)
+          local -a specs
+          specs=(${(f)"$(_ralph_get_specs)"})
+          _describe -t specs 'spec file' specs
+          ;;
+        build|"")
           _describe -t iterations 'iterations' iterations
           _arguments \
             '--max-cost[Stop when cost exceeds N dollars]:cost:($cost_values)' \
             '--max-failures[Circuit breaker]:failures:($failure_values)' \
-            '--completion-promise[Stop on text]:promise:(DONE COMPLETE FINISHED)' \
+            '--completion-promise[Stop on text]:promise:(DONE COMPLETE FINISHED SPEC_COMPLETE)' \
             '--no-ui[Disable interactive dashboard]'
           ;;
-        investigate)
-          local -a issues
-          issues=(${(f)"$(_ralph_get_issues)"})
-          _describe -t issues 'issue ID' issues
+        query)
+          _describe -t query_subcommands 'query type' query_subcommands
+          ;;
+        task)
+          _describe -t task_subcommands 'task action' task_subcommands
+          ;;
+        issue)
+          _describe -t issue_subcommands 'issue action' issue_subcommands
+          ;;
+        log)
+          _arguments \
+            '--all[Show all tasks from git history]' \
+            '--spec[Filter by spec file]:spec:($(_ralph_get_specs))' \
+            '--branch[Filter by branch]:branch:' \
+            '--since[Changes since date/commit]:date:'
           ;;
       esac
       ;;
