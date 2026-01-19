@@ -4066,7 +4066,9 @@ Examples:
     parser.add_argument('--branch', type=str, default=None,
                        help='For log: filter by branch')
     parser.add_argument('--since', type=str, default=None,
-                       help='For log: filter since date/commit')
+                        help='For log: filter since date/commit')
+    parser.add_argument('--max-iterations', type=int, default=None,
+                        help='For construct: max iterations (0 = unlimited)')
 
     args = parser.parse_args()
 
@@ -4075,9 +4077,11 @@ Examples:
         args.arg = args.command
         args.command = 'construct'
 
-    # Parse iterations from arg if numeric
+    # Parse iterations: --max-iterations flag takes precedence, then positional arg
     iterations = 0
-    if args.arg and args.arg.isdigit():
+    if args.max_iterations is not None:
+        iterations = args.max_iterations
+    elif args.arg and args.arg.isdigit():
         iterations = int(args.arg)
 
     # Stream command doesn't need a repo
