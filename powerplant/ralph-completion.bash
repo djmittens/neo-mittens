@@ -5,7 +5,7 @@
 _ralph_completions() {
   local cur="${COMP_WORDS[COMP_CWORD]}"
   local prev="${COMP_WORDS[COMP_CWORD-1]}"
-  local commands="init plan build status watch log metrics help"
+  local commands="init plan build status watch stream metrics help"
   local options="--max-cost --max-failures --completion-promise"
   
   case "$prev" in

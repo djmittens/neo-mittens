@@ -289,6 +289,53 @@ def find_repo_root() -> Optional[Path]:
     return None
 
 
+def find_project_rules(repo_root: Path) -> Optional[str]:
+    """Find and load project rules from AGENTS.md or CLAUDE.md.
+    
+    Searches for rules files in order of precedence (first found wins):
+    1. AGENTS.md in repo root
+    2. CLAUDE.md in repo root
+    
+    Returns the content or None if no rules file found.
+    """
+    candidates = [
+        repo_root / 'AGENTS.md',
+        repo_root / 'CLAUDE.md',
+    ]
+    
+    for path in candidates:
+        if path.exists():
+            try:
+                return path.read_text()
+            except (OSError, IOError):
+                pass
+    
+    return None
+
+
+def build_prompt_with_rules(prompt_content: str, project_rules: Optional[str]) -> str:
+    """Combine project rules with ralph prompt.
+    
+    If project rules exist, prepend them to the prompt with clear separation.
+    This ensures the AI follows repo-specific conventions while executing ralph tasks.
+    """
+    if not project_rules:
+        return prompt_content
+    
+    return f"""# Project Rules (from AGENTS.md)
+
+The following rules are MANDATORY for this repository. Follow them strictly.
+
+{project_rules}
+
+---
+
+# Ralph Task
+
+{prompt_content}
+"""
+
+
 def get_current_branch() -> str:
     """Get current git branch name."""
     try:
@@ -582,6 +629,17 @@ def cmd_status(config: RalphConfig):
     print(f"  Ralph dir: {config.ralph_dir}")
     print()
     
+    # Check for project rules
+    rules_file = None
+    for candidate in ['AGENTS.md', 'CLAUDE.md']:
+        if (config.repo_root / candidate).exists():
+            rules_file = candidate
+            break
+    if rules_file:
+        print(f"  Rules: {Colors.GREEN}{rules_file}{Colors.NC}")
+    else:
+        print(f"  Rules: {Colors.YELLOW}None (no AGENTS.md or CLAUDE.md){Colors.NC}")
+    
     # Count specs
     spec_count = len(list(config.specs_dir.glob('*.md'))) if config.specs_dir.exists() else 0
     print(f"  Specs: {spec_count} files")
@@ -831,6 +889,113 @@ def cmd_watch(config: RalphConfig):
         print('\033[?25h', end='', flush=True)
 
 
+def cmd_stream():
+    """Filter opencode stream-json output to show human-readable progress with syntax highlighting.
+    
+    Usage: opencode --format json | ralph stream
+    
+    Note: This command doesn't require being in a git repo since it just processes stdin.
+    """
+    # ANSI color codes
+    class C:
+        RESET = '\033[0m'
+        BOLD = '\033[1m'
+        DIM = '\033[2m'
+        RED = '\033[31m'
+        GREEN = '\033[32m'
+        YELLOW = '\033[33m'
+        BLUE = '\033[34m'
+        MAGENTA = '\033[35m'
+        CYAN = '\033[36m'
+        WHITE = '\033[37m'
+        BRIGHT_BLACK = '\033[90m'
+        BRIGHT_GREEN = '\033[92m'
+        BRIGHT_YELLOW = '\033[93m'
+        BRIGHT_BLUE = '\033[94m'
+        BRIGHT_MAGENTA = '\033[95m'
+        BRIGHT_CYAN = '\033[96m'
+
+    for line in sys.stdin:
+        line = line.strip()
+        if not line:
+            continue
+        
+        try:
+            event = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        
+        event_type = event.get("type", "")
+        part = event.get("part", {})
+        
+        # OpenCode format
+        if event_type == "text":
+            text = part.get("text", "")
+            if text:
+                # Model's thinking/explanation text - dim white
+                print(f"\n{C.WHITE}{text}{C.RESET}")
+                sys.stdout.flush()
+        
+        elif event_type == "tool_use":
+            tool = part.get("tool", "?")
+            state = part.get("state", {})
+            args = state.get("input", {})
+            title = state.get("title", "")
+            output = state.get("output", "")
+            
+            # Tool label color based on tool type
+            if tool == "bash":
+                cmd = args.get("command", "")
+                desc = args.get("description", "") or title
+                print(f"\n{C.BRIGHT_YELLOW}Bash:{C.RESET} {C.DIM}{cmd[:80]}{C.RESET}")
+                if desc:
+                    print(f"  {C.YELLOW}{desc}{C.RESET}")
+            elif tool == "read":
+                path = args.get("filePath", "")
+                print(f"\n{C.BRIGHT_CYAN}Read:{C.RESET} {C.CYAN}{path}{C.RESET}")
+            elif tool == "edit":
+                path = args.get("filePath", "")
+                print(f"\n{C.BRIGHT_GREEN}Edit:{C.RESET} {C.GREEN}{path}{C.RESET}")
+            elif tool == "write":
+                path = args.get("filePath", "")
+                print(f"\n{C.BRIGHT_GREEN}Write:{C.RESET} {C.GREEN}{path}{C.RESET}")
+            elif tool == "grep":
+                pattern = args.get("pattern", "")
+                print(f"\n{C.BRIGHT_MAGENTA}Grep:{C.RESET} {C.MAGENTA}{pattern}{C.RESET}")
+            elif tool == "glob":
+                pattern = args.get("pattern", "")
+                print(f"\n{C.BRIGHT_MAGENTA}Glob:{C.RESET} {C.MAGENTA}{pattern}{C.RESET}")
+            elif tool == "task":
+                desc = args.get("description", "") or title
+                print(f"\n{C.BRIGHT_BLUE}Task:{C.RESET} {C.BLUE}{desc}{C.RESET}")
+            else:
+                label = f"{tool}: {title}" if title else tool
+                print(f"\n{C.WHITE}{label}{C.RESET}")
+            
+            # Show brief output - dimmed
+            if output:
+                lines = str(output).strip().split('\n')
+                if len(lines) <= 3:
+                    for l in lines:
+                        print(f"  {C.DIM}{l[:100]}{C.RESET}")
+                else:
+                    print(f"  {C.DIM}({len(lines)} lines){C.RESET}")
+            sys.stdout.flush()
+        
+        elif event_type == "step_finish":
+            cost = part.get("cost", 0)
+            tokens = part.get("tokens", {})
+            input_tokens = tokens.get("input", 0)
+            output_tokens = tokens.get("output", 0)
+            cache = tokens.get("cache", {})
+            cache_read = cache.get("read", 0)
+            total_input = input_tokens + cache_read
+            print(f"\n{C.BRIGHT_BLACK}{'─'*60}{C.RESET}")
+            print(f"{C.CYAN}Cost:{C.RESET} ${cost:.4f} {C.BRIGHT_BLACK}|{C.RESET} {C.CYAN}Tokens:{C.RESET} {total_input}in/{output_tokens}out {C.DIM}(cached: {cache_read}){C.RESET}")
+            print(f"{C.BRIGHT_BLACK}{'─'*60}{C.RESET}")
+            sys.stdout.flush()
+
+
 @dataclass 
 class OutputBuffer:
     """Thread-safe buffer for output lines."""
@@ -931,13 +1096,13 @@ def stream_output(pipe, output_buffer: OutputBuffer, metrics: Metrics,
                 try:
                     fifo_fd = os.open(str(fifo_path), os.O_WRONLY | os.O_NONBLOCK)
                 except OSError:
-                    pass  # No reader yet
+                    pass  # No reader yet or FIFO doesn't exist
             
             if fifo_fd is not None:
                 try:
                     os.write(fifo_fd, (decoded + '\n').encode('utf-8'))
                 except OSError:
-                    # Broken pipe or no reader - close and retry next time
+                    # Broken pipe - close and retry next time
                     try:
                         os.close(fifo_fd)
                     except OSError:
@@ -952,7 +1117,7 @@ def stream_output(pipe, output_buffer: OutputBuffer, metrics: Metrics,
 
 
 def cmd_run(config: RalphConfig, mode: str, max_iterations: int, max_cost: float,
-            max_failures: int, completion_promise: str):
+            max_failures: int, completion_promise: str, no_ui: bool = False):
     """Run the main loop."""
     if not config.ralph_dir.exists():
         print(f"{Colors.RED}Ralph not initialized. Run 'ralph init' first.{Colors.NC}")
@@ -970,8 +1135,8 @@ def cmd_run(config: RalphConfig, mode: str, max_iterations: int, max_cost: float
     branch = get_current_branch()
     consecutive_failures = 0
     
-    # Detect interactive terminal
-    interactive = sys.stdout.isatty()
+    # Detect interactive terminal (can be overridden with --no-ui)
+    interactive = sys.stdout.isatty() and not no_ui
     
     # Create FIFO for watch command
     if config.output_fifo.exists():
@@ -981,9 +1146,22 @@ def cmd_run(config: RalphConfig, mode: str, max_iterations: int, max_cost: float
     else:
         os.mkfifo(str(config.output_fifo))
 
+    # Check for project rules upfront
+    project_rules = find_project_rules(config.repo_root)
+    rules_source = None
+    if project_rules:
+        for candidate in ['AGENTS.md', 'CLAUDE.md']:
+            if (config.repo_root / candidate).exists():
+                rules_source = candidate
+                break
+
     print(f"{Colors.BLUE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━{Colors.NC}")
     print(f"Mode:   {Colors.GREEN}{mode}{Colors.NC}")
     print(f"Branch: {branch}")
+    if rules_source:
+        print(f"Rules:  {Colors.GREEN}{rules_source}{Colors.NC}")
+    else:
+        print(f"Rules:  {Colors.YELLOW}None{Colors.NC}")
     if max_iterations > 0:
         print(f"Max iterations: {max_iterations}")
     if max_cost > 0:
@@ -1039,60 +1217,51 @@ def cmd_run(config: RalphConfig, mode: str, max_iterations: int, max_cost: float
 
             # Run opencode
             prompt_content = prompt_file.read_text()
-            script_dir = Path(__file__).parent
-            ralph_stream = script_dir / 'ralph-stream'
+            
+            # Incorporate project rules (already loaded above, reuse for efficiency)
+            prompt_content = build_prompt_with_rules(prompt_content, project_rules)
             
             output_buffer = OutputBuffer()
 
-            if ralph_stream.exists() and os.access(ralph_stream, os.X_OK):
-                cmd = ['opencode', 'run', '--model', 'anthropic/claude-opus-4-5', 
-                       '--format', 'json', prompt_content]
-                
-                # opencode | ralph-stream, capture stdout
-                opencode_proc = subprocess.Popen(
-                    cmd,
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.STDOUT,
-                    cwd=config.repo_root
-                )
-                
-                ralph_stream_proc = subprocess.Popen(
-                    [str(ralph_stream)],
-                    stdin=opencode_proc.stdout,
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.STDOUT,
-                    cwd=config.repo_root
-                )
-                
-                # Allow opencode to receive SIGPIPE if ralph-stream exits
-                if opencode_proc.stdout:
-                    opencode_proc.stdout.close()
-                
-                # Start reader thread
-                reader_thread = threading.Thread(
-                    target=stream_output,
-                    args=(ralph_stream_proc.stdout, output_buffer, metrics, not interactive, config.output_fifo)
-                )
-                reader_thread.daemon = True
-                reader_thread.start()
-                
-                if interactive:
-                    exit_code = run_with_live_ui(ralph_stream_proc, config, iteration, 
-                                                  metrics, branch, output_buffer)
-                else:
-                    ralph_stream_proc.wait()
-                    exit_code = ralph_stream_proc.returncode
-                
-                reader_thread.join(timeout=1.0)
-                opencode_proc.wait()
+            cmd = ['opencode', 'run', '--model', 'anthropic/claude-opus-4-5', 
+                   '--format', 'json', prompt_content]
+            
+            # opencode | ralph stream, capture stdout
+            opencode_proc = subprocess.Popen(
+                cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                cwd=config.repo_root
+            )
+            
+            ralph_stream_proc = subprocess.Popen(
+                [sys.executable, __file__, 'stream'],
+                stdin=opencode_proc.stdout,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+            )
+            
+            # Allow opencode to receive SIGPIPE if ralph stream exits
+            if opencode_proc.stdout:
+                opencode_proc.stdout.close()
+            
+            # Start reader thread
+            reader_thread = threading.Thread(
+                target=stream_output,
+                args=(ralph_stream_proc.stdout, output_buffer, metrics, not interactive, config.output_fifo)
+            )
+            reader_thread.daemon = True
+            reader_thread.start()
+            
+            if interactive:
+                exit_code = run_with_live_ui(ralph_stream_proc, config, iteration, 
+                                              metrics, branch, output_buffer)
             else:
-                # Fallback without streaming filter
-                result = subprocess.run(
-                    ['opencode', 'run', '--model', 'anthropic/claude-opus-4-5', prompt_content],
-                    cwd=config.repo_root,
-                    capture_output=False
-                )
-                exit_code = result.returncode
+                ralph_stream_proc.wait()
+                exit_code = ralph_stream_proc.returncode
+            
+            reader_thread.join(timeout=1.0)
+            opencode_proc.wait()
 
             duration = int(time.time() - start_time)
 
@@ -1167,11 +1336,12 @@ Examples:
   ralph 50 --max-cost 25        Max 50 iterations or $25
   ralph --completion-promise DONE  Stop when DONE appears
   ralph watch                   Live progress dashboard
+  ralph stream                  Pipe opencode JSON for pretty output
         '''
     )
     
     parser.add_argument('command', nargs='?', default='build',
-                       help='Command: init, plan, build, status, watch, metrics, help')
+                       help='Command: init, plan, build, status, watch, stream, metrics, help')
     parser.add_argument('iterations', nargs='?', type=int, default=0,
                        help='Max iterations (0 = unlimited)')
     parser.add_argument('--max-cost', type=float, default=0,
@@ -1180,6 +1350,8 @@ Examples:
                        help='Circuit breaker: stop after N consecutive failures')
     parser.add_argument('--completion-promise', type=str, default='',
                        help='Stop when output contains this text')
+    parser.add_argument('--no-ui', action='store_true',
+                       help='Disable interactive dashboard, show streaming output')
 
     args = parser.parse_args()
 
@@ -1187,6 +1359,11 @@ Examples:
     if args.command and args.command.isdigit():
         args.iterations = int(args.command)
         args.command = 'build'
+
+    # Stream command doesn't need a repo
+    if args.command == 'stream':
+        cmd_stream()
+        return
 
     # Find repo
     repo_root = find_repo_root()
@@ -1206,9 +1383,9 @@ Examples:
     elif args.command == 'watch':
         cmd_watch(config)
     elif args.command == 'plan':
-        cmd_run(config, 'plan', 1, args.max_cost, args.max_failures, args.completion_promise)
+        cmd_run(config, 'plan', 1, args.max_cost, args.max_failures, args.completion_promise, args.no_ui)
     elif args.command in ('build', ''):
-        cmd_run(config, 'build', args.iterations, args.max_cost, args.max_failures, args.completion_promise)
+        cmd_run(config, 'build', args.iterations, args.max_cost, args.max_failures, args.completion_promise, args.no_ui)
     elif args.command == 'help':
         parser.print_help()
     else:

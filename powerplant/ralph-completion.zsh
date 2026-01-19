@@ -9,7 +9,7 @@ _ralph() {
     'build:Run build mode (implement from plan)'
     'status:Show current status and metrics'
     'watch:Live dashboard with metrics'
-    'log:Tail the current log'
+    'stream:Pretty-print opencode JSON stream'
     'metrics:Show session metrics'
     'help:Show help'
   )
