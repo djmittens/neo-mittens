@@ -263,7 +263,7 @@ VALIDATE   Execute task     |
 
 **Actions**:
 1. Read spec: `ralph/specs/<spec>`
-2. **Evaluate each done task** against its acceptance criteria:
+2. **Evaluate each done task** against its acceptance criteria (PARALLELIZED - see below):
    - **Accepted**: Remove from plan (task completed successfully)
    - **Rejected**: Add tombstone, task remains for retry or decomposition
 3. **Evaluate spec requirements** against code + completed work:
@@ -278,6 +278,36 @@ VALIDATE   Execute task     |
 5. **Decision**:
    - If spec fully satisfied (no pending tasks/issues): TERMINATE
    - Otherwise: Continue to next iteration
+
+**Parallel Task Verification (Fork/Join)**:
+
+VALIDATE is embarrassingly parallelizable. For each done task, spawn a subagent to verify independently:
+
+```
+VALIDATE:
+  1. Get all done tasks: tasks = ralph query tasks --done
+  2. FORK: For each task in tasks, spawn subagent:
+     "Verify task '{task.name}' meets acceptance criteria: {task.accept}
+      
+      1. Check the implementation exists and is correct
+      2. Run any relevant tests
+      3. Verify edge cases are handled
+      
+      Return JSON:
+      {
+        \"task_id\": \"{task.id}\",
+        \"verdict\": \"accept\" | \"reject\",
+        \"reason\": \"<why>\",
+        \"gaps\": [\"<any gaps found>\"]  // optional
+      }"
+  3. JOIN: Collect all subagent results
+  4. Apply verdicts:
+     - For accepts: ralph task accept <id>
+     - For rejects: ralph task reject <id> "<reason>"
+  5. Create tasks/issues from any gaps found
+```
+
+This parallelization is critical for efficiency - a VALIDATE stage with 10 done tasks should verify all 10 concurrently, not sequentially.
 
 **Gap Types**:
 | Gap Type | Action |
@@ -674,6 +704,7 @@ Iteration 3:
 - [ ] VALIDATE stage compares done tasks against spec requirements
 - [ ] VALIDATE stage creates new tasks/issues for identified gaps
 - [ ] VALIDATE can accept (clear) or reject (tombstone) individual tasks
+- [ ] VALIDATE uses fork/join to verify all done tasks in parallel (one subagent per task)
 - [ ] Spec acceptance terminates construct mode
 
 ### Prioritization

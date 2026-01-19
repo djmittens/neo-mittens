@@ -494,11 +494,42 @@ class Tombstone:
 
 
 @dataclass
+class RalphPlanConfig:
+    """Configuration from plan.jsonl config record."""
+    timeout_ms: int = 300000  # 5 min default
+    max_iterations: int = 10
+    context_warn: float = 0.70
+    context_compact: float = 0.85
+    context_kill: float = 0.95
+    
+    def to_jsonl(self) -> str:
+        return json.dumps({
+            "t": "config",
+            "timeout_ms": self.timeout_ms,
+            "max_iterations": self.max_iterations,
+            "context_warn": self.context_warn,
+            "context_compact": self.context_compact,
+            "context_kill": self.context_kill
+        })
+    
+    @classmethod
+    def from_jsonl(cls, d: dict) -> 'RalphPlanConfig':
+        return cls(
+            timeout_ms=d.get("timeout_ms", 300000),
+            max_iterations=d.get("max_iterations", 10),
+            context_warn=d.get("context_warn", 0.70),
+            context_compact=d.get("context_compact", 0.85),
+            context_kill=d.get("context_kill", 0.95)
+        )
+
+
+@dataclass
 class RalphState:
     spec: Optional[str] = None
     tasks: list = field(default_factory=list)   # List of Task (both pending and done)
     issues: list = field(default_factory=list)  # List of Issue
     tombstones: list = field(default_factory=list)  # List of Tombstone
+    config: Optional[RalphPlanConfig] = None  # Optional config record from plan.jsonl
     
     @property
     def pending(self) -> list:
@@ -671,6 +702,8 @@ def load_state(config: RalphConfig) -> RalphState:
                 state.issues.append(Issue.from_jsonl(d))
             elif t == "reject":
                 state.tombstones.append(Tombstone.from_jsonl(d))
+            elif t == "config":
+                state.config = RalphPlanConfig.from_jsonl(d)
     except (json.JSONDecodeError, KeyError):
         pass
     
@@ -680,6 +713,9 @@ def load_state(config: RalphConfig) -> RalphState:
 def save_state(config: RalphConfig, state: RalphState, commit_msg: Optional[str] = None):
     """Save state to plan.jsonl, optionally commit."""
     lines = []
+    
+    if state.config:
+        lines.append(state.config.to_jsonl())
     
     if state.spec:
         lines.append(json.dumps({"t": "spec", "spec": state.spec}))
@@ -3178,10 +3214,23 @@ def cmd_run(config: RalphConfig, mode: str, max_iterations: int, max_cost: float
                 rules_source = candidate
                 break
 
-    # Calculate context limits
-    soft_limit = int(context_limit * CONTEXT_SOFT_LIMIT_PCT / 100)
-    compact_limit = int(context_limit * CONTEXT_COMPACT_LIMIT_PCT / 100)
-    hard_limit = int(context_limit * CONTEXT_HARD_LIMIT_PCT / 100)
+    # Load plan config to get context thresholds
+    plan_state = load_state(config)
+    plan_config = plan_state.config
+    
+    # Calculate context limits, using plan config if available
+    if plan_config:
+        soft_limit_pct = plan_config.context_warn * 100
+        compact_limit_pct = plan_config.context_compact * 100
+        hard_limit_pct = plan_config.context_kill * 100
+    else:
+        soft_limit_pct = CONTEXT_SOFT_LIMIT_PCT
+        compact_limit_pct = CONTEXT_COMPACT_LIMIT_PCT
+        hard_limit_pct = CONTEXT_HARD_LIMIT_PCT
+    
+    soft_limit = int(context_limit * soft_limit_pct / 100)
+    compact_limit = int(context_limit * compact_limit_pct / 100)
+    hard_limit = int(context_limit * hard_limit_pct / 100)
 
     print(f"{Colors.BLUE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━{Colors.NC}")
     print(f"Mode:   {Colors.GREEN}{mode}{Colors.NC}")
