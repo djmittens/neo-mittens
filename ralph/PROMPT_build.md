@@ -81,6 +81,30 @@ ralph issue add "description of issue"
 
 Issues are investigated later in the INVESTIGATE stage.
 
+## Spec Ambiguities - CRITICAL
+
+**Do NOT make design decisions yourself.** If the spec is ambiguous or conflicts with technical constraints:
+
+1. **Log an issue** with the ambiguity:
+   ```
+   ralph issue add "Spec ambiguity: <what the spec says> vs <technical reality>. Options: (1) ... (2) ..."
+   ```
+
+2. **Skip the task** or implement a minimal stub that makes the conflict visible
+
+3. **Do NOT "interpret" the spec** - your interpretation may be wrong
+
+**Examples of spec ambiguities:**
+- Spec requires X but the architecture doesn't support X
+- Spec is vague about behavior in edge case Y
+- Two parts of the spec contradict each other
+- Spec assumes a capability that doesn't exist
+
+**Wrong:** "The pragmatic interpretation is..." then implementing your guess
+**Right:** `ralph issue add "Spec says X but Y prevents this. Need clarification."`
+
+Design decisions belong to the user, not the agent.
+
 ## Progress Reporting
 
 ```

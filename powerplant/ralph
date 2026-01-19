@@ -647,15 +647,6 @@ def task_to_query_dict(t: Task, include_decompose_info: bool = False) -> dict:
             d["kill_reason"] = t.kill_reason
         if t.kill_log:
             d["kill_log"] = t.kill_log
-        else:
-            # Fallback: find log for this task ID (for tasks marked before kill_log was added)
-            log_dir = Path('/tmp/ralph-logs')
-            if log_dir.exists():
-                # Find any log with this task's ID in the filename (new format: STAGE_taskid_*.log)
-                task_logs = sorted(log_dir.glob(f'*_{t.id}_*.log'), reverse=True)
-                if task_logs:
-                    d["kill_log"] = str(task_logs[0])
-                # Don't fallback to random logs - better to have no log than wrong log
     return d
 
 
@@ -1179,6 +1170,30 @@ ralph issue add "description of issue"
 **Do NOT ignore problems** just because your current task passes. If you see something wrong, record it.
 
 Issues are investigated later in the INVESTIGATE stage.
+
+## Spec Ambiguities - CRITICAL
+
+**Do NOT make design decisions yourself.** If the spec is ambiguous or conflicts with technical constraints:
+
+1. **Log an issue** with the ambiguity:
+   ```
+   ralph issue add "Spec ambiguity: <what the spec says> vs <technical reality>. Options: (1) ... (2) ..."
+   ```
+
+2. **Skip the task** or implement a minimal stub that makes the conflict visible
+
+3. **Do NOT "interpret" the spec** - your interpretation may be wrong
+
+**Examples of spec ambiguities:**
+- Spec requires X but the architecture doesn't support X
+- Spec is vague about behavior in edge case Y
+- Two parts of the spec contradict each other
+- Spec assumes a capability that doesn't exist
+
+**Wrong:** "The pragmatic interpretation is..." then implementing your guess
+**Right:** `ralph issue add "Spec says X but Y prevents this. Need clarification."`
+
+Design decisions belong to the user, not the agent.
 
 ## Progress Reporting
 
@@ -3301,13 +3316,12 @@ def cmd_run(config: RalphConfig, mode: str, max_iterations: int, max_cost: float
             }
             if stage == 'DECOMPOSE':
                 # Allow reading ralph logs so decompose can analyze the killed iteration
+                # Logs are in build/ralph-logs/ which is within repo and already readable
                 permission_config["read"] = {
-                    "*": "allow",
-                    "/tmp/ralph-logs/*": "allow"
+                    "*": "allow"
                 }
                 permission_config["external_directory"] = {
-                    "*": "deny",
-                    "/tmp/ralph-logs/*": "allow"
+                    "*": "deny"
                 }
             opencode_env['OPENCODE_PERMISSION'] = json.dumps(permission_config)
             
@@ -3499,13 +3513,11 @@ def cmd_run(config: RalphConfig, mode: str, max_iterations: int, max_cost: float
                 consecutive_failures += 1
                 metrics.failures += 1
 
-            # Log iteration output to /tmp (auto-cleaned on reboot)
-            # Filename format: {stage}_{taskid}_{iteration}_{timestamp}.log
-            # This allows finding the log for a specific task during DECOMPOSE
-            tmp_log_dir = Path('/tmp/ralph-logs')
-            tmp_log_dir.mkdir(parents=True, exist_ok=True)
-            task_suffix = f"_{current_task_id}" if current_task_id else ""
-            log_file = tmp_log_dir / f"{stage}{task_suffix}_{iteration:04d}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log"
+            # Log iteration output to build/ralph-logs/
+            # Filename format: ralph-<timestamp>-<stage>.log per spec
+            config.log_dir.mkdir(parents=True, exist_ok=True)
+            timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+            log_file = config.log_dir / f"ralph-{timestamp}-{stage.lower()}.log"
             try:
                 with log_file.open('w') as f:
                     f.write(f"# Ralph {mode} iteration {iteration} - {stage}\n")
