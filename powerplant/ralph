@@ -504,6 +504,8 @@ def load_state(config: RalphConfig) -> RalphState:
                 state.tasks.append(Task.from_jsonl(d))
             elif t == "issue":
                 state.issues.append(Issue.from_jsonl(d))
+            elif t == "reject":
+                state.tombstones.append(Tombstone.from_jsonl(d))
     except (json.JSONDecodeError, KeyError):
         pass
     
@@ -2393,13 +2395,14 @@ def stream_output(pipe, output_buffer: OutputBuffer, metrics: Metrics,
             print(decoded)
             sys.stdout.flush()
         
-        # Write to FIFO for watchers (try to open/reopen as needed)
+        # Write to FIFO for watchers
+        # Use O_RDWR so we don't block/fail when no reader is connected
         if fifo_path is not None:
             if fifo_fd is None:
                 try:
-                    fifo_fd = os.open(str(fifo_path), os.O_WRONLY | os.O_NONBLOCK)
+                    fifo_fd = os.open(str(fifo_path), os.O_RDWR | os.O_NONBLOCK)
                 except OSError:
-                    pass  # No reader yet or FIFO doesn't exist
+                    pass  # FIFO doesn't exist
             
             if fifo_fd is not None:
                 try:
@@ -2608,6 +2611,17 @@ def cmd_run(config: RalphConfig, mode: str, max_iterations: int, max_cost: float
             # Determine prompt based on current stage
             state = load_state(config)
             stage = state.get_stage()
+            
+            # Check for COMPLETE state - nothing to do
+            if stage == 'COMPLETE' and mode != 'plan':
+                print(f"{Colors.GREEN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━{Colors.NC}")
+                print(f"{Colors.GREEN}COMPLETE{Colors.NC} - No tasks to execute")
+                if state.spec:
+                    print(f"Spec: {state.spec}")
+                print(f"Run 'ralph plan <spec.md>' to add new tasks")
+                print(f"{Colors.GREEN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━{Colors.NC}")
+                break
+            
             prompt_file = get_prompt_for_stage(config, mode, stage)
             
             if not prompt_file.exists():
@@ -2940,6 +2954,8 @@ def cmd_set_spec(config: RalphConfig, spec_file: str):
     state.spec = spec_path.name
     # Clear tasks when switching specs
     state.tasks = []
+    # Clear tombstones - they served their audit purpose for the previous spec
+    state.tombstones = []
     # Keep issues - they may be relevant across specs
     save_state(config, state, f"ralph: set spec {spec_path.name}")
     print(f"{Colors.GREEN}Spec set:{Colors.NC} {spec_path.name}")
@@ -2962,6 +2978,7 @@ def cmd_log(config: RalphConfig, show_all: bool = False, spec_filter: Optional[s
         return
     
     tasks: Dict[str, dict] = {}
+    tombstones: Dict[str, dict] = {}  # task_id -> {commit, date, reason}
     prev_task_ids: set = set()
     
     for line in result.stdout.strip().split('\n'):
@@ -2994,6 +3011,14 @@ def cmd_log(config: RalphConfig, show_all: bool = False, spec_filter: Optional[s
                     task_id = entry.get('id')
                     if task_id:
                         current_tasks[task_id] = entry
+                elif entry.get('t') == 'reject':
+                    task_id = entry.get('id')
+                    if task_id and task_id not in tombstones:
+                        tombstones[task_id] = {
+                            "commit": commit,
+                            "date": date,
+                            "reason": entry.get("reason", "")
+                        }
             except json.JSONDecodeError:
                 continue
         
@@ -3018,7 +3043,8 @@ def cmd_log(config: RalphConfig, show_all: bool = False, spec_filter: Optional[s
                     "author": author,
                     "created": {"commit": commit, "date": date},
                     "done": None,
-                    "accepted": None
+                    "accepted": None,
+                    "rejected": None
                 }
             
             if task_data.get("s") == "d" and task_data.get("done_at"):
@@ -3031,6 +3057,10 @@ def cmd_log(config: RalphConfig, show_all: bool = False, spec_filter: Optional[s
                 tasks[task_id]["accepted"] = {"commit": commit, "date": date}
         
         prev_task_ids = current_task_ids
+    
+    for task_id, tombstone_data in tombstones.items():
+        if task_id in tasks:
+            tasks[task_id]["rejected"] = tombstone_data
     
     task_list = list(tasks.values())
     
