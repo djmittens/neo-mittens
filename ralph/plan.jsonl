@@ -1,1 +1,2 @@
 {"t": "spec", "spec": "ralph-plan-system.md"}
+{"t": "task", "id": "t-ysol", "spec": "ralph-plan-system.md", "name": "Add reject to shell completions for ralph task", "s": "p", "notes": "Update powerplant/ralph-completion.bash lines 42 and 72 to include reject in the task subcommand completions: change \"done add accept\" to \"done add accept reject\"", "accept": "source powerplant/ralph-completion.bash && type _ralph_completions includes reject"}

@@ -2612,15 +2612,22 @@ def cmd_run(config: RalphConfig, mode: str, max_iterations: int, max_cost: float
             state = load_state(config)
             stage = state.get_stage()
             
-            # Check for COMPLETE state - nothing to do
-            if stage == 'COMPLETE' and mode != 'plan':
-                print(f"{Colors.GREEN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━{Colors.NC}")
-                print(f"{Colors.GREEN}COMPLETE{Colors.NC} - No tasks to execute")
-                if state.spec:
-                    print(f"Spec: {state.spec}")
-                print(f"Run 'ralph plan <spec.md>' to add new tasks")
-                print(f"{Colors.GREEN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━{Colors.NC}")
-                break
+            # Check for terminal states in build mode
+            if mode != 'plan':
+                if stage == 'COMPLETE':
+                    print(f"{Colors.GREEN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━{Colors.NC}")
+                    print(f"{Colors.GREEN}COMPLETE{Colors.NC} - No tasks to execute")
+                    if state.spec:
+                        print(f"Spec: {state.spec}")
+                    print(f"Run 'ralph plan <spec.md>' to add new tasks")
+                    print(f"{Colors.GREEN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━{Colors.NC}")
+                    break
+                elif stage == 'PLAN':
+                    print(f"{Colors.YELLOW}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━{Colors.NC}")
+                    print(f"{Colors.YELLOW}NO PLAN{Colors.NC} - No spec configured")
+                    print(f"Run 'ralph plan <spec.md>' to create a plan first")
+                    print(f"{Colors.YELLOW}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━{Colors.NC}")
+                    break
             
             prompt_file = get_prompt_for_stage(config, mode, stage)
             
