@@ -301,23 +301,26 @@ At any point during INVESTIGATE, BUILD, or VALIDATE:
         v
   Monitors for:
   - Timeout (stage exceeds time limit)
-  - Context overrun (context window exceeded)
+  - Context pressure (context window filling up)
         |
         v
-  [Failure detected?]
-   /              \
-  NO              YES
-   |                |
-   v                v
-Continue        INTERRUPT
-stage           current work
-                    |
-                    v
-                Mark current
-                work as REJECTED
-                    |
-                    v
-                DECOMPOSE
+  [Issue detected?]
+   /      |       \
+  NO    CONTEXT   TIMEOUT
+   |    PRESSURE     |
+   v        |        v
+Continue    v     INTERRUPT
+stage    COMPACT  & DECOMPOSE
+            |
+            v
+      [Compaction
+       successful?]
+       /        \
+      YES        NO
+       |          |
+       v          v
+    Continue   INTERRUPT
+    stage      & DECOMPOSE
 ```
 
 ### Timeout Failure
@@ -330,15 +333,86 @@ stage           current work
 3. Mark current task/issue as rejected with `kill_reason: "timeout"`
 4. Transition to DECOMPOSE
 
-### Context Overrun Failure
+### Context Pressure (Tiered Response)
 
-**Trigger**: Context window exceeds threshold (e.g., 90% of max tokens).
+Rather than killing immediately at a threshold, we use a tiered approach to preserve work when possible:
+
+```
+Context Usage:
+  0%  [                                                    ] 100%
+      |         |              |                |          |
+      OK     WARNING        COMPACT           KILL      HARD LIMIT
+             (70%)          (85%)            (95%)
+```
+
+#### Tier 1: Warning (70%)
+
+**Trigger**: Context usage exceeds 70%.
 
 **Response**:
-1. Interrupt current execution
-2. Capture execution log  
+1. Log warning: `[RALPH] Context pressure: 70% - consider wrapping up`
+2. Continue execution
+3. No intervention
+
+#### Tier 2: Compact (85%)
+
+**Trigger**: Context usage exceeds 85%.
+
+**Response**:
+1. Pause current execution
+2. Attempt context compaction:
+   - Summarize conversation history
+   - Preserve: current task, recent actions, key findings
+   - Discard: verbose tool outputs, exploration dead-ends
+3. If compaction succeeds (context < 70% after):
+   - Resume execution with compacted context
+   - Log: `[RALPH] Context compacted: 85% -> {new}%`
+4. If compaction fails (still > 80% after):
+   - Proceed to Tier 3 (Kill)
+
+#### Tier 3: Kill (95%)
+
+**Trigger**: Context usage exceeds 95%, OR compaction failed.
+
+**Response**:
+1. Interrupt current execution immediately
+2. Capture execution log
 3. Mark current task/issue as rejected with `kill_reason: "context_limit"`
 4. Transition to DECOMPOSE
+
+### Compaction Strategy
+
+Compaction summarizes the conversation to free context space while preserving essential information:
+
+**Preserved (high priority):**
+- Current task name, notes, acceptance criteria
+- Files currently being edited (paths + relevant sections)
+- Uncommitted changes (git diff summary)
+- Recent errors or blockers
+- Key decisions made
+
+**Summarized (medium priority):**
+- Exploration results -> "Searched X, found Y relevant files"
+- Tool outputs -> "Ran tests: 5 passed, 2 failed (test_foo, test_bar)"
+- Code reads -> "Read file.ts: exports functions A, B, C"
+
+**Discarded (low priority):**
+- Verbose test output / stack traces (keep summary only)
+- Full file contents already processed
+- Redundant exploration (files read but not relevant)
+- Previous compaction summaries (fold into new summary)
+
+**Compaction output format:**
+```
+=== COMPACTED CONTEXT ===
+Task: <current task>
+Progress: <what's been done>
+Current state: <where we are>
+Key files: <files being modified>
+Blockers: <any issues encountered>
+Next step: <what to do next>
+=== END COMPACTED ===
+```
 
 ## DECOMPOSE Stage
 
@@ -538,14 +612,16 @@ Stages are determined by state:
 ## Configuration
 
 ```jsonl
-{"t": "config", "timeout_ms": 300000, "max_iterations": 10, "context_threshold": 0.9}
+{"t": "config", "timeout_ms": 300000, "max_iterations": 10, "context_warn": 0.7, "context_compact": 0.85, "context_kill": 0.95}
 ```
 
 | Field | Default | Description |
 |-------|---------|-------------|
 | `timeout_ms` | 300000 (5 min) | Max time per stage |
 | `max_iterations` | 10 | Max iterations before abort |
-| `context_threshold` | 0.9 | Context usage % that triggers overrun |
+| `context_warn` | 0.70 | Context % that triggers warning log |
+| `context_compact` | 0.85 | Context % that triggers compaction attempt |
+| `context_kill` | 0.95 | Context % that triggers kill (or compaction failed) |
 
 ## Logging
 
@@ -591,21 +667,37 @@ Iteration 3:
 
 ## Acceptance Criteria
 
+### Core Flow
 - [ ] Rename "build mode" to "construct mode" in CLI and code
 - [ ] Implement three-phase iteration loop: INVESTIGATE -> BUILD -> VALIDATE
 - [ ] BUILD stage processes tasks in priority/dependency order
 - [ ] VALIDATE stage compares done tasks against spec requirements
 - [ ] VALIDATE stage creates new tasks/issues for identified gaps
 - [ ] VALIDATE can accept (clear) or reject (tombstone) individual tasks
+- [ ] Spec acceptance terminates construct mode
+
+### Prioritization
 - [ ] Implement `ralph task prioritize` command with shared logic
 - [ ] PLAN stage calls prioritize at end before transitioning
 - [ ] VALIDATE stage calls prioritize at end before transitioning
 - [ ] Prioritization considers dependencies, complexity, and critical path
+
+### Context Management (Tiered)
+- [ ] Warning at 70% context usage (log only)
+- [ ] Compaction attempt at 85% context usage
+- [ ] Compaction preserves: current task, edited files, uncommitted changes, key decisions
+- [ ] Compaction summarizes: exploration results, tool outputs, code reads
+- [ ] Compaction discards: verbose output, processed file contents, redundant exploration
+- [ ] Kill at 95% context usage OR if compaction fails (still > 80%)
+- [ ] Configuration supports `context_warn`, `context_compact`, `context_kill` thresholds
+
+### Failure Handling
 - [ ] Timeout failure detection interrupts stage and triggers DECOMPOSE
-- [ ] Context overrun detection interrupts stage and triggers DECOMPOSE  
+- [ ] Context kill triggers DECOMPOSE (after compaction fails)
 - [ ] DECOMPOSE stage reads failure log (head/tail only) and creates subtasks
 - [ ] Failed tasks marked with `kill_reason` and `kill_log` fields
 - [ ] DECOMPOSE immediately triggers next iteration (no manual intervention)
-- [ ] Spec acceptance terminates construct mode
-- [ ] Configuration supports timeout, max iterations, context threshold
+
+### Infrastructure
+- [ ] Configuration supports timeout, max iterations
 - [ ] Stage logs written to build/ralph-logs/

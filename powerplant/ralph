@@ -415,6 +415,7 @@ class Task:
     needs_decompose: bool = False  # True if task was killed and needs breakdown
     kill_reason: Optional[str] = None  # "timeout" or "context" if killed
     kill_log: Optional[str] = None  # Path to log file from killed iteration
+    priority: Optional[str] = None  # "high", "medium", or "low"
     
     def to_jsonl(self) -> str:
         d = {"t": "task", "id": self.id, "spec": self.spec, "name": self.name, "s": self.status}
@@ -432,6 +433,8 @@ class Task:
             d["kill"] = self.kill_reason
         if self.kill_log:
             d["kill_log"] = self.kill_log
+        if self.priority:
+            d["priority"] = self.priority
         return json.dumps(d)
     
     @classmethod
@@ -449,7 +452,8 @@ class Task:
             done_at=d.get("done_at"),
             needs_decompose=d.get("decompose", False),
             kill_reason=d.get("kill"),
-            kill_log=d.get("kill_log")
+            kill_log=d.get("kill_log"),
+            priority=d.get("priority")
         )
 
 
