@@ -3392,10 +3392,10 @@ def cmd_run(config: RalphConfig, mode: str, max_iterations: int, max_cost: float
                             pass
                         break
                     
-                    # Soft warning at 50% (only in non-interactive mode)
+                    # Soft warning at 70% (only in non-interactive mode)
                     if not interactive and current_tokens >= soft_limit and not soft_warned[0]:
                         pct = current_tokens / context_limit * 100
-                        print(f"\n{Colors.YELLOW}WARNING: Context at {pct:.0f}% ({current_tokens:,}/{context_limit:,} tokens){Colors.NC}")
+                        print(f"\n{Colors.YELLOW}[RALPH] Context pressure: {pct:.0f}% - consider wrapping up ({current_tokens:,}/{context_limit:,} tokens){Colors.NC}")
                         soft_warned[0] = True
                     
                     time.sleep(check_interval)
