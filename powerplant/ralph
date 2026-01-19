@@ -778,6 +778,11 @@ Merged content:'''
         # Use ephemeral state directory to avoid polluting session list
         opencode_env = os.environ.copy()
         opencode_env['XDG_STATE_HOME'] = '/tmp/ralph-opencode-state'
+        # Deny external directory access to fail fast instead of hanging on permission prompts
+        opencode_env['OPENCODE_PERMISSION'] = json.dumps({
+            "external_directory": "deny",
+            "doom_loop": "deny"
+        })
         
         result = subprocess.run(
             ['opencode', 'run', '--print', merge_prompt],
@@ -2721,6 +2726,11 @@ def cmd_run(config: RalphConfig, mode: str, max_iterations: int, max_cost: float
             # Use ephemeral state directory to avoid polluting session list
             opencode_env = os.environ.copy()
             opencode_env['XDG_STATE_HOME'] = '/tmp/ralph-opencode-state'
+            # Deny external directory access to fail fast instead of hanging on permission prompts
+            opencode_env['OPENCODE_PERMISSION'] = json.dumps({
+                "external_directory": "deny",
+                "doom_loop": "deny"
+            })
             
             # opencode | ralph stream, capture stdout
             opencode_proc = subprocess.Popen(
@@ -2804,18 +2814,34 @@ def cmd_run(config: RalphConfig, mode: str, max_iterations: int, max_cost: float
                     print(f"{Colors.GREEN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━{Colors.NC}")
                     break
 
-            # Check for spec complete signals
+            # Check for spec complete signals - but verify against actual state
             output_text = output_buffer.get_all()
             if '[RALPH] SPEC_COMPLETE' in output_text or '[RALPH] SPEC_VERIFIED' in output_text:
-                # Extract spec name if present
-                spec_match = re.search(r'\[RALPH\] SPEC_(?:COMPLETE|VERIFIED):?\s*(\S+)?', output_text)
-                spec_name = spec_match.group(1) if spec_match and spec_match.group(1) else spec_file or 'unknown'
-                print(f"{Colors.GREEN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━{Colors.NC}")
-                print(f"{Colors.GREEN}SPEC COMPLETE: {spec_name}{Colors.NC}")
-                print(f"Total cost: ${metrics.total_cost:.4f}")
-                print(f"Iterations: {metrics.total_iterations}")
-                print(f"{Colors.GREEN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━{Colors.NC}")
-                break
+                # Reload state to verify - don't trust AI output alone
+                current_state = load_state(config)
+                if current_state.issues:
+                    # AI said complete but there are issues - continue to INVESTIGATE
+                    print(f"{Colors.YELLOW}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━{Colors.NC}")
+                    print(f"{Colors.YELLOW}SPEC_COMPLETE signal ignored - {len(current_state.issues)} issues pending{Colors.NC}")
+                    print(f"{Colors.YELLOW}Continuing to INVESTIGATE stage...{Colors.NC}")
+                    print(f"{Colors.YELLOW}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━{Colors.NC}")
+                    # Don't break - let loop continue
+                elif current_state.pending or current_state.done:
+                    # AI said complete but there are still tasks
+                    print(f"{Colors.YELLOW}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━{Colors.NC}")
+                    print(f"{Colors.YELLOW}SPEC_COMPLETE signal ignored - tasks still pending/done{Colors.NC}")
+                    print(f"{Colors.YELLOW}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━{Colors.NC}")
+                    # Don't break - let loop continue
+                else:
+                    # Actually complete
+                    spec_match = re.search(r'\[RALPH\] SPEC_(?:COMPLETE|VERIFIED):?\s*(\S+)?', output_text)
+                    spec_name = spec_match.group(1) if spec_match and spec_match.group(1) else spec_file or 'unknown'
+                    print(f"{Colors.GREEN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━{Colors.NC}")
+                    print(f"{Colors.GREEN}SPEC COMPLETE: {spec_name}{Colors.NC}")
+                    print(f"Total cost: ${metrics.total_cost:.4f}")
+                    print(f"Iterations: {metrics.total_iterations}")
+                    print(f"{Colors.GREEN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━{Colors.NC}")
+                    break
             
             # Check for plan complete signal - commit the plan
             if '[RALPH] PLAN_COMPLETE' in output_text and mode == 'plan':
@@ -2916,8 +2942,19 @@ def cmd_task(config: RalphConfig, action: str, desc: Optional[str] = None):
         # Find the first pending task and mark it done
         task = pending[0]
         task.status = "d"
-        task.done_at = get_current_commit(config)
-        save_state(config, state, f"ralph: task done - {task.name[:50]}")
+        task.done_at = get_current_commit(config)  # Record current HEAD before committing
+        
+        # Stage all tracked file changes (code changes made by AI)
+        subprocess.run(['git', 'add', '-u'], cwd=config.repo_root, capture_output=True)
+        
+        # Save plan state and stage it
+        save_state(config, state)
+        subprocess.run(['git', 'add', str(config.plan_file)], cwd=config.repo_root, capture_output=True)
+        
+        # Commit all staged changes (code + plan) together
+        commit_msg = f"ralph: task done - {task.name[:50]}"
+        subprocess.run(['git', 'commit', '-m', commit_msg], cwd=config.repo_root, capture_output=True)
+        
         print(f"{Colors.GREEN}Task done:{Colors.NC} {task.name}")
         print(json.dumps(state.to_dict(), indent=2))
         
