@@ -90,6 +90,9 @@ DEFAULT_CONTEXT_WINDOW = 200_000
 # Soft limit: warn when context usage exceeds this percentage
 CONTEXT_SOFT_LIMIT_PCT = 70
 
+# Compact limit: attempt compaction when context usage exceeds this percentage
+CONTEXT_COMPACT_LIMIT_PCT = 85
+
 # Hard limit: kill iteration when context usage exceeds this percentage  
 CONTEXT_HARD_LIMIT_PCT = 95
 
@@ -285,7 +288,7 @@ class Metrics:
 @dataclass
 class IterationKillInfo:
     """Information about why an iteration was killed."""
-    reason: str  # "timeout", "context_limit", or "none"
+    reason: str  # "timeout", "context_limit", "compaction_failed", or "none"
     task_name: Optional[str] = None
     tokens_used: int = 0
     context_limit: int = 0
@@ -318,10 +321,11 @@ class IterationKillInfo:
                 "5. Complete ONE small step, then EXIT to let the next iteration continue",
                 "",
             ])
-        elif self.reason == "context_limit":
+        elif self.reason == "context_limit" or self.reason == "compaction_failed":
             pct_used = (self.tokens_used / self.context_limit * 100) if self.context_limit > 0 else 0
+            reason_text = "compaction failed (still >80% after attempt)" if self.reason == "compaction_failed" else "context overflow"
             lines.extend([
-                f"The previous iteration was KILLED due to context overflow ({self.tokens_used:,} tokens, {pct_used:.0f}% of {self.context_limit:,} limit).",
+                f"The previous iteration was KILLED due to {reason_text} ({self.tokens_used:,} tokens, {pct_used:.0f}% of {self.context_limit:,} limit).",
                 f"Task: {self.task_name or 'unknown'}",
                 "",
                 f"Last activity before kill: {self.last_activity or 'unknown'}",
@@ -3161,6 +3165,7 @@ def cmd_run(config: RalphConfig, mode: str, max_iterations: int, max_cost: float
 
     # Calculate context limits
     soft_limit = int(context_limit * CONTEXT_SOFT_LIMIT_PCT / 100)
+    compact_limit = int(context_limit * CONTEXT_COMPACT_LIMIT_PCT / 100)
     hard_limit = int(context_limit * CONTEXT_HARD_LIMIT_PCT / 100)
 
     print(f"{Colors.BLUE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━{Colors.NC}")
@@ -3178,7 +3183,7 @@ def cmd_run(config: RalphConfig, mode: str, max_iterations: int, max_cost: float
         print(f"Max cost:       ${max_cost}")
     print(f"Max failures:   {max_failures} (circuit breaker)")
     print(f"Timeout:        {iteration_timeout}s per iteration")
-    print(f"Context:        {context_limit:,} tokens (warn: {soft_limit:,}, kill: {hard_limit:,})")
+    print(f"Context:        {context_limit:,} tokens (warn: {soft_limit:,}, compact: {compact_limit:,}, kill: {hard_limit:,})")
     if completion_promise:
         print(f"Completion:     \"{completion_promise}\"")
     print(f"{Colors.BLUE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━{Colors.NC}")
@@ -3331,6 +3336,7 @@ def cmd_run(config: RalphConfig, mode: str, max_iterations: int, max_cost: float
             # Track if we killed this iteration (shared state for monitor thread)
             kill_state = {"killed": False, "reason": "none", "info": None}
             soft_warned = [False]  # Use list for mutability in closure
+            compact_attempted = [False]  # Track if we've attempted compaction at 85%
             reader_stop = threading.Event()
             
             # Start reader thread with stop event for clean shutdown
@@ -3372,12 +3378,40 @@ def cmd_run(config: RalphConfig, mode: str, max_iterations: int, max_cost: float
                             pass
                         break
                     
-                    # Check context hard limit
+                    # Check context hard limit (95%)
                     if current_tokens >= hard_limit:
                         kill_state["killed"] = True
                         kill_state["reason"] = "context_limit"
                         kill_state["info"] = IterationKillInfo(
                             reason="context_limit",
+                            task_name=current_task_name,
+                            tokens_used=current_tokens,
+                            context_limit=context_limit,
+                            elapsed_seconds=elapsed,
+                            last_activity=output_buffer.get_last_activity()
+                        )
+                        # Kill the processes
+                        try:
+                            opencode_proc.terminate()
+                            ralph_stream_proc.terminate()
+                        except:
+                            pass
+                        break
+                    
+                    # Check compact limit (85%) - attempt compaction, then kill if still high
+                    if not interactive and current_tokens >= compact_limit and not compact_attempted[0]:
+                        compact_attempted[0] = True
+                        pct = current_tokens / context_limit * 100
+                        print(f"\n{Colors.YELLOW}[RALPH] Context at {pct:.0f}% - attempting compaction...{Colors.NC}")
+                        
+                        # Compaction cannot be done mid-execution (stdin is DEVNULL).
+                        # Log the attempt and proceed to kill since compaction "fails".
+                        print(f"{Colors.RED}[RALPH] Compaction failed (cannot compact mid-execution) - killing iteration{Colors.NC}")
+                        
+                        kill_state["killed"] = True
+                        kill_state["reason"] = "compaction_failed"
+                        kill_state["info"] = IterationKillInfo(
+                            reason="compaction_failed",
                             task_name=current_task_name,
                             tokens_used=current_tokens,
                             context_limit=context_limit,
