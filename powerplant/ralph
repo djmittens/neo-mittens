@@ -3575,6 +3575,20 @@ def cmd_run(config: RalphConfig, mode: str, max_iterations: int, max_cost: float
                     print(f"{Colors.GREEN}Committed plan with {task_count} tasks{Colors.NC}")
                 break
 
+            # Check for spec incomplete signal (VALIDATE created new tasks)
+            if '[RALPH] SPEC_INCOMPLETE' in output_text:
+                # Auto-prioritize new tasks before next iteration
+                f = io.StringIO()
+                with redirect_stdout(f):
+                    prioritize_result = cmd_task(config, 'prioritize')
+                prioritize_output = f.getvalue().strip()
+                if prioritize_result is None or prioritize_result == 0:
+                    try:
+                        pdata = json.loads(prioritize_output)
+                        print(f"{Colors.GREEN}Auto-prioritized {pdata.get('prioritized', 0)} tasks (high: {pdata.get('high', 0)}, medium: {pdata.get('medium', 0)}, low: {pdata.get('low', 0)}){Colors.NC}")
+                    except json.JSONDecodeError:
+                        print(f"{Colors.GREEN}Auto-prioritized tasks{Colors.NC}")
+
             # Push changes
             try:
                 subprocess.run(['git', 'push', 'origin', branch], 
