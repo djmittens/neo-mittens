@@ -508,35 +508,51 @@ class RalphState:
         return {t.id for t in self.done}
     
     def get_next_task(self) -> Optional[Task]:
-        """Get next task respecting dependencies (topological order)."""
+        """Get next task respecting dependencies, sorted by priority (high > medium > low > None)."""
         done_ids = self.done_ids
-        for task in self.pending:
-            # Task is ready if it has no deps, or all deps are done
+        priority_order = {"high": 0, "medium": 1, "low": 2, None: 3}
+        
+        unblocked = []
+        for idx, task in enumerate(self.pending):
             if not task.deps or all(dep in done_ids for dep in task.deps):
-                return task
-        # No task ready (circular dep or all blocked)
-        return self.pending[0] if self.pending else None
+                unblocked.append((idx, task))
+        
+        if not unblocked:
+            return self.pending[0] if self.pending else None
+        
+        unblocked.sort(key=lambda x: (priority_order.get(x[1].priority, 3), x[0]))
+        return unblocked[0][1]
     
     def get_sorted_pending(self) -> list:
-        """Return pending tasks in topological order."""
+        """Return pending tasks sorted by priority (high > medium > low > None), then by topological order."""
         done_ids = self.done_ids
+        priority_order = {"high": 0, "medium": 1, "low": 2, None: 3}
         result = []
-        remaining = list(self.pending)
+        remaining = [(idx, task) for idx, task in enumerate(self.pending)]
         seen = set()
         
-        # Keep pulling tasks whose deps are satisfied
         changed = True
         while changed and remaining:
             changed = False
-            for task in remaining[:]:
+            ready = []
+            still_waiting = []
+            
+            for idx, task in remaining:
                 if not task.deps or all(dep in done_ids or dep in seen for dep in task.deps):
+                    ready.append((idx, task))
+                else:
+                    still_waiting.append((idx, task))
+            
+            if ready:
+                ready.sort(key=lambda x: (priority_order.get(x[1].priority, 3), x[0]))
+                for idx, task in ready:
                     result.append(task)
                     seen.add(task.id)
-                    remaining.remove(task)
-                    changed = True
+                remaining = still_waiting
+                changed = True
         
-        # Add any remaining tasks (circular deps) at the end
-        result.extend(remaining)
+        remaining.sort(key=lambda x: (priority_order.get(x[1].priority, 3), x[0]))
+        result.extend([task for _, task in remaining])
         return result
     
     def to_dict(self) -> dict:
@@ -2892,7 +2908,9 @@ def _run_with_simple_ui(process, config: RalphConfig, iteration: int,
             dashboard.tokens_out = metrics.total_tokens_out
             dashboard.kills_timeout = metrics.kills_timeout
             dashboard.kills_context = metrics.kills_context
-            dashboard.context_tokens = output_buffer.get_iteration_tokens()
+            ctx = output_buffer.get_iteration_tokens()
+            if ctx > 0:
+                dashboard.context_tokens = ctx  # Only update if we have a value
             dashboard.last_kill_reason = metrics.last_kill_reason
             dashboard.last_kill_activity = metrics.last_kill_activity
             
