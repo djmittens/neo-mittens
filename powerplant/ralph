@@ -4,8 +4,8 @@ Ralph Wiggum - Autonomous AI Development Loop
 https://ghuntley.com/ralph/
 
 Usage: ralph [command] [options]
-  ralph              - Build mode, unlimited iterations
-  ralph 10           - Build mode, max 10 iterations
+  ralph              - Construct mode, unlimited iterations
+  ralph 10           - Construct mode, max 10 iterations
   ralph plan         - Plan mode, generate implementation plan
   ralph init         - Initialize ralph in current repo
   ralph status       - Show current status
@@ -2476,16 +2476,15 @@ def render_dashboard(state: DashboardState, term_width: int, term_height: int) -
     else:
         status_lines.append(f"💰 {Colors.CYAN}Cost:{Colors.NC} --")
     
-    # Show context usage
-    if state.context_tokens > 0:
-        pct = state.context_tokens / state.context_limit * 100
-        if pct >= 90:
-            ctx_color = Colors.RED
-        elif pct >= 70:
-            ctx_color = Colors.YELLOW
-        else:
-            ctx_color = Colors.CYAN
-        status_lines.append(f"🧠 {ctx_color}Context:{Colors.NC} {state.context_tokens:,} / {state.context_limit:,} ({pct:.0f}%)")
+    # Show context usage (always show, even if 0, for debugging)
+    pct = (state.context_tokens / state.context_limit * 100) if state.context_limit > 0 else 0
+    if pct >= 90:
+        ctx_color = Colors.RED
+    elif pct >= 70:
+        ctx_color = Colors.YELLOW
+    else:
+        ctx_color = Colors.CYAN
+    status_lines.append(f"🧠 {ctx_color}Context:{Colors.NC} {state.context_tokens:,} / {state.context_limit:,} ({pct:.0f}%)")
     
     # Show last kill reason if any
     if state.last_kill_reason:
@@ -2756,12 +2755,16 @@ def cmd_stream():
         elif event_type == "step_finish":
             cost = part.get("cost", 0)
             tokens = part.get("tokens", {})
-            input_tokens = tokens.get("input", 0)  # This IS the context window size
+            input_tokens = tokens.get("input", 0)
             output_tokens = tokens.get("output", 0)
+            cache = tokens.get("cache", {})
+            cache_read = cache.get("read", 0)
+            # Context window = new input tokens + cached tokens (both are "in" the context)
+            context_size = input_tokens + cache_read
             # Soft divider
             print(f"\n{C.BRIGHT_BLACK}· · ·{C.RESET}")
             # Metrics line for parse_cost_line() - prefixed with \x00 to filter from display
-            print(f"\x00Cost: ${cost:.4f} | Tokens: {input_tokens}in/{output_tokens}out")
+            print(f"\x00Cost: ${cost:.4f} | Tokens: {context_size}in/{output_tokens}out")
             sys.stdout.flush()
 
 
@@ -4022,8 +4025,8 @@ def main():
 Examples:
   ralph init                    Initialize in current repo
   ralph plan spec.md            Plan tasks for a specific spec
-  ralph                         Build mode, unlimited (Ctrl+C to stop)
-  ralph 10                      Build mode, max 10 iterations
+  ralph construct               Construct mode, unlimited (Ctrl+C to stop)
+  ralph construct 10            Construct mode, max 10 iterations
   ralph query                   Show current state as JSON
   ralph query stage             Show current stage (PLAN/BUILD/VERIFY/etc)
   ralph task done               Mark first pending task as done
@@ -4038,8 +4041,8 @@ Examples:
         '''
     )
     
-    parser.add_argument('command', nargs='?', default='build',
-                       help='Command: init, plan, build, query, task, issue, set-spec, log, status, watch, stream')
+    parser.add_argument('command', nargs='?', default='construct',
+                       help='Command: init, plan, construct, query, task, issue, set-spec, log, status, watch, stream (build is alias for construct)')
     parser.add_argument('arg', nargs='?', default=None,
                        help='Subcommand or argument')
     parser.add_argument('arg2', nargs='?', default=None,
@@ -4070,7 +4073,7 @@ Examples:
     # Handle numeric first arg (e.g., "ralph 10")
     if args.command and args.command.isdigit():
         args.arg = args.command
-        args.command = 'build'
+        args.command = 'construct'
 
     # Parse iterations from arg if numeric
     iterations = 0
@@ -4163,8 +4166,9 @@ Examples:
         cmd_run(config, 'plan', 1, args.max_cost, args.max_failures, 
                 args.completion_promise, args.no_ui, spec_file=spec_path.name,
                 iteration_timeout=args.timeout, context_limit=args.context_limit)
-    elif args.command in ('build', ''):
-        # Ensure plan.jsonl is committed before starting build
+    elif args.command in ('construct', 'build', ''):
+        # Ensure plan.jsonl is committed before starting construct mode
+        # Note: 'build' is supported as an alias for backward compatibility
         if has_uncommitted_plan(config):
             print(f"{Colors.YELLOW}plan.jsonl has uncommitted changes.{Colors.NC}")
             try:
