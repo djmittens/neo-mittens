@@ -1,1 +1,1221 @@
-ralph.py
+#!/usr/bin/env python3
+"""
+Ralph Wiggum - Autonomous AI Development Loop
+https://ghuntley.com/ralph/
+
+Usage: ralph [command] [options]
+  ralph              - Build mode, unlimited iterations
+  ralph 10           - Build mode, max 10 iterations
+  ralph plan         - Plan mode, generate implementation plan
+  ralph init         - Initialize ralph in current repo
+  ralph status       - Show current status
+  ralph watch        - Live dashboard
+  ralph metrics      - Show session metrics
+
+Options:
+  --max-cost N             Stop when cumulative cost exceeds $N
+  --max-failures N         Circuit breaker: stop after N consecutive failures (default: 3)
+  --completion-promise T   Stop when output contains TEXT
+"""
+
+import argparse
+import json
+import os
+import re
+import select
+import stat
+import subprocess
+import sys
+import threading
+import time
+from collections import deque
+from dataclasses import dataclass, field
+from datetime import datetime
+from pathlib import Path
+from typing import Optional
+
+
+# Colors
+class Colors:
+    RED = '\033[0;31m'
+    GREEN = '\033[0;32m'
+    YELLOW = '\033[1;33m'
+    BLUE = '\033[0;34m'
+    CYAN = '\033[0;36m'
+    NC = '\033[0m'  # No Color
+    
+    # Extended colors for Ralph ASCII art
+    BRIGHT_YELLOW = '\033[93m'
+    BRIGHT_RED = '\033[91m'
+    WHITE = '\033[97m'
+    BRIGHT_BLUE = '\033[94m'
+    DIM = '\033[2m'
+    PINK = '\033[38;5;218m'
+    SKIN = '\033[38;5;223m'
+    HAIR = '\033[38;5;220m'
+    SHIRT_BLUE = '\033[38;5;39m'
+    SHIRT_DARK = '\033[38;5;25m'
+
+
+# =============================================================================
+# Ralph Wiggum ASCII Art Options
+# =============================================================================
+# Multiple art styles available. Set RALPH_ART_STYLE environment variable to choose:
+#   - "braille" (default): Braille dot art with colored regions (11 lines)
+#   - "braille_full": Full-body braille art (15 lines, includes legs)
+#   - "blocks": Block art using ░▒▓█ characters (11 lines)
+#   - "minimal": Simple/minimal text art (5 lines)
+#   - "none": No art displayed
+
+def _colorize_art(raw_lines, color_map_list, color_codes):
+    """Build colored art lines from raw art and color map."""
+    result = []
+    for line_idx, line in enumerate(raw_lines):
+        if line_idx >= len(color_map_list):
+            result.append(line + Colors.NC)
+            continue
+        colored_line = ""
+        colors = color_map_list[line_idx]
+        for start, end, color_name in colors:
+            segment = line[start:end]
+            colored_line += f"{color_codes.get(color_name, '')}{segment}"
+        colored_line += Colors.NC
+        result.append(colored_line)
+    return result
+
+# Color code mapping
+_COLOR_CODES = {
+    'HAIR': Colors.HAIR,
+    'SKIN': Colors.SKIN,
+    'SHIRT_BLUE': Colors.SHIRT_BLUE,
+    'NC': Colors.NC,
+}
+
+# -----------------------------------------------------------------------------
+# Style 1: Braille dot art (default) - compact upper body
+# -----------------------------------------------------------------------------
+_BRAILLE_RAW = [
+    "⠀⠀⠀⠀⠀⠀⣀⣤⣶⡶⢛⠟⡿⠻⢻⢿⢶⢦⣄⡀⠀⠀⠀⠀⠀⠀",
+    "⠀⠀⠀⢀⣠⡾⡫⢊⠌⡐⢡⠊⢰⠁⡎⠘⡄⢢⠙⡛⡷⢤⡀⠀⠀⠀",
+    "⠀⠀⢠⢪⢋⡞⢠⠃⡜⠀⠎⠀⠉⠀⠃⠀⠃⠀⠃⠙⠘⠊⢻⠦⠀⠀",
+    "⠀⠀⢇⡇⡜⠀⠜⠀⠁⠀⢀⠔⠉⠉⠑⠄⠀⠀⡰⠊⠉⠑⡄⡇⠀⠀",
+    "⠀⠀⡸⠧⠄⠀⠀⠀⠀⠀⠘⡀⠾⠀⠀⣸⠀⠀⢧⠀⠛⠀⠌⡇⠀⠀",
+    "⠀⠘⡇⠀⠀⠀⠀⠀⠀⠀⠀⠙⠒⠒⠚⠁⠈⠉⠲⡍⠒⠈⠀⡇⠀⠀",
+    "⠀⠀⠈⠲⣆⠀⠀⠀⠀⠀⠀⠀⠀⣠⠖⠉⡹⠤⠶⠁⠀⠀⠀⠈⢦⠀",
+    "⠀⠀⠀⠀⠈⣦⡀⠀⠀⠀⠀⠧⣴⠁⠀⠘⠓⢲⣄⣀⣀⣀⡤⠔⠃⠀",
+    "⠀⠀⠀⠀⣜⠀⠈⠓⠦⢄⣀⣀⣸⠀⠀⠀⠀⠁⢈⢇⣼⡁⠀⠀⠀⠀",
+    "⠀⠀⢠⠒⠛⠲⣄⠀⠀⠀⣠⠏⠀⠉⠲⣤⠀⢸⠋⢻⣤⡛⣄⠀⠀⠀",
+    "⠀⠀⢡⠀⠀⠀⠀⠉⢲⠾⠁⠀⠀⠀⠀⠈⢳⡾⣤⠟⠁⠹⣿⢆⠀⠀",
+]
+_BRAILLE_COLORS = [
+    [(0, 26, 'HAIR')],
+    [(0, 26, 'HAIR')],
+    [(0, 26, 'HAIR')],
+    [(0, 5, 'HAIR'), (5, 22, 'SKIN'), (22, 26, 'HAIR')],
+    [(0, 5, 'HAIR'), (5, 22, 'SKIN'), (22, 26, 'HAIR')],
+    [(0, 3, 'HAIR'), (3, 22, 'SKIN'), (22, 26, 'HAIR')],
+    [(0, 26, 'SKIN')],
+    [(0, 26, 'SKIN')],
+    [(0, 10, 'SKIN'), (10, 17, 'SHIRT_BLUE'), (17, 26, 'SKIN')],
+    [(0, 2, 'SKIN'), (2, 26, 'SHIRT_BLUE')],
+    [(0, 26, 'SHIRT_BLUE')],
+]
+_BRAILLE_WIDTH = 26
+
+# -----------------------------------------------------------------------------
+# Style 2: Full-body braille art (from emojicombos.com)
+# -----------------------------------------------------------------------------
+_BRAILLE_FULL_RAW = [
+    "⠀⠀⠀⠀⠀⠀⣀⣤⣶⡶⢛⠟⡿⠻⢻⢿⢶⢦⣄⡀⠀⠀⠀⠀⠀⠀",
+    "⠀⠀⠀⢀⣠⡾⡫⢊⠌⡐⢡⠊⢰⠁⡎⠘⡄⢢⠙⡛⡷⢤⡀⠀⠀⠀",
+    "⠀⠀⢠⢪⢋⡞⢠⠃⡜⠀⠎⠀⠉⠀⠃⠀⠃⠀⠃⠙⠘⠊⢻⠦⠀⠀",
+    "⠀⠀⢇⡇⡜⠀⠜⠀⠁⠀⢀⠔⠉⠉⠑⠄⠀⠀⡰⠊⠉⠑⡄⡇⠀⠀",
+    "⠀⠀⡸⠧⠄⠀⠀⠀⠀⠀⠘⡀⠾⠀⠀⣸⠀⠀⢧⠀⠛⠀⠌⡇⠀⠀",
+    "⠀⠘⡇⠀⠀⠀⠀⠀⠀⠀⠀⠙⠒⠒⠚⠁⠈⠉⠲⡍⠒⠈⠀⡇⠀⠀",
+    "⠀⠀⠈⠲⣆⠀⠀⠀⠀⠀⠀⠀⠀⣠⠖⠉⡹⠤⠶⠁⠀⠀⠀⠈⢦⠀",
+    "⠀⠀⠀⠀⠈⣦⡀⠀⠀⠀⠀⠧⣴⠁⠀⠘⠓⢲⣄⣀⣀⣀⡤⠔⠃⠀",
+    "⠀⠀⠀⠀⣜⠀⠈⠓⠦⢄⣀⣀⣸⠀⠀⠀⠀⠁⢈⢇⣼⡁⠀⠀⠀⠀",
+    "⠀⠀⢠⠒⠛⠲⣄⠀⠀⠀⣠⠏⠀⠉⠲⣤⠀⢸⠋⢻⣤⡛⣄⠀⠀⠀",
+    "⠀⠀⢡⠀⠀⠀⠀⠉⢲⠾⠁⠀⠀⠀⠀⠈⢳⡾⣤⠟⠁⠹⣿⢆⠀⠀",
+    "⠀⢀⠼⣆⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⣼⠃⠀⠀⠀⠀⠀⠈⣧⠀",
+    "⠀⡏⠀⠘⢦⡀⠀⠀⠀⠀⠀⠀⠀⠀⣠⠞⠁⠀⠀⠀⠀⠀⠀⠀⢸⣧",
+    "⢰⣄⠀⠀⠀⠉⠳⠦⣤⣤⡤⠴⠖⠋⠁⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⢯",
+    "⢸⣉⠉⠓⠲⢦⣤⣄⣀⣀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⢀⣀⣀⣀⣠⣼",
+]
+_BRAILLE_FULL_COLORS = [
+    [(0, 26, 'HAIR')],
+    [(0, 26, 'HAIR')],
+    [(0, 26, 'HAIR')],
+    [(0, 5, 'HAIR'), (5, 22, 'SKIN'), (22, 26, 'HAIR')],
+    [(0, 5, 'HAIR'), (5, 22, 'SKIN'), (22, 26, 'HAIR')],
+    [(0, 3, 'HAIR'), (3, 22, 'SKIN'), (22, 26, 'HAIR')],
+    [(0, 26, 'SKIN')],
+    [(0, 26, 'SKIN')],
+    [(0, 10, 'SKIN'), (10, 17, 'SHIRT_BLUE'), (17, 26, 'SKIN')],
+    [(0, 2, 'SKIN'), (2, 26, 'SHIRT_BLUE')],
+    [(0, 26, 'SHIRT_BLUE')],
+    [(0, 26, 'SHIRT_BLUE')],
+    [(0, 26, 'SHIRT_BLUE')],
+    [(0, 26, 'SHIRT_BLUE')],
+    [(0, 26, 'SHIRT_BLUE')],
+]
+_BRAILLE_FULL_WIDTH = 30
+
+# -----------------------------------------------------------------------------
+# Style 3: Block art (using ░▒▓█ characters)
+# -----------------------------------------------------------------------------
+_BLOCKS_RAW = [
+    "   ▓░  ▓  ░▓   ",
+    "  ▓▓▓▓▓▓▓▓▓▓▓  ",
+    " ▓▓▒▒▒▒▒▒▒▒▒▓▓ ",
+    " ▓▒▒▒▒▒▒▒▒▒▒▒▓ ",
+    " ▓▒ ●▒▒▒▒▒● ▒▓ ",
+    " ▓▒▒▒▒ o ▒▒▒▒▓ ",
+    " ▓▒▒ ~~~~~ ▒▒▓ ",
+    " ▓▒▒▒▒▒▒▒▒▒▒▒▓ ",
+    "  ▓▓▒▒▒▒▒▒▒▓▓  ",
+    "   ███████████ ",
+    "   █████████   ",
+]
+_BLOCKS_COLORS = [
+    [(0, 15, 'HAIR')],                                           # hair spikes
+    [(0, 15, 'HAIR')],                                           # hair band
+    [(0, 3, 'HAIR'), (3, 12, 'SKIN'), (12, 15, 'HAIR')],         # forehead
+    [(0, 2, 'HAIR'), (2, 13, 'SKIN'), (13, 15, 'HAIR')],         # face
+    [(0, 2, 'HAIR'), (2, 13, 'SKIN'), (13, 15, 'HAIR')],         # eyes
+    [(0, 2, 'HAIR'), (2, 13, 'SKIN'), (13, 15, 'HAIR')],         # nose
+    [(0, 2, 'HAIR'), (2, 13, 'SKIN'), (13, 15, 'HAIR')],         # mouth
+    [(0, 2, 'HAIR'), (2, 13, 'SKIN'), (13, 15, 'HAIR')],         # chin
+    [(0, 3, 'HAIR'), (3, 12, 'SKIN'), (12, 15, 'HAIR')],         # jaw
+    [(0, 15, 'SHIRT_BLUE')],                                     # shirt
+    [(0, 15, 'SHIRT_BLUE')],                                     # shirt
+]
+_BLOCKS_WIDTH = 18
+
+# -----------------------------------------------------------------------------
+# Style 4: Minimal text art
+# -----------------------------------------------------------------------------
+_MINIMAL_RAW = [
+    f"{Colors.HAIR}  .-~~~-.  {Colors.NC}",
+    f"{Colors.HAIR} /  {Colors.SKIN}o o{Colors.HAIR}  \\ {Colors.NC}",
+    f"{Colors.SKIN}|    <    |{Colors.NC}",
+    f"{Colors.SKIN} \\  ===  / {Colors.NC}",
+    f"{Colors.SHIRT_BLUE}  '-----'  {Colors.NC}",
+]
+_MINIMAL_COLORS = []  # Pre-colored
+_MINIMAL_WIDTH = 14
+
+# -----------------------------------------------------------------------------
+# Build the active art based on environment variable
+# -----------------------------------------------------------------------------
+def _get_ralph_art():
+    """Get Ralph art based on RALPH_ART_STYLE environment variable."""
+    style = os.environ.get('RALPH_ART_STYLE', 'braille').lower()
+    
+    if style == 'none':
+        return [], 0
+    elif style == 'braille_full':
+        return _colorize_art(_BRAILLE_FULL_RAW, _BRAILLE_FULL_COLORS, _COLOR_CODES), _BRAILLE_FULL_WIDTH
+    elif style == 'blocks':
+        return _colorize_art(_BLOCKS_RAW, _BLOCKS_COLORS, _COLOR_CODES), _BLOCKS_WIDTH
+    elif style == 'minimal':
+        return _MINIMAL_RAW, _MINIMAL_WIDTH  # Already colored
+    else:  # default: braille
+        return _colorize_art(_BRAILLE_RAW, _BRAILLE_COLORS, _COLOR_CODES), _BRAILLE_WIDTH
+
+RALPH_ART, RALPH_WIDTH = _get_ralph_art()
+
+
+@dataclass
+class Metrics:
+    total_cost: float = 0.0
+    total_iterations: int = 0
+    total_tokens_in: int = 0
+    total_tokens_out: int = 0
+    failures: int = 0
+    successes: int = 0
+    started_at: Optional[str] = None
+
+    def save(self, path: Path):
+        path.write_text(json.dumps(self.__dict__, indent=2))
+
+    @classmethod
+    def load(cls, path: Path) -> 'Metrics':
+        if path.exists():
+            try:
+                data = json.loads(path.read_text())
+                return cls(**data)
+            except (json.JSONDecodeError, TypeError):
+                pass
+        return cls()
+
+
+@dataclass
+class RalphConfig:
+    repo_root: Path
+    ralph_dir: Path
+    log_dir: Path
+    prompt_plan: Path
+    prompt_build: Path
+    impl_plan: Path
+    specs_dir: Path
+    metrics_file: Path
+    output_fifo: Path
+
+    @classmethod
+    def from_repo(cls, repo_root: Path) -> 'RalphConfig':
+        ralph_dir = repo_root / 'ralph'
+        log_dir = repo_root / 'build' / 'ralph-logs'
+        return cls(
+            repo_root=repo_root,
+            ralph_dir=ralph_dir,
+            log_dir=log_dir,
+            prompt_plan=ralph_dir / 'PROMPT_plan.md',
+            prompt_build=ralph_dir / 'PROMPT_build.md',
+            impl_plan=ralph_dir / 'IMPLEMENTATION_PLAN.md',
+            specs_dir=ralph_dir / 'specs',
+            metrics_file=log_dir / 'metrics.json',
+            output_fifo=log_dir / 'output.fifo',
+        )
+
+
+def find_repo_root() -> Optional[Path]:
+    """Find git repository root."""
+    dir = Path.cwd()
+    while dir != dir.parent:
+        if (dir / '.git').exists():
+            return dir
+        dir = dir.parent
+    return None
+
+
+def get_current_branch() -> str:
+    """Get current git branch name."""
+    try:
+        result = subprocess.run(
+            ['git', 'branch', '--show-current'],
+            capture_output=True, text=True, check=True
+        )
+        return result.stdout.strip()
+    except subprocess.CalledProcessError:
+        return 'unknown'
+
+
+def count_running_opencode(repo_root: Path) -> int:
+    """Count opencode processes spawned by ralph in this repo."""
+    count = 0
+    try:
+        result = subprocess.run(['pgrep', '-x', 'opencode'], capture_output=True, text=True)
+        for pid in result.stdout.strip().split('\n'):
+            if not pid:
+                continue
+            try:
+                # Check if it's in this repo
+                cwd = Path(f'/proc/{pid}/cwd').resolve()
+                if not str(cwd).startswith(str(repo_root)):
+                    continue
+                
+                # Check if parent is ralph (python running ralph.py)
+                ppid = Path(f'/proc/{pid}/stat').read_text().split()[3]
+                parent_cmdline = Path(f'/proc/{ppid}/cmdline').read_bytes().decode('utf-8', errors='replace')
+                if 'ralph' in parent_cmdline:
+                    count += 1
+            except (OSError, PermissionError, FileNotFoundError):
+                pass
+    except subprocess.CalledProcessError:
+        pass
+    return count
+
+
+def parse_impl_plan(path: Path) -> dict:
+    """Parse implementation plan for task counts."""
+    result = {'pending': 0, 'done': 0, 'next_task': None, 'current_spec': None, 'issues': {'open': 0, 'fixed': 0, 'items': []}}
+    
+    if not path.exists():
+        return result
+    
+    content = path.read_text()
+    
+    # Count tasks
+    result['pending'] = len(re.findall(r'^- \[ \]', content, re.MULTILINE))
+    result['done'] = len(re.findall(r'^- \[x\]', content, re.MULTILINE | re.IGNORECASE))
+    
+    # Get the spec name from "## Spec: filename.md" line
+    spec_match = re.search(r'^## Spec:\s*(.+?)\s*$', content, re.MULTILINE)
+    if spec_match:
+        result['current_spec'] = spec_match.group(1)
+    
+    # Get next task (first uncompleted task)
+    task_match = re.search(r'^- \[ \] (.+)$', content, re.MULTILINE)
+    if task_match:
+        result['next_task'] = task_match.group(1)
+    
+    # Parse discovered issues section
+    issues_match = re.search(r'## Discovered Issues\n(.*?)(?=\n## |\Z)', content, re.DOTALL)
+    if issues_match:
+        issues_section = issues_match.group(1)
+        result['issues']['open'] = len(re.findall(r'^- \[ \]', issues_section, re.MULTILINE))
+        result['issues']['open'] += len(re.findall(r'^- [^\[]', issues_section, re.MULTILINE))
+        result['issues']['fixed'] = len(re.findall(r'^- \[[xX]\]', issues_section, re.MULTILINE))
+        # Extract individual issue items with their status
+        for line in issues_section.split('\n'):
+            line = line.strip()
+            if line.startswith('- [ ] '):
+                result['issues']['items'].append(('open', line[6:]))
+            elif re.match(r'^- \[[xX]\] ', line):
+                result['issues']['items'].append(('fixed', line[6:]))
+            elif line.startswith('- ') and not line.startswith('- ('):
+                # Plain bullet (not placeholder text)
+                result['issues']['items'].append(('open', line[2:]))
+    
+    return result
+
+
+def parse_cost_line(line: str) -> Optional[tuple[float, int, int]]:
+    """Parse a cost line from ralph-stream output.
+    
+    Returns (cost, tokens_in, tokens_out) or None if not a cost line.
+    """
+    match = re.search(r'Cost: \$([0-9.]+) \| Tokens: (\d+)in/(\d+)out', line)
+    if match:
+        return (float(match.group(1)), int(match.group(2)), int(match.group(3)))
+    return None
+
+
+# ============================================================================
+# Commands
+# ============================================================================
+
+def cmd_init(config: RalphConfig):
+    """Initialize ralph in current repo."""
+    if config.ralph_dir.exists():
+        print(f"{Colors.YELLOW}Ralph already initialized in this repo{Colors.NC}")
+        print(f"  {config.ralph_dir}")
+        return
+
+    print(f"{Colors.BLUE}Initializing Ralph in {config.repo_root}{Colors.NC}")
+    
+    config.ralph_dir.mkdir(parents=True, exist_ok=True)
+    config.specs_dir.mkdir(parents=True, exist_ok=True)
+    config.log_dir.mkdir(parents=True, exist_ok=True)
+
+    # Create plan prompt
+    config.prompt_plan.write_text('''\
+0a. Run `git branch --show-current` to identify the current branch.
+0b. Study `ralph/specs/*` to learn the project specifications.
+0c. Study the source code to understand the current implementation.
+
+## Task: Gap Analysis
+
+Compare specs against the CURRENT codebase and generate a fresh task list:
+
+1. Use subagents to study specs and source code thoroughly
+2. For each spec requirement, check if it's already implemented
+3. Create tasks ONLY for what's missing or broken
+4. DO NOT implement anything - planning only
+
+## Updating an Existing Plan
+
+The plan is disposable - regenerate it based on current reality, not the old plan.
+
+If @ralph/IMPLEMENTATION_PLAN.md exists:
+- IGNORE the old pending tasks (they may be stale)
+- KEEP the "## Completed" section as historical record
+- KEEP the "## Discovered Issues" section
+- Generate NEW pending tasks from fresh gap analysis
+
+## Output
+
+Write @ralph/IMPLEMENTATION_PLAN.md with:
+
+```markdown
+# Implementation Plan
+
+**Branch:** `<current branch>`
+**Last updated:** <timestamp>
+
+## Pending Tasks
+
+- [ ] Task 1 (highest priority)
+- [ ] Task 2
+...
+
+## Completed
+
+- [x] Previous completed tasks (preserve from old plan)
+
+## Discovered Issues
+
+- Issues found during implementation (preserve from old plan)
+```
+
+Rules:
+- Each task should be completable in ONE iteration
+- Order by priority (most important first)
+- Be specific - "Add X to Y" not "Improve Z"
+''')
+
+    # Create build prompt
+    config.prompt_build.write_text('''\
+0a. Run `git branch --show-current` to identify the current branch.
+0b. Study `ralph/specs/*` to understand requirements.
+0c. Study @ralph/IMPLEMENTATION_PLAN.md for current task list.
+
+## Branch Awareness
+
+IMPORTANT: Check the **Branch:** field in @ralph/IMPLEMENTATION_PLAN.md.
+- If it matches current branch, continue with tasks.
+- If it doesn't match, the plan is from different work - proceed carefully or run `ralph plan` first.
+- Update **Last updated:** when you complete a task.
+
+## CRITICAL: ONE TASK, THEN EXIT
+
+1. Pick ONE incomplete item from @ralph/IMPLEMENTATION_PLAN.md
+2. Implement it (search first - don't assume not implemented)
+3. Run tests to validate
+4. Update @ralph/IMPLEMENTATION_PLAN.md (mark complete, update timestamp)
+5. `git add -A && git commit && git push`
+6. **EXIT** - the loop restarts you fresh
+
+## Progress Reporting
+
+```
+[RALPH] BRANCH: <current branch>
+[RALPH] === START: <task> ===
+[RALPH] FILE: <file>
+```
+
+```
+[RALPH] === DONE: <task> ===
+[RALPH] RESULT: <summary>
+```
+
+## Issue Handling
+
+1. Document issues in @ralph/IMPLEMENTATION_PLAN.md under "## Discovered Issues"
+2. DO NOT work around problems - fix them or document them
+3. If stuck >5 min, document and EXIT
+
+## Rules
+
+- ONE task, then EXIT
+- Complete implementations only, no stubs
+- No comments in code unless asked
+''')
+
+    # Create implementation plan
+    branch = get_current_branch()
+    config.impl_plan.write_text(f'''\
+# Implementation Plan
+
+**Branch:** `{branch}`
+**Last updated:** {datetime.now().strftime('%Y-%m-%d %H:%M')}
+
+Run `ralph plan` to generate this from specs.
+
+## Pending Tasks
+
+- [ ] (Add tasks here or run `ralph plan`)
+
+## Completed
+
+- (Tasks move here when done)
+
+## Discovered Issues
+
+- (Document issues found during implementation)
+''')
+
+    # Create example spec
+    (config.specs_dir / 'example.md').write_text('''\
+# Example Specification
+
+Delete this file and create your own specs.
+
+## Overview
+
+Describe what you want to build.
+
+## Requirements
+
+- Requirement 1
+- Requirement 2
+
+## Acceptance Criteria
+
+- [ ] Criterion 1
+- [ ] Criterion 2
+''')
+
+    # Add logs to gitignore
+    gitignore = config.repo_root / '.gitignore'
+    if gitignore.exists():
+        content = gitignore.read_text()
+        if 'build/ralph-logs' not in content:
+            with gitignore.open('a') as f:
+                f.write('\n# Ralph logs\nbuild/ralph-logs/\n')
+
+    print(f"{Colors.GREEN}Ralph initialized!{Colors.NC}")
+    print()
+    print("Next steps:")
+    print("  1. Write specs in ralph/specs/")
+    print("  2. Run 'ralph plan' to generate implementation plan")
+    print("  3. Run 'ralph' to start building")
+    print()
+    print("Files created:")
+    print(f"  {config.ralph_dir}/")
+    print("  ├── PROMPT_plan.md    (planning mode prompt)")
+    print("  ├── PROMPT_build.md   (build mode prompt)")
+    print("  ├── IMPLEMENTATION_PLAN.md")
+    print("  └── specs/")
+    print("      └── example.md    (delete and add your own)")
+
+
+def cmd_status(config: RalphConfig):
+    """Show current status."""
+    if not config.ralph_dir.exists():
+        print(f"{Colors.YELLOW}Ralph not initialized. Run 'ralph init' first.{Colors.NC}")
+        return 1
+
+    print(f"{Colors.BLUE}Ralph Status{Colors.NC}")
+    print(f"  Repo: {config.repo_root}")
+    print(f"  Ralph dir: {config.ralph_dir}")
+    print()
+    
+    # Count specs
+    spec_count = len(list(config.specs_dir.glob('*.md'))) if config.specs_dir.exists() else 0
+    print(f"  Specs: {spec_count} files")
+    
+    # Count tasks
+    plan = parse_impl_plan(config.impl_plan)
+    print(f"  Tasks: {plan['pending']} pending, {plan['done']} completed")
+    
+    # Running status
+    running = count_running_opencode(config.repo_root)
+    if running > 0:
+        print(f"  Status: {Colors.GREEN}Running{Colors.NC} ({running} process(es))")
+    else:
+        print(f"  Status: {Colors.YELLOW}Stopped{Colors.NC}")
+    
+    # Metrics
+    print()
+    metrics = Metrics.load(config.metrics_file)
+    print(f"{Colors.CYAN}Session Metrics:{Colors.NC}")
+    print(f"  Cost:       ${metrics.total_cost:.4f}")
+    print(f"  Iterations: {metrics.total_iterations} ({metrics.successes} ok, {metrics.failures} failed)")
+    print(f"  Tokens:     {metrics.total_tokens_in} in / {metrics.total_tokens_out} out")
+
+
+def cmd_metrics(config: RalphConfig):
+    """Show detailed metrics."""
+    if not config.metrics_file.exists():
+        print(f"{Colors.YELLOW}No metrics available. Run 'ralph' first.{Colors.NC}")
+        return 1
+    
+    metrics = Metrics.load(config.metrics_file)
+    print(f"{Colors.BLUE}Ralph Session Metrics{Colors.NC}")
+    print()
+    print(f"  Cost:       ${metrics.total_cost:.4f}")
+    print(f"  Iterations: {metrics.total_iterations}")
+    print(f"  Successes:  {metrics.successes}")
+    print(f"  Failures:   {metrics.failures}")
+    print(f"  Tokens in:  {metrics.total_tokens_in}")
+    print(f"  Tokens out: {metrics.total_tokens_out}")
+    if metrics.started_at:
+        print(f"  Started:    {metrics.started_at}")
+
+
+@dataclass
+class DashboardState:
+    """State for rendering the dashboard."""
+    config: RalphConfig
+    metrics: Metrics
+    branch: str
+    output_lines: list[str] = field(default_factory=list)
+    iteration: Optional[int] = None
+    is_running: bool = False
+    running_count: int = 0
+    footer_text: str = "Watching..."
+
+
+def render_dashboard(state: DashboardState, term_width: int, term_height: int) -> list[str]:
+    """Render the dashboard and return lines."""
+    CLEAR_LINE = '\033[K'
+    
+    def truncate(text, max_width, prefix_len=0):
+        """Truncate text to fit terminal, accounting for ANSI codes."""
+        visible_max = max_width - prefix_len - 3
+        if len(text) > visible_max:
+            return text[:visible_max] + "..."
+        return text
+    
+    lines = []
+    def add(text=''):
+        lines.append(f"{text}{CLEAR_LINE}")
+    
+    header_bar = "═" * (term_width - 1)
+    section_bar = "─" * (term_width - 1)
+    footer_bar = "─" * (term_width - 1)
+    
+    # Header
+    add(f"{Colors.BLUE}{header_bar}{Colors.NC}")
+    if state.iteration is not None:
+        title = f"  RALPH WIGGUM - Iteration {state.iteration} - {datetime.now().strftime('%H:%M:%S')}"
+    else:
+        title = f"  RALPH WIGGUM - {datetime.now().strftime('%H:%M:%S')}"
+    add(f"{Colors.BLUE}{title}{Colors.NC}")
+    add(f"{Colors.BLUE}{header_bar}{Colors.NC}")
+    add()
+    
+    # Parse plan data
+    plan = parse_impl_plan(state.config.impl_plan)
+    
+    # Build status lines to display next to Ralph
+    status_lines = []
+    status_lines.append(f"🌿 {Colors.GREEN}Branch:{Colors.NC} {state.branch}")
+    
+    if state.is_running:
+        if state.running_count > 0:
+            status_lines.append(f"🟢 {Colors.GREEN}Status:{Colors.NC} Running ({state.running_count})")
+        else:
+            status_lines.append(f"🟢 {Colors.GREEN}Status:{Colors.NC} Running")
+    else:
+        status_lines.append(f"🟡 {Colors.YELLOW}Status:{Colors.NC} Stopped")
+    
+    if state.iteration is not None:
+        status_lines.append(f"💰 {Colors.CYAN}Cost:{Colors.NC} ${state.metrics.total_cost:.4f}")
+    else:
+        status_lines.append(f"💰 {Colors.CYAN}Session:{Colors.NC} ${state.metrics.total_cost:.4f} | {state.metrics.total_iterations} iters ({state.metrics.successes} ok, {state.metrics.failures} fail)")
+    
+    status_lines.append(f"")
+    status_lines.append(f"📊 {Colors.GREEN}Progress:{Colors.NC} {plan['done']} done, {plan['pending']} pending")
+    status_lines.append(f"")
+    if plan['current_spec']:
+        status_lines.append(f"📋 {Colors.GREEN}Spec:{Colors.NC} {plan['current_spec']}")
+    status_lines.append(f"🎯 {Colors.GREEN}Task:{Colors.NC}")
+    if plan['next_task']:
+        status_lines.append(f"   {truncate(plan['next_task'], term_width - RALPH_WIDTH - 6, 3)}")
+    else:
+        status_lines.append(f"   (no pending tasks)")
+    
+    # Print Ralph art alongside status info with vertical separator
+    num_art_lines = max(len(RALPH_ART), len(status_lines))
+    for i in range(num_art_lines):
+        ralph_line = RALPH_ART[i] if i < len(RALPH_ART) else " " * RALPH_WIDTH
+        status_line = status_lines[i] if i < len(status_lines) else ""
+        add(f"{ralph_line} {Colors.DIM}│{Colors.NC} {status_line}")
+    
+    # T-join separator (┴) connecting vertical bar to horizontal
+    # The │ is at position RALPH_WIDTH + 1 (after ralph art + space)
+    left_width = RALPH_WIDTH + 1  # Ralph art width + space before │
+    right_width = term_width - left_width - 1  # rest after ┴
+    if right_width < 0:
+        right_width = 0
+    t_join_separator = "─" * left_width + "┴" + "─" * right_width
+    add(f"{Colors.DIM}{t_join_separator}{Colors.NC}")
+    
+    # Discovered Issues
+    total_issues = plan['issues']['open'] + plan['issues']['fixed']
+    if total_issues > 0:
+        add(f"{Colors.YELLOW}Discovered Issues:{Colors.NC} ({plan['issues']['open']} open, {plan['issues']['fixed']} fixed)")
+        for i, (status, text) in enumerate(plan['issues']['items'][:5]):
+            truncated_text = truncate(text, term_width, 8)
+            if status == 'fixed':
+                add(f"  {Colors.GREEN}FIXED{Colors.NC} {truncated_text}")
+            else:
+                add(f"  {Colors.RED}OPEN{Colors.NC}  {truncated_text}")
+        if len(plan['issues']['items']) > 5:
+            add(f"  {Colors.YELLOW}... and {len(plan['issues']['items']) - 5} more{Colors.NC}")
+        add(f"{Colors.DIM}{section_bar}{Colors.NC}")
+    
+    # Latest output - fill rest of screen
+    lines_used = len(lines)
+    available_lines = term_height - lines_used - 3  # Reserve for Output: header + footer (2 lines)
+    add(f"{Colors.GREEN}Output:{Colors.NC}")
+    if available_lines >= 1:
+        display_lines = state.output_lines[-available_lines:] if state.output_lines else []
+        for line in display_lines:
+            add(f"  {truncate(line, term_width, 2)}")
+        for _ in range(available_lines - len(display_lines)):
+            add()
+    
+    add(f"{Colors.BLUE}{footer_bar}{Colors.NC}")
+    # Footer text without newline (handled by caller)
+    lines.append(f"{state.footer_text}{CLEAR_LINE}")
+    
+    return lines
+
+
+def cmd_watch(config: RalphConfig):
+    """Live dashboard showing current status with streamed output."""
+    import shutil
+    
+    HIDE_CURSOR = '\033[?25l'
+    SHOW_CURSOR = '\033[?25h'
+    
+    # Output buffer for lines read from FIFO
+    output_lines: deque = deque(maxlen=100)
+    fifo_fd = None
+    
+    # Hide cursor and clear screen
+    print(HIDE_CURSOR, end='')
+    print('\033[2J\033[H', end='')
+    
+    try:
+        while True:
+            # Try to open FIFO if not open
+            # Use O_RDWR to keep FIFO open even when no writer present
+            if fifo_fd is None and config.output_fifo.exists():
+                try:
+                    fifo_fd = os.open(str(config.output_fifo), os.O_RDWR | os.O_NONBLOCK)
+                except OSError:
+                    pass
+            
+            # Read any available data from FIFO
+            if fifo_fd is not None:
+                try:
+                    while True:
+                        ready, _, _ = select.select([fifo_fd], [], [], 0)
+                        if not ready:
+                            break
+                        data = os.read(fifo_fd, 4096)
+                        if not data:
+                            break  # No data right now
+                        for line in data.decode('utf-8', errors='replace').splitlines():
+                            if line:
+                                output_lines.append(line)
+                except OSError:
+                    if fifo_fd is not None:
+                        try:
+                            os.close(fifo_fd)
+                        except OSError:
+                            pass
+                    fifo_fd = None
+            
+            term_size = shutil.get_terminal_size()
+            term_height = term_size.lines
+            term_width = term_size.columns
+            
+            # Build state for rendering
+            metrics = Metrics.load(config.metrics_file)
+            running = count_running_opencode(config.repo_root)
+            
+            state = DashboardState(
+                config=config,
+                metrics=metrics,
+                branch=get_current_branch(),
+                output_lines=list(output_lines),
+                iteration=None,
+                is_running=running > 0,
+                running_count=running,
+                footer_text="Watching... (Ctrl+C to stop)"
+            )
+            
+            # Render and display
+            print('\033[H', end='')  # Move to top
+            lines = render_dashboard(state, term_width, term_height)
+            for i, line in enumerate(lines):
+                if i < len(lines) - 1:
+                    print(line)
+                else:
+                    print(line, end='', flush=True)
+            print('\033[J', end='', flush=True)  # Clear below
+            
+            time.sleep(0.1)
+    except KeyboardInterrupt:
+        print(SHOW_CURSOR, end='')
+        print("\nStopped watching.")
+    finally:
+        if fifo_fd is not None:
+            os.close(fifo_fd)
+        print('\033[?25h', end='', flush=True)
+
+
+@dataclass 
+class OutputBuffer:
+    """Thread-safe buffer for output lines."""
+    lines: deque = field(default_factory=lambda: deque(maxlen=100))
+    lock: threading.Lock = field(default_factory=threading.Lock)
+    total_output: list = field(default_factory=list)  # For completion promise check
+    
+    def add(self, line: str):
+        with self.lock:
+            self.lines.append(line)
+            self.total_output.append(line)
+    
+    def get_lines(self) -> list[str]:
+        with self.lock:
+            return list(self.lines)
+    
+    def get_all(self) -> str:
+        with self.lock:
+            return '\n'.join(self.total_output)
+
+
+def run_with_live_ui(process, config: RalphConfig, iteration: int,
+                     metrics: Metrics, branch: str, output_buffer: OutputBuffer) -> int:
+    """Run process with live dashboard UI, return exit code."""
+    import shutil
+    
+    HIDE_CURSOR = '\033[?25l'
+    SHOW_CURSOR = '\033[?25h'
+    
+    # Hide cursor and clear screen
+    print(HIDE_CURSOR, end='')
+    print('\033[2J\033[H', end='')
+    
+    try:
+        while process.poll() is None:
+            term_size = shutil.get_terminal_size()
+            term_width = term_size.columns
+            term_height = term_size.lines
+            
+            # Build state for rendering
+            state = DashboardState(
+                config=config,
+                metrics=metrics,
+                branch=branch,
+                output_lines=output_buffer.get_lines(),
+                iteration=iteration,
+                is_running=True,
+                running_count=0,
+                footer_text="Press Ctrl+C to stop"
+            )
+            
+            # Render and display
+            print('\033[H', end='')  # Move to top
+            lines = render_dashboard(state, term_width, term_height)
+            for i, line in enumerate(lines):
+                if i < len(lines) - 1:
+                    print(line)
+                else:
+                    print(line, end='', flush=True)
+            print('\033[J', end='', flush=True)  # Clear below
+            
+            time.sleep(0.1)
+        
+        return process.returncode
+        
+    except KeyboardInterrupt:
+        process.terminate()
+        process.wait()
+        raise
+    finally:
+        print(SHOW_CURSOR, end='', flush=True)
+        print('\033[2J\033[H', end='')
+
+
+def stream_output(pipe, output_buffer: OutputBuffer, metrics: Metrics, 
+                  print_to_stdout: bool = False, fifo_path: Optional[Path] = None):
+    """Read from pipe, update buffer and metrics. Runs in a thread."""
+    fifo_fd = None
+    
+    for line in iter(pipe.readline, b''):
+        decoded = line.decode('utf-8', errors='replace').rstrip('\n')
+        output_buffer.add(decoded)
+        
+        # Parse cost info
+        cost_info = parse_cost_line(decoded)
+        if cost_info:
+            metrics.total_cost = cost_info[0]
+            metrics.total_tokens_in = cost_info[1]
+            metrics.total_tokens_out = cost_info[2]
+        
+        if print_to_stdout:
+            print(decoded)
+            sys.stdout.flush()
+        
+        # Write to FIFO for watchers (try to open/reopen as needed)
+        if fifo_path is not None:
+            if fifo_fd is None:
+                try:
+                    fifo_fd = os.open(str(fifo_path), os.O_WRONLY | os.O_NONBLOCK)
+                except OSError:
+                    pass  # No reader yet
+            
+            if fifo_fd is not None:
+                try:
+                    os.write(fifo_fd, (decoded + '\n').encode('utf-8'))
+                except OSError:
+                    # Broken pipe or no reader - close and retry next time
+                    try:
+                        os.close(fifo_fd)
+                    except OSError:
+                        pass
+                    fifo_fd = None
+    
+    if fifo_fd is not None:
+        try:
+            os.close(fifo_fd)
+        except OSError:
+            pass
+
+
+def cmd_run(config: RalphConfig, mode: str, max_iterations: int, max_cost: float,
+            max_failures: int, completion_promise: str):
+    """Run the main loop."""
+    if not config.ralph_dir.exists():
+        print(f"{Colors.RED}Ralph not initialized. Run 'ralph init' first.{Colors.NC}")
+        return 1
+
+    prompt_file = config.prompt_plan if mode == 'plan' else config.prompt_build
+    if not prompt_file.exists():
+        print(f"{Colors.RED}Prompt file not found: {prompt_file}{Colors.NC}")
+        return 1
+
+    # Initialize metrics
+    metrics = Metrics(started_at=datetime.now().isoformat())
+    config.log_dir.mkdir(parents=True, exist_ok=True)
+    
+    branch = get_current_branch()
+    consecutive_failures = 0
+    
+    # Detect interactive terminal
+    interactive = sys.stdout.isatty()
+    
+    # Create FIFO for watch command
+    if config.output_fifo.exists():
+        if not stat.S_ISFIFO(config.output_fifo.stat().st_mode):
+            config.output_fifo.unlink()  # Remove regular file
+            os.mkfifo(str(config.output_fifo))
+    else:
+        os.mkfifo(str(config.output_fifo))
+
+    print(f"{Colors.BLUE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━{Colors.NC}")
+    print(f"Mode:   {Colors.GREEN}{mode}{Colors.NC}")
+    print(f"Branch: {branch}")
+    if max_iterations > 0:
+        print(f"Max iterations: {max_iterations}")
+    if max_cost > 0:
+        print(f"Max cost:       ${max_cost}")
+    print(f"Circuit breaker: {max_failures} consecutive failures")
+    if completion_promise:
+        print(f"Completion:     \"{completion_promise}\"")
+    print(f"{Colors.BLUE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━{Colors.NC}")
+
+    iteration = 0
+    try:
+        while True:
+            # Check iteration limit
+            if max_iterations > 0 and iteration >= max_iterations:
+                print(f"{Colors.BLUE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━{Colors.NC}")
+                print(f"Reached max iterations: {max_iterations}")
+                print(f"{Colors.CYAN}Total cost: ${metrics.total_cost:.4f}{Colors.NC}")
+                print(f"{Colors.BLUE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━{Colors.NC}")
+                break
+
+            # Check cost limit
+            if max_cost > 0 and metrics.total_cost >= max_cost:
+                print(f"{Colors.YELLOW}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━{Colors.NC}")
+                print(f"{Colors.YELLOW}COST LIMIT REACHED{Colors.NC}")
+                print(f"Spent: ${metrics.total_cost:.4f} / ${max_cost}")
+                print(f"{Colors.YELLOW}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━{Colors.NC}")
+                break
+
+            # Check circuit breaker
+            if consecutive_failures >= max_failures:
+                print(f"{Colors.RED}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━{Colors.NC}")
+                print(f"{Colors.RED}CIRCUIT BREAKER TRIPPED{Colors.NC}")
+                print(f"{consecutive_failures} consecutive failures detected")
+                print(f"{Colors.RED}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━{Colors.NC}")
+                break
+
+            iteration += 1
+            metrics.total_iterations += 1
+            start_time = time.time()
+
+            if not interactive:
+                # Cost display for non-interactive mode
+                if max_cost > 0:
+                    cost_display = f" | Cost: ${metrics.total_cost:.4f}/${max_cost}"
+                else:
+                    cost_display = f" | Cost: ${metrics.total_cost:.4f}"
+
+                print()
+                print(f"{Colors.GREEN}╔═══════════════════════════════════════════════════════════════╗{Colors.NC}")
+                print(f"{Colors.GREEN}║  ITERATION {iteration} - {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}{cost_display}{Colors.NC}")
+                print(f"{Colors.GREEN}╚═══════════════════════════════════════════════════════════════╝{Colors.NC}")
+                print()
+
+            # Run opencode
+            prompt_content = prompt_file.read_text()
+            script_dir = Path(__file__).parent
+            ralph_stream = script_dir / 'ralph-stream'
+            
+            output_buffer = OutputBuffer()
+
+            if ralph_stream.exists() and os.access(ralph_stream, os.X_OK):
+                cmd = ['opencode', 'run', '--model', 'anthropic/claude-opus-4-5', 
+                       '--format', 'json', prompt_content]
+                
+                # opencode | ralph-stream, capture stdout
+                opencode_proc = subprocess.Popen(
+                    cmd,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.STDOUT,
+                    cwd=config.repo_root
+                )
+                
+                ralph_stream_proc = subprocess.Popen(
+                    [str(ralph_stream)],
+                    stdin=opencode_proc.stdout,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.STDOUT,
+                    cwd=config.repo_root
+                )
+                
+                # Allow opencode to receive SIGPIPE if ralph-stream exits
+                if opencode_proc.stdout:
+                    opencode_proc.stdout.close()
+                
+                # Start reader thread
+                reader_thread = threading.Thread(
+                    target=stream_output,
+                    args=(ralph_stream_proc.stdout, output_buffer, metrics, not interactive, config.output_fifo)
+                )
+                reader_thread.daemon = True
+                reader_thread.start()
+                
+                if interactive:
+                    exit_code = run_with_live_ui(ralph_stream_proc, config, iteration, 
+                                                  metrics, branch, output_buffer)
+                else:
+                    ralph_stream_proc.wait()
+                    exit_code = ralph_stream_proc.returncode
+                
+                reader_thread.join(timeout=1.0)
+                opencode_proc.wait()
+            else:
+                # Fallback without streaming filter
+                result = subprocess.run(
+                    ['opencode', 'run', '--model', 'anthropic/claude-opus-4-5', prompt_content],
+                    cwd=config.repo_root,
+                    capture_output=False
+                )
+                exit_code = result.returncode
+
+            duration = int(time.time() - start_time)
+
+            # Track success/failure
+            if exit_code == 0:
+                consecutive_failures = 0
+                metrics.successes += 1
+            else:
+                consecutive_failures += 1
+                metrics.failures += 1
+
+            if not interactive:
+                print()
+                print(f"{Colors.BLUE}┌───────────────────────────────────────────────────────────────┐{Colors.NC}")
+                print(f"{Colors.BLUE}│  Iteration {iteration}: {duration}s (total: ${metrics.total_cost:.4f}){Colors.NC}")
+                print(f"{Colors.BLUE}│  Exit: {exit_code} | Failures: {consecutive_failures}/{max_failures}{Colors.NC}")
+                print(f"{Colors.BLUE}└───────────────────────────────────────────────────────────────┘{Colors.NC}")
+
+            # Save metrics
+            metrics.save(config.metrics_file)
+
+            # Check completion promise
+            if completion_promise:
+                if completion_promise in output_buffer.get_all():
+                    print(f"{Colors.GREEN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━{Colors.NC}")
+                    print(f"{Colors.GREEN}COMPLETION PROMISE DETECTED{Colors.NC}")
+                    print(f"Found: {completion_promise}")
+                    print(f"{Colors.GREEN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━{Colors.NC}")
+                    break
+
+            # Push changes
+            try:
+                subprocess.run(['git', 'push', 'origin', branch], 
+                             capture_output=True, cwd=config.repo_root)
+            except Exception:
+                try:
+                    subprocess.run(['git', 'push', '-u', 'origin', branch],
+                                 capture_output=True, cwd=config.repo_root)
+                except Exception:
+                    pass
+
+            if not interactive:
+                # Show recent commits
+                print()
+                print("Recent commits:")
+                try:
+                    result = subprocess.run(
+                        ['git', '--no-pager', 'log', '--oneline', '-3'],
+                        capture_output=True, text=True, cwd=config.repo_root
+                    )
+                    print(result.stdout)
+                except Exception:
+                    pass
+
+    except KeyboardInterrupt:
+        print(f"\n{Colors.YELLOW}Interrupted by user{Colors.NC}")
+    finally:
+        metrics.save(config.metrics_file)
+        print(f"{Colors.CYAN}Session saved: ${metrics.total_cost:.4f} across {metrics.total_iterations} iterations{Colors.NC}")
+
+
+def main():
+    parser = argparse.ArgumentParser(
+        description='Ralph Wiggum - Autonomous AI Development Loop',
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog='''
+Examples:
+  ralph init                    Initialize in current repo
+  ralph plan                    Generate implementation plan
+  ralph                         Build mode, unlimited (Ctrl+C to stop)
+  ralph 10                      Build mode, max 10 iterations
+  ralph 50 --max-cost 25        Max 50 iterations or $25
+  ralph --completion-promise DONE  Stop when DONE appears
+  ralph watch                   Live progress dashboard
+        '''
+    )
+    
+    parser.add_argument('command', nargs='?', default='build',
+                       help='Command: init, plan, build, status, watch, metrics, help')
+    parser.add_argument('iterations', nargs='?', type=int, default=0,
+                       help='Max iterations (0 = unlimited)')
+    parser.add_argument('--max-cost', type=float, default=0,
+                       help='Stop when cost exceeds $N')
+    parser.add_argument('--max-failures', type=int, default=3,
+                       help='Circuit breaker: stop after N consecutive failures')
+    parser.add_argument('--completion-promise', type=str, default='',
+                       help='Stop when output contains this text')
+
+    args = parser.parse_args()
+
+    # Handle numeric first arg (e.g., "ralph 10")
+    if args.command and args.command.isdigit():
+        args.iterations = int(args.command)
+        args.command = 'build'
+
+    # Find repo
+    repo_root = find_repo_root()
+    if not repo_root:
+        print(f"{Colors.RED}Error: Not in a git repository{Colors.NC}")
+        sys.exit(1)
+
+    config = RalphConfig.from_repo(repo_root)
+
+    # Dispatch command
+    if args.command == 'init':
+        cmd_init(config)
+    elif args.command == 'status':
+        cmd_status(config)
+    elif args.command == 'metrics':
+        cmd_metrics(config)
+    elif args.command == 'watch':
+        cmd_watch(config)
+    elif args.command == 'plan':
+        cmd_run(config, 'plan', 1, args.max_cost, args.max_failures, args.completion_promise)
+    elif args.command in ('build', ''):
+        cmd_run(config, 'build', args.iterations, args.max_cost, args.max_failures, args.completion_promise)
+    elif args.command == 'help':
+        parser.print_help()
+    else:
+        print(f"{Colors.RED}Unknown command: {args.command}{Colors.NC}")
+        parser.print_help()
+        sys.exit(1)
+
+
+if __name__ == '__main__':
+    main()

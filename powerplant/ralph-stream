@@ -1,8 +1,31 @@
 #!/usr/bin/env python3
-"""Filter opencode stream-json output to show human-readable progress."""
+"""Filter opencode stream-json output to show human-readable progress with syntax highlighting."""
 
 import json
 import sys
+
+# ANSI color codes
+class C:
+    RESET = '\033[0m'
+    BOLD = '\033[1m'
+    DIM = '\033[2m'
+    
+    # Colors
+    RED = '\033[31m'
+    GREEN = '\033[32m'
+    YELLOW = '\033[33m'
+    BLUE = '\033[34m'
+    MAGENTA = '\033[35m'
+    CYAN = '\033[36m'
+    WHITE = '\033[37m'
+    
+    # Bright colors
+    BRIGHT_BLACK = '\033[90m'
+    BRIGHT_GREEN = '\033[92m'
+    BRIGHT_YELLOW = '\033[93m'
+    BRIGHT_BLUE = '\033[94m'
+    BRIGHT_MAGENTA = '\033[95m'
+    BRIGHT_CYAN = '\033[96m'
 
 for line in sys.stdin:
     line = line.strip()
@@ -21,53 +44,66 @@ for line in sys.stdin:
     if event_type == "text":
         text = part.get("text", "")
         if text:
-            print(f"\n{text}")
+            # Model's thinking/explanation text - dim white
+            print(f"\n{C.WHITE}{text}{C.RESET}")
             sys.stdout.flush()
     
-    elif event_type == "tool_call":
+    elif event_type == "tool_use":
         tool = part.get("tool", "?")
-        args = part.get("args", {})
+        state = part.get("state", {})
+        args = state.get("input", {})
+        title = state.get("title", "")
+        output = state.get("output", "")
+        
+        # Tool label color based on tool type
         if tool == "bash":
-            cmd = args.get("command", "")[:80]
-            desc = args.get("description", "")
-            print(f"\n[TOOL] Bash: {desc or cmd}")
+            cmd = args.get("command", "")
+            desc = args.get("description", "") or title
+            print(f"\n⚡ {C.BRIGHT_YELLOW}Bash:{C.RESET} {C.DIM}{cmd[:80]}{C.RESET}")
+            if desc:
+                print(f"  {C.YELLOW}{desc}{C.RESET}")
         elif tool == "read":
             path = args.get("filePath", "")
-            print(f"\n[TOOL] Read: {path}")
+            print(f"\n📖 {C.BRIGHT_CYAN}Read:{C.RESET} {C.CYAN}{path}{C.RESET}")
         elif tool == "edit":
             path = args.get("filePath", "")
-            print(f"\n[TOOL] Edit: {path}")
+            print(f"\n✏️  {C.BRIGHT_GREEN}Edit:{C.RESET} {C.GREEN}{path}{C.RESET}")
         elif tool == "write":
             path = args.get("filePath", "")
-            print(f"\n[TOOL] Write: {path}")
+            print(f"\n📝 {C.BRIGHT_GREEN}Write:{C.RESET} {C.GREEN}{path}{C.RESET}")
         elif tool == "grep":
             pattern = args.get("pattern", "")
-            print(f"\n[TOOL] Grep: {pattern}")
+            print(f"\n🔍 {C.BRIGHT_MAGENTA}Grep:{C.RESET} {C.MAGENTA}{pattern}{C.RESET}")
         elif tool == "glob":
             pattern = args.get("pattern", "")
-            print(f"\n[TOOL] Glob: {pattern}")
+            print(f"\n📂 {C.BRIGHT_MAGENTA}Glob:{C.RESET} {C.MAGENTA}{pattern}{C.RESET}")
+        elif tool == "task":
+            desc = args.get("description", "") or title
+            print(f"\n🤖 {C.BRIGHT_BLUE}Task:{C.RESET} {C.BLUE}{desc}{C.RESET}")
         else:
-            print(f"\n[TOOL] {tool}")
-        sys.stdout.flush()
-    
-    elif event_type == "tool_result":
-        result = part.get("result", "")
-        if result:
-            lines = str(result).strip().split('\n')
+            label = f"{tool}: {title}" if title else tool
+            print(f"\n🔧 {C.WHITE}{label}{C.RESET}")
+        
+        # Show brief output - dimmed
+        if output:
+            lines = str(output).strip().split('\n')
             if len(lines) <= 3:
                 for l in lines:
-                    print(f"  {l[:100]}")
+                    print(f"  {C.DIM}{l[:100]}{C.RESET}")
             else:
-                print(f"  ({len(lines)} lines)")
-            sys.stdout.flush()
+                print(f"  {C.DIM}({len(lines)} lines){C.RESET}")
+        sys.stdout.flush()
     
     elif event_type == "step_finish":
         cost = part.get("cost", 0)
         tokens = part.get("tokens", {})
         input_tokens = tokens.get("input", 0)
         output_tokens = tokens.get("output", 0)
-        cache_read = tokens.get("cache", {}).get("read", 0)
-        print(f"\n{'='*60}")
-        print(f"Cost: ${cost:.4f} | Tokens: {input_tokens}in/{output_tokens}out (cache: {cache_read})")
-        print(f"{'='*60}")
+        cache = tokens.get("cache", {})
+        cache_read = cache.get("read", 0)
+        cache_write = cache.get("write", 0)
+        total_input = input_tokens + cache_read
+        print(f"\n{C.BRIGHT_BLACK}{'─'*60}{C.RESET}")
+        print(f"💰 {C.CYAN}Cost:{C.RESET} ${cost:.4f} {C.BRIGHT_BLACK}│{C.RESET} 🎯 {C.CYAN}Tokens:{C.RESET} {total_input}in/{output_tokens}out {C.DIM}(cached: {cache_read}){C.RESET}")
+        print(f"{C.BRIGHT_BLACK}{'─'*60}{C.RESET}")
         sys.stdout.flush()
