@@ -427,24 +427,142 @@ def parse_cost_line(line: str) -> Optional[tuple[float, int, int]]:
 
 
 # ============================================================================
+# Prompt Merge Helpers
+# ============================================================================
+
+def prompt_merge_choice(filename: str) -> str:
+    """Ask user how to handle an existing prompt file.
+    
+    Returns: 'merge', 'keep', or 'override'
+    """
+    print(f"\n{Colors.YELLOW}Found existing: {filename}{Colors.NC}")
+    print("  [1] Auto-merge (use LLM to merge your customizations with new template)")
+    print("  [2] Keep existing (don't modify)")
+    print("  [3] Override with default (replace with new template)")
+    
+    while True:
+        try:
+            choice = input(f"{Colors.CYAN}Choice [1/2/3]: {Colors.NC}").strip()
+            if choice == '1':
+                return 'merge'
+            elif choice == '2':
+                return 'keep'
+            elif choice == '3':
+                return 'override'
+            else:
+                print(f"{Colors.RED}Invalid choice. Enter 1, 2, or 3.{Colors.NC}")
+        except (EOFError, KeyboardInterrupt):
+            print(f"\n{Colors.YELLOW}Keeping existing file.{Colors.NC}")
+            return 'keep'
+
+
+def llm_merge_prompts(existing_content: str, new_template: str, filename: str, repo_root: Path) -> Optional[str]:
+    """Use opencode to intelligently merge existing prompt customizations with new template.
+    
+    Returns merged content, or None if merge failed.
+    """
+    merge_prompt = f'''You are merging two versions of a Ralph prompt file: {filename}
+
+EXISTING (user's customized version):
+```
+{existing_content}
+```
+
+NEW TEMPLATE (latest default):
+```
+{new_template}
+```
+
+Your task:
+1. Identify any customizations the user made to the existing version
+2. Preserve those customizations while incorporating any new features/improvements from the template
+3. If the existing version has the same content as the template, just return the template
+4. Output ONLY the merged content, no explanations or markdown code blocks
+
+Merged content:'''
+
+    try:
+        result = subprocess.run(
+            ['opencode', 'run', '--print', merge_prompt],
+            capture_output=True,
+            text=True,
+            cwd=repo_root,
+            timeout=120
+        )
+        
+        if result.returncode == 0 and result.stdout.strip():
+            merged = result.stdout.strip()
+            # Remove any markdown code block wrappers if present
+            if merged.startswith('```') and merged.endswith('```'):
+                lines = merged.split('\n')
+                merged = '\n'.join(lines[1:-1])
+            return merged
+        else:
+            print(f"{Colors.RED}LLM merge failed: {result.stderr}{Colors.NC}")
+            return None
+    except subprocess.TimeoutExpired:
+        print(f"{Colors.RED}LLM merge timed out{Colors.NC}")
+        return None
+    except FileNotFoundError:
+        print(f"{Colors.RED}opencode not found - cannot perform LLM merge{Colors.NC}")
+        return None
+    except Exception as e:
+        print(f"{Colors.RED}LLM merge error: {e}{Colors.NC}")
+        return None
+
+
+def handle_prompt_file(prompt_path: Path, new_content: str, repo_root: Path) -> None:
+    """Handle creating or updating a prompt file with merge options."""
+    if not prompt_path.exists():
+        # Fresh file, just create it
+        prompt_path.write_text(new_content)
+        return
+    
+    existing_content = prompt_path.read_text()
+    
+    # If content is identical, skip
+    if existing_content.strip() == new_content.strip():
+        print(f"  {Colors.DIM}{prompt_path.name} - unchanged{Colors.NC}")
+        return
+    
+    choice = prompt_merge_choice(prompt_path.name)
+    
+    if choice == 'keep':
+        print(f"  {Colors.YELLOW}Keeping existing {prompt_path.name}{Colors.NC}")
+        return
+    elif choice == 'override':
+        prompt_path.write_text(new_content)
+        print(f"  {Colors.GREEN}Replaced {prompt_path.name} with default template{Colors.NC}")
+        return
+    elif choice == 'merge':
+        print(f"  {Colors.CYAN}Merging {prompt_path.name} with LLM...{Colors.NC}")
+        merged = llm_merge_prompts(existing_content, new_content, prompt_path.name, repo_root)
+        if merged:
+            prompt_path.write_text(merged)
+            print(f"  {Colors.GREEN}Merged {prompt_path.name} successfully{Colors.NC}")
+        else:
+            print(f"  {Colors.YELLOW}Merge failed, keeping existing {prompt_path.name}{Colors.NC}")
+
+
+# ============================================================================
 # Commands
 # ============================================================================
 
 def cmd_init(config: RalphConfig):
-    """Initialize ralph in current repo."""
-    if config.ralph_dir.exists():
-        print(f"{Colors.YELLOW}Ralph already initialized in this repo{Colors.NC}")
-        print(f"  {config.ralph_dir}")
-        return
-
-    print(f"{Colors.BLUE}Initializing Ralph in {config.repo_root}{Colors.NC}")
+    """Initialize ralph in current repo, or update prompts if already initialized."""
+    is_update = config.ralph_dir.exists()
+    
+    if is_update:
+        print(f"{Colors.BLUE}Updating Ralph in {config.repo_root}{Colors.NC}")
+    else:
+        print(f"{Colors.BLUE}Initializing Ralph in {config.repo_root}{Colors.NC}")
     
     config.ralph_dir.mkdir(parents=True, exist_ok=True)
     config.specs_dir.mkdir(parents=True, exist_ok=True)
     config.log_dir.mkdir(parents=True, exist_ok=True)
 
-    # Create plan prompt
-    config.prompt_plan.write_text('''\
+    # Define prompt templates
+    plan_prompt_template = '''\
 0a. Run `git branch --show-current` to identify the current branch.
 0b. Study `ralph/specs/*` to learn the project specifications.
 0c. Study the source code to understand the current implementation.
@@ -501,10 +619,9 @@ Rules:
 - Order by priority (most important first)
 - Be specific - "Add X to Y" not "Improve Z"
 - Group tasks under their source spec using `## Spec: <filename>`
-''')
+'''
 
-    # Create build prompt
-    config.prompt_build.write_text('''\
+    build_prompt_template = '''\
 0a. Run `git branch --show-current` to identify the current branch.
 0b. Study @ralph/IMPLEMENTATION_PLAN.md for current task list.
 
@@ -552,11 +669,20 @@ IMPORTANT: Check the **Branch:** field in @ralph/IMPLEMENTATION_PLAN.md.
 - Complete implementations only, no stubs
 - No comments in code unless asked
 - Only validate against the specific spec being worked on, not all specs
-''')
+'''
 
-    # Create implementation plan
-    branch = get_current_branch()
-    config.impl_plan.write_text(f'''\
+    # Handle prompt files (with merge options if updating)
+    if is_update:
+        handle_prompt_file(config.prompt_plan, plan_prompt_template, config.repo_root)
+        handle_prompt_file(config.prompt_build, build_prompt_template, config.repo_root)
+    else:
+        config.prompt_plan.write_text(plan_prompt_template)
+        config.prompt_build.write_text(build_prompt_template)
+
+    # Create implementation plan only on fresh init (preserve existing)
+    if not is_update or not config.impl_plan.exists():
+        branch = get_current_branch()
+        config.impl_plan.write_text(f'''\
 # Implementation Plan
 
 **Branch:** `{branch}`
@@ -577,8 +703,9 @@ Run `ralph plan` to generate this from specs.
 - (Document issues found during implementation)
 ''')
 
-    # Create example spec
-    (config.specs_dir / 'example.md').write_text('''\
+    # Create example spec only on fresh init (preserve existing specs)
+    if not is_update:
+        (config.specs_dir / 'example.md').write_text('''\
 # Example Specification
 
 Delete this file and create your own specs.
@@ -606,20 +733,32 @@ Describe what you want to build.
             with gitignore.open('a') as f:
                 f.write('\n# Ralph logs\nbuild/ralph-logs/\n')
 
-    print(f"{Colors.GREEN}Ralph initialized!{Colors.NC}")
-    print()
-    print("Next steps:")
-    print("  1. Write specs in ralph/specs/")
-    print("  2. Run 'ralph plan' to generate implementation plan")
-    print("  3. Run 'ralph' to start building")
-    print()
-    print("Files created:")
-    print(f"  {config.ralph_dir}/")
-    print("  ├── PROMPT_plan.md    (planning mode prompt)")
-    print("  ├── PROMPT_build.md   (build mode prompt)")
-    print("  ├── IMPLEMENTATION_PLAN.md")
-    print("  └── specs/")
-    print("      └── example.md    (delete and add your own)")
+    if is_update:
+        print(f"{Colors.GREEN}Ralph updated!{Colors.NC}")
+        print()
+        print("Updated files:")
+        print(f"  {config.ralph_dir}/")
+        print("  ├── PROMPT_plan.md    (planning mode prompt)")
+        print("  └── PROMPT_build.md   (build mode prompt)")
+        print()
+        print("Preserved:")
+        print("  ├── IMPLEMENTATION_PLAN.md")
+        print("  └── specs/*")
+    else:
+        print(f"{Colors.GREEN}Ralph initialized!{Colors.NC}")
+        print()
+        print("Next steps:")
+        print("  1. Write specs in ralph/specs/")
+        print("  2. Run 'ralph plan' to generate implementation plan")
+        print("  3. Run 'ralph' to start building")
+        print()
+        print("Files created:")
+        print(f"  {config.ralph_dir}/")
+        print("  ├── PROMPT_plan.md    (planning mode prompt)")
+        print("  ├── PROMPT_build.md   (build mode prompt)")
+        print("  ├── IMPLEMENTATION_PLAN.md")
+        print("  └── specs/")
+        print("      └── example.md    (delete and add your own)")
 
 
 def cmd_status(config: RalphConfig):
