@@ -775,12 +775,17 @@ Your task:
 Merged content:'''
 
     try:
+        # Use ephemeral state directory to avoid polluting session list
+        opencode_env = os.environ.copy()
+        opencode_env['XDG_STATE_HOME'] = '/tmp/ralph-opencode-state'
+        
         result = subprocess.run(
             ['opencode', 'run', '--print', merge_prompt],
             capture_output=True,
             text=True,
             cwd=repo_root,
-            timeout=120
+            timeout=120,
+            env=opencode_env
         )
         
         if result.returncode == 0 and result.stdout.strip():
@@ -1275,8 +1280,6 @@ def _create_textual_app():
         """Scrollable output log that preserves ANSI colors."""
         
         BINDINGS = [
-            Binding("j", "scroll_down", "Down", show=False),
-            Binding("k", "scroll_up", "Up", show=False),
             Binding("g", "scroll_home", "Top", show=False),
             Binding("G", "scroll_end", "Bottom", show=False),
             Binding("d", "page_down", "Page Down", show=False),
@@ -1288,6 +1291,8 @@ def _create_textual_app():
         def __init__(self, **kwargs):
             super().__init__(highlight=False, markup=False, wrap=False, auto_scroll=True, **kwargs)
             self._follow_mode = True
+            self._pending_scroll = 0  # Accumulate scroll delta
+            self._scroll_timer = None
         
         @property 
         def follow_mode(self) -> bool:
@@ -1303,27 +1308,48 @@ def _create_textual_app():
             if self.follow_mode:
                 self.scroll_end(animate=False)
         
-        def action_scroll_down(self):
-            self.scroll_relative(y=1)
-            self.follow_mode = False
+        def _flush_scroll(self):
+            """Apply accumulated scroll and reset."""
+            if self._pending_scroll != 0:
+                self.scroll_relative(y=self._pending_scroll, animate=False)
+                self.follow_mode = False
+                self._pending_scroll = 0
+            self._scroll_timer = None
         
-        def action_scroll_up(self):
-            self.scroll_relative(y=-1)
-            self.follow_mode = False
+        def on_key(self, event) -> None:
+            """Handle j/k with coalescing for fast key repeat."""
+            if event.key == 'j':
+                self._pending_scroll += 1
+                event.prevent_default()
+                event.stop()
+            elif event.key == 'k':
+                self._pending_scroll -= 1
+                event.prevent_default()
+                event.stop()
+            else:
+                return  # Let other keys bubble up
+            
+            # Schedule flush on next frame if not already scheduled
+            if self._scroll_timer is None:
+                self._scroll_timer = self.set_timer(0.016, self._flush_scroll)  # ~60fps
         
         def action_page_down(self):
-            self.scroll_relative(y=self.size.height // 2)
+            self._flush_scroll()  # Apply any pending scroll first
+            self.scroll_relative(y=self.size.height // 2, animate=False)
             self.follow_mode = False
         
         def action_page_up(self):
-            self.scroll_relative(y=-self.size.height // 2)
+            self._flush_scroll()
+            self.scroll_relative(y=-self.size.height // 2, animate=False)
             self.follow_mode = False
         
         def action_scroll_home(self):
+            self._flush_scroll()
             self.scroll_home(animate=False)
             self.follow_mode = False
         
         def action_scroll_end(self):
+            self._flush_scroll()
             self.scroll_end(animate=False)
             self.follow_mode = True
         
@@ -1781,61 +1807,85 @@ class FallbackDashboard:
         self.is_running = False
         self.running_count = 0
     
-    def get_input(self) -> Optional[str]:
-        """Non-blocking keyboard input."""
+    def get_input(self) -> Optional[str | tuple[str, int]]:
+        """Non-blocking keyboard input with coalescing for scroll keys.
+        
+        Returns:
+            - None if no input
+            - str for single actions ('quit', 'page_down', etc.)
+            - ('scroll', delta) for coalesced j/k scroll (delta can be negative)
+        """
+        scroll_delta = 0
+        last_action = None
+        
         try:
-            ready, _, _ = select.select([sys.stdin], [], [], 0)
-            if ready:
+            # Drain all available input and coalesce scroll keys
+            while True:
+                ready, _, _ = select.select([sys.stdin], [], [], 0)
+                if not ready:
+                    break
+                    
                 ch = sys.stdin.read(1)
                 if ch == 'q' or ch == 'Q':
-                    return 'quit'
+                    return 'quit'  # Quit takes priority, return immediately
                 elif ch == 'j':
-                    return 'scroll_down'
+                    scroll_delta += 1
                 elif ch == 'k':
-                    return 'scroll_up'
+                    scroll_delta -= 1
                 elif ch == 'g':
-                    return 'scroll_top'
+                    last_action = 'scroll_top'
+                    scroll_delta = 0  # Reset scroll delta, jump takes priority
                 elif ch == 'G':
-                    return 'scroll_bottom'
+                    last_action = 'scroll_bottom'
+                    scroll_delta = 0
                 elif ch == 'd':
-                    return 'page_down'
+                    last_action = 'page_down'
                 elif ch == 'u':
-                    return 'page_up'
+                    last_action = 'page_up'
                 elif ch == 'f' or ch == 'F':
-                    return 'toggle_follow'
+                    last_action = 'toggle_follow'
                 elif ch == '\x1b':  # Escape sequence
                     ready2, _, _ = select.select([sys.stdin], [], [], 0.01)
                     if ready2:
                         seq = sys.stdin.read(2)
                         if seq == '[A':
-                            return 'scroll_up'
+                            scroll_delta -= 1
                         elif seq == '[B':
-                            return 'scroll_down'
+                            scroll_delta += 1
                         elif seq == '[5':  # Page up
                             sys.stdin.read(1)  # consume ~
-                            return 'page_up'
+                            last_action = 'page_up'
                         elif seq == '[6':  # Page down
                             sys.stdin.read(1)  # consume ~
-                            return 'page_down'
+                            last_action = 'page_down'
         except:
             pass
-        return None
+        
+        # Return coalesced scroll if any, otherwise last action
+        if scroll_delta != 0:
+            return ('scroll', scroll_delta)
+        return last_action
     
-    def handle_action(self, action: str) -> bool:
-        """Handle a keyboard action. Returns True if should quit."""
+    def handle_action(self, action) -> bool:
+        """Handle a keyboard action. Returns True if should quit.
+        
+        Args:
+            action: Either a string action or ('scroll', delta) tuple for coalesced scroll.
+        """
         import shutil
         self.term_width, self.term_height = shutil.get_terminal_size((80, 24))
         viewport_height = max(1, self.term_height - 20)
         max_offset = max(0, len(self.output_lines) - viewport_height)
         
+        # Handle coalesced scroll tuple
+        if isinstance(action, tuple) and action[0] == 'scroll':
+            delta = action[1]
+            self.scroll_offset = max(0, min(self.scroll_offset + delta, max_offset))
+            self.auto_scroll = (self.scroll_offset >= max_offset)
+            return False
+        
         if action == 'quit':
             return True
-        elif action == 'scroll_down':
-            self.scroll_offset = min(self.scroll_offset + 1, max_offset)
-            self.auto_scroll = (self.scroll_offset >= max_offset)
-        elif action == 'scroll_up':
-            self.scroll_offset = max(self.scroll_offset - 1, 0)
-            self.auto_scroll = False
         elif action == 'scroll_top':
             self.scroll_offset = 0
             self.auto_scroll = False
@@ -2242,9 +2292,10 @@ def cmd_stream():
             cache = tokens.get("cache", {})
             cache_read = cache.get("read", 0)
             total_input = input_tokens + cache_read
-            print(f"\n{C.BRIGHT_BLACK}{'─'*60}{C.RESET}")
-            print(f"💰 {C.CYAN}Cost:{C.RESET} ${cost:.4f} {C.BRIGHT_BLACK}|{C.RESET} {C.CYAN}Tokens:{C.RESET} {total_input}in/{output_tokens}out {C.DIM}(cached: {cache_read}){C.RESET}")
-            print(f"{C.BRIGHT_BLACK}{'─'*60}{C.RESET}")
+            # Soft divider
+            print(f"\n{C.BRIGHT_BLACK}· · ·{C.RESET}")
+            # Metrics line for parse_cost_line() - prefixed with \x00 to filter from display
+            print(f"\x00Cost: ${cost:.4f} | Tokens: {total_input}in/{output_tokens}out")
             sys.stdout.flush()
 
 
@@ -2395,14 +2446,19 @@ def stream_output(pipe, output_buffer: OutputBuffer, metrics: Metrics,
     
     for line in iter(pipe.readline, b''):
         decoded = line.decode('utf-8', errors='replace').rstrip('\n')
-        output_buffer.add(decoded)
         
-        # Parse cost info
+        # Parse cost info (before filtering - metrics lines start with \x00)
         cost_info = parse_cost_line(decoded)
         if cost_info:
             metrics.total_cost = cost_info[0]
             metrics.total_tokens_in = cost_info[1]
             metrics.total_tokens_out = cost_info[2]
+        
+        # Filter out hidden metrics lines (prefixed with \x00) from display
+        if decoded.startswith('\x00'):
+            continue
+        
+        output_buffer.add(decoded)
         
         if print_to_stdout:
             print(decoded)
@@ -2662,12 +2718,17 @@ def cmd_run(config: RalphConfig, mode: str, max_iterations: int, max_cost: float
             cmd = ['opencode', 'run', '--model', 'anthropic/claude-opus-4-5', 
                    '--format', 'json', prompt_content]
             
+            # Use ephemeral state directory to avoid polluting session list
+            opencode_env = os.environ.copy()
+            opencode_env['XDG_STATE_HOME'] = '/tmp/ralph-opencode-state'
+            
             # opencode | ralph stream, capture stdout
             opencode_proc = subprocess.Popen(
                 cmd,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
-                cwd=config.repo_root
+                cwd=config.repo_root,
+                env=opencode_env
             )
             
             ralph_stream_proc = subprocess.Popen(
