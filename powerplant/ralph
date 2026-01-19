@@ -554,16 +554,20 @@ def check_unfinished_tasks(config: RalphConfig, new_spec: str) -> bool:
         return True
     
     current_spec = state.spec or "unknown"
-    if current_spec == new_spec:
-        return True
-    
     pending_tasks = state.pending
     done_tasks = state.done
     
     if not pending_tasks and not done_tasks:
         return True
     
-    print(f"{Colors.YELLOW}Found unfinished tasks from spec '{current_spec}':{Colors.NC}")
+    # Different messaging for same spec vs different spec
+    same_spec = (current_spec == new_spec)
+    
+    if same_spec:
+        print(f"{Colors.YELLOW}Found existing tasks for spec '{current_spec}':{Colors.NC}")
+    else:
+        print(f"{Colors.YELLOW}Found unfinished tasks from spec '{current_spec}':{Colors.NC}")
+    
     for t in pending_tasks:
         print(f"  - [pending] {t.id}: {t.name}")
     for t in done_tasks:
@@ -571,11 +575,20 @@ def check_unfinished_tasks(config: RalphConfig, new_spec: str) -> bool:
     print()
     print("What would you like to do?")
     print("  [c] Cancel existing tasks and start fresh")
+    if same_spec:
+        print("  [k] Keep existing tasks (continue where you left off)")
     print("  [a] Abort (keep current plan)")
     
     try:
-        response = input(f"Choice [c/a]: ").strip().lower()
+        response = input(f"Choice [c/{'k/' if same_spec else ''}a]: ").strip().lower()
         if response == 'c':
+            # Clear tasks before proceeding
+            state.tasks = []
+            save_state(config, state)
+            print(f"{Colors.GREEN}Cleared existing tasks.{Colors.NC}")
+            return True
+        elif response == 'k' and same_spec:
+            print(f"{Colors.GREEN}Keeping existing tasks. Plan will add to them.{Colors.NC}")
             return True
         else:
             print(f"{Colors.YELLOW}Aborted. Keeping current plan.{Colors.NC}")
@@ -2741,6 +2754,19 @@ def cmd_run(config: RalphConfig, mode: str, max_iterations: int, max_cost: float
                 print(f"Total cost: ${metrics.total_cost:.4f}")
                 print(f"Iterations: {metrics.total_iterations}")
                 print(f"{Colors.GREEN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━{Colors.NC}")
+                break
+            
+            # Check for plan complete signal - commit the plan
+            if '[RALPH] PLAN_COMPLETE' in output_text and mode == 'plan':
+                # Commit the plan.jsonl with all added tasks
+                if has_uncommitted_plan(config):
+                    task_count_match = re.search(r'\[RALPH\] PLAN_COMPLETE: Added (\d+) tasks', output_text)
+                    task_count = task_count_match.group(1) if task_count_match else "?"
+                    subprocess.run(['git', 'add', str(config.plan_file)], 
+                                  cwd=config.repo_root, capture_output=True)
+                    subprocess.run(['git', 'commit', '-m', f'ralph: plan {spec_file} ({task_count} tasks)'],
+                                  cwd=config.repo_root, capture_output=True)
+                    print(f"{Colors.GREEN}Committed plan with {task_count} tasks{Colors.NC}")
                 break
 
             # Push changes
