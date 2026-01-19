@@ -26,6 +26,7 @@ Safety Features:
 """
 
 import argparse
+import io
 import json
 import os
 import re
@@ -36,6 +37,7 @@ import sys
 import threading
 import time
 from collections import deque
+from contextlib import redirect_stdout
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -3549,6 +3551,19 @@ def cmd_run(config: RalphConfig, mode: str, max_iterations: int, max_cost: float
             
             # Check for plan complete signal - commit the plan
             if '[RALPH] PLAN_COMPLETE' in output_text and mode == 'plan':
+                # Auto-prioritize tasks before committing
+                # cmd_task outputs JSON, so we capture stdout to show a cleaner message
+                f = io.StringIO()
+                with redirect_stdout(f):
+                    prioritize_result = cmd_task(config, 'prioritize')
+                prioritize_output = f.getvalue().strip()
+                if prioritize_result is None or prioritize_result == 0:
+                    try:
+                        pdata = json.loads(prioritize_output)
+                        print(f"{Colors.GREEN}Auto-prioritized {pdata.get('prioritized', 0)} tasks (high: {pdata.get('high', 0)}, medium: {pdata.get('medium', 0)}, low: {pdata.get('low', 0)}){Colors.NC}")
+                    except json.JSONDecodeError:
+                        print(f"{Colors.GREEN}Auto-prioritized tasks{Colors.NC}")
+                
                 # Commit the plan.jsonl with all added tasks
                 if has_uncommitted_plan(config):
                     task_count_match = re.search(r'\[RALPH\] PLAN_COMPLETE: Added (\d+) tasks', output_text)
