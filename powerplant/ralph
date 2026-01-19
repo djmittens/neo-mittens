@@ -1727,6 +1727,172 @@ def _create_textual_app():
     return RalphDashboard, OutputLog
 
 
+class FallbackDashboard:
+    """Shared ANSI fallback dashboard for watch and build modes."""
+    
+    def __init__(self, config: RalphConfig, iteration: Optional[int] = None):
+        self.config = config
+        self.iteration = iteration
+        self.output_lines: deque = deque(maxlen=2000)
+        self.scroll_offset = 0
+        self.auto_scroll = True
+        self.old_settings = None
+        self.term_width = 80
+        self.term_height = 24
+        
+        # Cached data
+        self.cost = 0.0
+        self.tokens_in = 0
+        self.tokens_out = 0
+        self.branch = ""
+        self.is_running = False
+        self.running_count = 0
+    
+    def get_input(self) -> Optional[str]:
+        """Non-blocking keyboard input."""
+        try:
+            ready, _, _ = select.select([sys.stdin], [], [], 0)
+            if ready:
+                ch = sys.stdin.read(1)
+                if ch == 'q' or ch == 'Q':
+                    return 'quit'
+                elif ch == 'j':
+                    return 'scroll_down'
+                elif ch == 'k':
+                    return 'scroll_up'
+                elif ch == 'g':
+                    return 'scroll_top'
+                elif ch == 'G':
+                    return 'scroll_bottom'
+                elif ch == 'd':
+                    return 'page_down'
+                elif ch == 'u':
+                    return 'page_up'
+                elif ch == 'f' or ch == 'F':
+                    return 'toggle_follow'
+                elif ch == '\x1b':  # Escape sequence
+                    ready2, _, _ = select.select([sys.stdin], [], [], 0.01)
+                    if ready2:
+                        seq = sys.stdin.read(2)
+                        if seq == '[A':
+                            return 'scroll_up'
+                        elif seq == '[B':
+                            return 'scroll_down'
+                        elif seq == '[5':  # Page up
+                            sys.stdin.read(1)  # consume ~
+                            return 'page_up'
+                        elif seq == '[6':  # Page down
+                            sys.stdin.read(1)  # consume ~
+                            return 'page_down'
+        except:
+            pass
+        return None
+    
+    def handle_action(self, action: str) -> bool:
+        """Handle a keyboard action. Returns True if should quit."""
+        import shutil
+        self.term_width, self.term_height = shutil.get_terminal_size((80, 24))
+        viewport_height = max(1, self.term_height - 20)
+        max_offset = max(0, len(self.output_lines) - viewport_height)
+        
+        if action == 'quit':
+            return True
+        elif action == 'scroll_down':
+            self.scroll_offset = min(self.scroll_offset + 1, max_offset)
+            self.auto_scroll = (self.scroll_offset >= max_offset)
+        elif action == 'scroll_up':
+            self.scroll_offset = max(self.scroll_offset - 1, 0)
+            self.auto_scroll = False
+        elif action == 'scroll_top':
+            self.scroll_offset = 0
+            self.auto_scroll = False
+        elif action == 'scroll_bottom':
+            self.scroll_offset = max_offset
+            self.auto_scroll = True
+        elif action == 'page_down':
+            self.scroll_offset = min(self.scroll_offset + viewport_height // 2, max_offset)
+            self.auto_scroll = (self.scroll_offset >= max_offset)
+        elif action == 'page_up':
+            self.scroll_offset = max(self.scroll_offset - viewport_height // 2, 0)
+            self.auto_scroll = False
+        elif action == 'toggle_follow':
+            self.auto_scroll = not self.auto_scroll
+            if self.auto_scroll:
+                self.scroll_offset = max_offset
+        return False
+    
+    def render(self):
+        """Render the dashboard."""
+        import shutil
+        self.term_width, self.term_height = shutil.get_terminal_size((80, 24))
+        viewport_height = max(1, self.term_height - 20)
+        
+        # Auto-scroll if enabled
+        if self.auto_scroll:
+            self.scroll_offset = max(0, len(self.output_lines) - viewport_height)
+        
+        # Get visible output slice
+        visible_output = list(self.output_lines)[self.scroll_offset:self.scroll_offset + viewport_height]
+        
+        # Build scroll indicator
+        if len(self.output_lines) > viewport_height:
+            scroll_info = f"[{self.scroll_offset + 1}-{min(self.scroll_offset + viewport_height, len(self.output_lines))}/{len(self.output_lines)}]"
+            scroll_info += " FOLLOW" if self.auto_scroll else " SCROLL"
+        else:
+            scroll_info = "FOLLOW" if self.auto_scroll else ""
+        
+        state = DashboardState(
+            config=self.config,
+            branch=self.branch,
+            cost=self.cost,
+            tokens_in=self.tokens_in,
+            tokens_out=self.tokens_out,
+            iteration=self.iteration,
+            output_lines=visible_output,
+            is_running=self.is_running,
+            running_count=self.running_count,
+            footer_text=f"q:quit j/k:scroll g/G:top/bot f:follow | {scroll_info}"
+        )
+        
+        # Move cursor to top and render
+        sys.stdout.write('\033[H')
+        lines = render_dashboard(state, self.term_width, self.term_height)
+        sys.stdout.write('\n'.join(lines))
+        sys.stdout.flush()
+    
+    def enter(self):
+        """Enter dashboard mode - set up terminal."""
+        import termios
+        self.old_settings = termios.tcgetattr(sys.stdin)
+        new_settings = termios.tcgetattr(sys.stdin)
+        new_settings[3] = new_settings[3] & ~termios.ECHO
+        new_settings[3] = new_settings[3] & ~termios.ICANON
+        termios.tcsetattr(sys.stdin, termios.TCSANOW, new_settings)
+        
+        sys.stdout.write('\033[?1049h')  # Alternate screen
+        sys.stdout.write('\033[?25l')    # Hide cursor
+        sys.stdout.flush()
+    
+    def exit(self):
+        """Exit dashboard mode - restore terminal."""
+        import termios
+        if self.old_settings:
+            termios.tcsetattr(sys.stdin, termios.TCSADRAIN, self.old_settings)
+        sys.stdout.write('\033[?25h')  # Show cursor
+        sys.stdout.write('\033[?1049l')  # Exit alternate screen
+        sys.stdout.flush()
+    
+    def add_line(self, line: str):
+        """Add an output line."""
+        self.output_lines.append(line)
+        # Parse cost info
+        cost_info = parse_cost_line(line)
+        if cost_info:
+            self.cost = cost_info[0]
+            self.tokens_in = cost_info[1]
+            self.tokens_out = cost_info[2]
+
+
 def render_dashboard(state: DashboardState, term_width: int, term_height: int) -> list[str]:
     """Render the dashboard and return lines."""
     CLEAR_LINE = '\033[K'
@@ -1849,134 +2015,21 @@ def cmd_watch(config: RalphConfig):
 
 
 def _cmd_watch_fallback(config: RalphConfig):
-    """Fallback watch mode without Textual - uses the original ANSI dashboard."""
-    import shutil
-    import tty
-    import termios
-    
-    output_lines: deque = deque(maxlen=1000)
+    """Fallback watch mode without Textual - uses shared FallbackDashboard."""
     fifo_fd = None
-    old_settings = None
-    
-    # Get terminal size
-    term_width, term_height = shutil.get_terminal_size((80, 24))
-    
-    # Scroll state
-    scroll_offset = 0
-    auto_scroll = True
-    
-    # Cached expensive data (refresh every ~1 second, not every frame)
-    cached_cost = 0.0
-    cached_tokens_in = 0
-    cached_tokens_out = 0
-    cached_branch = ""
-    cached_running = 0
+    dashboard = FallbackDashboard(config)
     last_expensive_update = 0
-    EXPENSIVE_UPDATE_INTERVAL = 1.0  # seconds
-    
-    # Track if we need to redraw
+    EXPENSIVE_UPDATE_INTERVAL = 1.0
     needs_redraw = True
     last_output_count = 0
     
-    def get_input() -> Optional[str]:
-        """Non-blocking keyboard input."""
-        try:
-            ready, _, _ = select.select([sys.stdin], [], [], 0)
-            if ready:
-                ch = sys.stdin.read(1)
-                if ch == 'q' or ch == 'Q':
-                    return 'quit'
-                elif ch == 'j':
-                    return 'scroll_down'
-                elif ch == 'k':
-                    return 'scroll_up'
-                elif ch == 'g':
-                    return 'scroll_top'
-                elif ch == 'G':
-                    return 'scroll_bottom'
-                elif ch == 'd':
-                    return 'page_down'
-                elif ch == 'u':
-                    return 'page_up'
-                elif ch == 'f' or ch == 'F':
-                    return 'toggle_follow'
-                elif ch == '\x1b':  # Escape sequence
-                    # Try to read arrow keys
-                    ready2, _, _ = select.select([sys.stdin], [], [], 0.01)
-                    if ready2:
-                        seq = sys.stdin.read(2)
-                        if seq == '[A':
-                            return 'scroll_up'
-                        elif seq == '[B':
-                            return 'scroll_down'
-                        elif seq == '[5':  # Page up
-                            sys.stdin.read(1)  # consume ~
-                            return 'page_up'
-                        elif seq == '[6':  # Page down
-                            sys.stdin.read(1)  # consume ~
-                            return 'page_down'
-        except:
-            pass
-        return None
+    dashboard.branch = get_current_branch()
+    dashboard.running_count = count_running_opencode(config.repo_root)
+    dashboard.is_running = dashboard.running_count > 0
     
-    def do_render():
-        """Render the dashboard."""
-        nonlocal term_width, term_height, scroll_offset
-        
-        # Update terminal size
-        term_width, term_height = shutil.get_terminal_size((80, 24))
-        viewport_height = max(1, term_height - 20)
-        
-        # Auto-scroll if enabled
-        if auto_scroll:
-            scroll_offset = max(0, len(output_lines) - viewport_height)
-        
-        # Get visible output slice
-        visible_output = list(output_lines)[scroll_offset:scroll_offset + viewport_height]
-        
-        # Build scroll indicator for footer
-        if len(output_lines) > viewport_height:
-            scroll_info = f"[{scroll_offset + 1}-{min(scroll_offset + viewport_height, len(output_lines))}/{len(output_lines)}]"
-            if auto_scroll:
-                scroll_info += " FOLLOW"
-            else:
-                scroll_info += " SCROLL"
-        else:
-            scroll_info = "FOLLOW" if auto_scroll else ""
-        
-        state = DashboardState(
-            config=config,
-            branch=cached_branch,
-            cost=cached_cost,
-            tokens_in=cached_tokens_in,
-            tokens_out=cached_tokens_out,
-            output_lines=visible_output,
-            is_running=cached_running > 0,
-            running_count=cached_running,
-            footer_text=f"q:quit j/k:scroll g/G:top/bot f:follow | {scroll_info}"
-        )
-        
-        # Move cursor to top and render
-        sys.stdout.write('\033[H')
-        lines = render_dashboard(state, term_width, term_height)
-        sys.stdout.write('\n'.join(lines))
-        sys.stdout.flush()
+    dashboard.enter()
     
     try:
-        # Set terminal to raw mode for single-key input
-        old_settings = termios.tcgetattr(sys.stdin)
-        tty.setcbreak(sys.stdin.fileno())
-        
-        # Enter alternate screen buffer
-        sys.stdout.write('\033[?1049h')
-        sys.stdout.write('\033[?25l')  # Hide cursor
-        sys.stdout.flush()
-        
-        # Initial expensive data load
-        cached_branch = get_current_branch()
-        cached_running = count_running_opencode(config.repo_root)
-        last_expensive_update = time.time()
-        
         while True:
             now = time.time()
             
@@ -1999,13 +2052,7 @@ def _cmd_watch_fallback(config: RalphConfig):
                             break
                         for line in data.decode('utf-8', errors='replace').splitlines():
                             if line:
-                                output_lines.append(line)
-                                # Parse cost info from stream
-                                cost_info = parse_cost_line(line)
-                                if cost_info:
-                                    cached_cost = cost_info[0]
-                                    cached_tokens_in = cost_info[1]
-                                    cached_tokens_out = cost_info[2]
+                                dashboard.add_line(line)
                 except OSError:
                     if fifo_fd is not None:
                         try:
@@ -2015,72 +2062,38 @@ def _cmd_watch_fallback(config: RalphConfig):
                     fifo_fd = None
             
             # Check if output changed
-            if len(output_lines) != last_output_count:
-                last_output_count = len(output_lines)
+            if len(dashboard.output_lines) != last_output_count:
+                last_output_count = len(dashboard.output_lines)
                 needs_redraw = True
             
-            # Handle keyboard input - this should be INSTANT
-            action = get_input()
-            if action == 'quit':
-                break
-            elif action:
-                # Calculate viewport height
-                viewport_height = max(1, term_height - 20)
-                max_offset = max(0, len(output_lines) - viewport_height)
-                
-                if action == 'scroll_down':
-                    scroll_offset = min(scroll_offset + 1, max_offset)
-                    auto_scroll = (scroll_offset >= max_offset)
-                elif action == 'scroll_up':
-                    scroll_offset = max(scroll_offset - 1, 0)
-                    auto_scroll = False
-                elif action == 'scroll_top':
-                    scroll_offset = 0
-                    auto_scroll = False
-                elif action == 'scroll_bottom':
-                    scroll_offset = max_offset
-                    auto_scroll = True
-                elif action == 'page_down':
-                    scroll_offset = min(scroll_offset + viewport_height // 2, max_offset)
-                    auto_scroll = (scroll_offset >= max_offset)
-                elif action == 'page_up':
-                    scroll_offset = max(scroll_offset - viewport_height // 2, 0)
-                    auto_scroll = False
-                elif action == 'toggle_follow':
-                    auto_scroll = not auto_scroll
-                    if auto_scroll:
-                        scroll_offset = max_offset
-                
-                # Immediate redraw on scroll action
-                do_render()
-                continue  # Skip the sleep, check for more input
+            # Handle keyboard input
+            action = dashboard.get_input()
+            if action:
+                if dashboard.handle_action(action):
+                    break
+                dashboard.render()
+                continue
             
-            # Refresh expensive data periodically (not on every frame)
+            # Refresh expensive data periodically
             if now - last_expensive_update >= EXPENSIVE_UPDATE_INTERVAL:
-                cached_running = count_running_opencode(config.repo_root)
-                # Branch rarely changes, check less often
+                dashboard.running_count = count_running_opencode(config.repo_root)
+                dashboard.is_running = dashboard.running_count > 0
                 if int(now) % 5 == 0:
-                    cached_branch = get_current_branch()
+                    dashboard.branch = get_current_branch()
                 last_expensive_update = now
                 needs_redraw = True
             
             # Render if needed
             if needs_redraw:
-                do_render()
+                dashboard.render()
                 needs_redraw = False
             
-            # Small sleep to prevent CPU spin, but short enough for responsive input
-            time.sleep(0.016)  # ~60fps input polling
+            time.sleep(0.016)
                 
     except KeyboardInterrupt:
         pass
     finally:
-        # Restore terminal
-        if old_settings:
-            termios.tcsetattr(sys.stdin, termios.TCSADRAIN, old_settings)
-        sys.stdout.write('\033[?25h')  # Show cursor
-        sys.stdout.write('\033[?1049l')  # Exit alternate screen
-        sys.stdout.flush()
+        dashboard.exit()
         if fifo_fd is not None:
             try:
                 os.close(fifo_fd)
@@ -2293,38 +2306,38 @@ def run_with_live_ui(process, config: RalphConfig, iteration: int,
 
 def _run_with_simple_ui(process, config: RalphConfig, iteration: int,
                         metrics: Metrics, branch: str, output_buffer: OutputBuffer) -> int:
-    """Simple fallback UI without Textual."""
-    import shutil
-    term_width, term_height = shutil.get_terminal_size((80, 24))
+    """Simple fallback UI without Textual - uses shared FallbackDashboard."""
+    dashboard = FallbackDashboard(config, iteration=iteration)
+    dashboard.branch = branch
+    dashboard.is_running = True
+    last_line_count = 0
     
-    # Enter alternate screen buffer
-    sys.stdout.write('\033[?1049h')
-    sys.stdout.flush()
+    dashboard.enter()
     
     try:
         while process.poll() is None:
-            # Move cursor to top
-            sys.stdout.write('\033[H')
+            # Sync output from buffer to dashboard
+            all_lines = output_buffer.get_lines()
+            for line in all_lines[last_line_count:]:
+                dashboard.add_line(line)
+            last_line_count = len(all_lines)
             
-            # Build and render dashboard
-            state = DashboardState(
-                config=config,
-                branch=branch,
-                cost=metrics.total_cost,
-                tokens_in=metrics.total_tokens_in,
-                tokens_out=metrics.total_tokens_out,
-                iteration=iteration,
-                output_lines=output_buffer.get_lines(),
-                is_running=True,
-                running_count=0,
-                footer_text=""
-            )
+            # Sync metrics
+            dashboard.cost = metrics.total_cost
+            dashboard.tokens_in = metrics.total_tokens_in
+            dashboard.tokens_out = metrics.total_tokens_out
             
-            lines = render_dashboard(state, term_width, term_height)
-            sys.stdout.write('\n'.join(lines))
-            sys.stdout.flush()
+            # Handle keyboard input
+            action = dashboard.get_input()
+            if action:
+                if action == 'quit':
+                    process.terminate()
+                    process.wait()
+                    return process.returncode
+                dashboard.handle_action(action)
             
-            time.sleep(0.1)
+            dashboard.render()
+            time.sleep(0.05)
         
         return process.returncode
         
@@ -2333,9 +2346,7 @@ def _run_with_simple_ui(process, config: RalphConfig, iteration: int,
         process.wait()
         raise
     finally:
-        # Exit alternate screen buffer
-        sys.stdout.write('\033[?1049l')
-        sys.stdout.flush()
+        dashboard.exit()
 
 
 def stream_output(pipe, output_buffer: OutputBuffer, metrics: Metrics, 
