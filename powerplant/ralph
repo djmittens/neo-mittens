@@ -777,11 +777,15 @@ def render_dashboard(state: DashboardState, term_width: int, term_height: int) -
     if total_issues > 0:
         add(f"{Colors.YELLOW}Discovered Issues:{Colors.NC} ({plan['issues']['open']} open, {plan['issues']['fixed']} fixed)")
         for i, (status, text) in enumerate(plan['issues']['items'][:5]):
-            truncated_text = truncate(text, term_width, 8)
+            # Strip **[STATUS]** markers from text (e.g., **[RESOLVED]**, **[OPEN]**)
+            text = re.sub(r'^\*\*\[[A-Z_]+\]\*\*\s*', '', text)
+            # Prefix: "  " (2) + status (4-5) + " " (1) = 7-8 chars
             if status == 'fixed':
-                add(f"  {Colors.GREEN}FIXED{Colors.NC} {truncated_text}")
+                truncated_text = truncate(text, term_width, 9)  # "  FIXED  " = 9
+                add(f"  {Colors.GREEN}FIXED{Colors.NC}  {truncated_text}")
             else:
-                add(f"  {Colors.RED}OPEN{Colors.NC}  {truncated_text}")
+                truncated_text = truncate(text, term_width, 9)  # "  OPEN   " = 9
+                add(f"  {Colors.RED}OPEN{Colors.NC}   {truncated_text}")
         if len(plan['issues']['items']) > 5:
             add(f"  {Colors.YELLOW}... and {len(plan['issues']['items']) - 5} more{Colors.NC}")
         add(f"{Colors.DIM}{section_bar}{Colors.NC}")
