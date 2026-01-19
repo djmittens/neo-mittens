@@ -355,10 +355,25 @@ class Issue:
 
 
 @dataclass
+class Tombstone:
+    id: str  # Task ID that was rejected
+    done_at: str  # Commit hash where task was marked done
+    reason: str  # Why the task was rejected
+    
+    def to_jsonl(self) -> str:
+        return json.dumps({"t": "reject", "id": self.id, "done_at": self.done_at, "reason": self.reason})
+    
+    @classmethod
+    def from_jsonl(cls, d: dict) -> 'Tombstone':
+        return cls(id=d["id"], done_at=d["done_at"], reason=d["reason"])
+
+
+@dataclass
 class RalphState:
     spec: Optional[str] = None
     tasks: list = field(default_factory=list)   # List of Task (both pending and done)
     issues: list = field(default_factory=list)  # List of Issue
+    tombstones: list = field(default_factory=list)  # List of Tombstone
     
     @property
     def pending(self) -> list:
@@ -507,6 +522,9 @@ def save_state(config: RalphConfig, state: RalphState, commit_msg: Optional[str]
     
     for issue in state.issues:
         lines.append(issue.to_jsonl())
+    
+    for tombstone in state.tombstones:
+        lines.append(tombstone.to_jsonl())
     
     config.plan_file.write_text('\n'.join(lines) + '\n' if lines else '')
     
@@ -2839,9 +2857,27 @@ def cmd_task(config: RalphConfig, action: str, desc: Optional[str] = None):
         save_state(config, state)  # No auto-commit, let caller batch
         print(f"{Colors.GREEN}Accepted {count} tasks{Colors.NC}")
         
+    elif action == 'reject':
+        if not desc:
+            print(f"{Colors.RED}Usage: ralph task reject \"reason\"{Colors.NC}")
+            return 1
+        done = state.done
+        if not done:
+            print(f"{Colors.YELLOW}No done tasks to reject{Colors.NC}")
+            return 1
+        task = done[0]
+        tombstone = Tombstone(id=task.id, done_at=task.done_at or "unknown", reason=desc)
+        state.tombstones.append(tombstone)
+        task.status = "p"
+        task.done_at = None
+        save_state(config, state, f"ralph: task reject - {task.name[:50]}")
+        print(f"{Colors.YELLOW}Task rejected:{Colors.NC} {task.name}")
+        print(f"  {Colors.DIM}Reason: {desc}{Colors.NC}")
+        print(json.dumps(state.to_dict(), indent=2))
+        
     else:
         print(f"{Colors.RED}Unknown task action: {action}{Colors.NC}")
-        print("Usage: ralph task [done|add|accept]")
+        print("Usage: ralph task [done|add|accept|reject]")
         return 1
 
 
