@@ -86,10 +86,10 @@ class Colors:
 DEFAULT_CONTEXT_WINDOW = 200_000
 
 # Soft limit: warn when context usage exceeds this percentage
-CONTEXT_SOFT_LIMIT_PCT = 50
+CONTEXT_SOFT_LIMIT_PCT = 70
 
 # Hard limit: kill iteration when context usage exceeds this percentage  
-CONTEXT_HARD_LIMIT_PCT = 80
+CONTEXT_HARD_LIMIT_PCT = 95
 
 # Default iteration timeout in seconds (15 minutes)
 DEFAULT_ITERATION_TIMEOUT = 900
@@ -276,6 +276,8 @@ class Metrics:
     kills_timeout: int = 0
     kills_context: int = 0
     started_at: Optional[str] = None
+    last_kill_reason: str = ""  # "timeout" or "context_limit"
+    last_kill_activity: str = ""  # What agent was doing when killed
 
 
 @dataclass
@@ -1576,6 +1578,8 @@ class DashboardState:
     cost: float = 0.0  # Parsed from stream
     tokens_in: int = 0
     tokens_out: int = 0
+    context_tokens: int = 0  # Current context window size
+    context_limit: int = DEFAULT_CONTEXT_WINDOW
     iteration: Optional[int] = None
     output_lines: list[str] = field(default_factory=list)
     is_running: bool = False
@@ -1586,6 +1590,8 @@ class DashboardState:
     stage: str = ""  # Current stage: PLAN, BUILD, VERIFY, INVESTIGATE, COMPLETE
     kills_timeout: int = 0
     kills_context: int = 0
+    last_kill_reason: str = ""
+    last_kill_activity: str = ""
 
 
 # =============================================================================
@@ -1727,9 +1733,11 @@ def _create_textual_app():
         status_text = reactive("")
         stage_text = reactive("")
         cost_text = reactive("")
+        context_text = reactive("")
         progress_text = reactive("")
         spec_text = reactive("")
         task_text = reactive("")
+        kill_text = reactive("")
         
         def render(self):
             lines = []
@@ -1741,6 +1749,8 @@ def _create_textual_app():
                 lines.append(self.stage_text)
             if self.cost_text:
                 lines.append(self.cost_text)
+            if self.context_text:
+                lines.append(self.context_text)
             lines.append("")
             if self.progress_text:
                 lines.append(self.progress_text)
@@ -1750,6 +1760,9 @@ def _create_textual_app():
             if self.task_text:
                 lines.append(f"[green]Task:[/]")
                 lines.append(f"  {escape(self.task_text)}")
+            if self.kill_text:
+                lines.append("")
+                lines.append(self.kill_text)
             return Text.from_markup('\n'.join(lines))
 
     class IssuesPanel(Static):
@@ -1909,6 +1922,8 @@ def _create_textual_app():
             self._cost = 0.0
             self._tokens_in = 0
             self._tokens_out = 0
+            self._context_tokens = 0
+            self._context_limit = DEFAULT_CONTEXT_WINDOW
             self._branch = ""
             self._is_running = False
             self._running_count = 0
@@ -1919,6 +1934,8 @@ def _create_textual_app():
             self._stop_requested = False
             self._kills_timeout = 0
             self._kills_context = 0
+            self._last_kill_reason = ""
+            self._last_kill_activity = ""
         
         def compose(self) -> ComposeResult:
             # Header
@@ -1999,6 +2016,7 @@ def _create_textual_app():
                                                 self._cost = cost_info[0]
                                                 self._tokens_in = cost_info[1]
                                                 self._tokens_out = cost_info[2]
+                                                self._context_tokens = cost_info[1]  # input tokens = context size
                                             # Post to main thread
                                             self.call_from_thread(self._append_output, line)
                         except OSError:
@@ -2064,6 +2082,27 @@ def _create_textual_app():
                 status.cost_text = f"[cyan]Cost:[/] ${self._cost:.4f}"
             else:
                 status.cost_text = f"[cyan]Cost:[/] --"
+            
+            # Show context usage
+            if self._context_tokens > 0:
+                pct = self._context_tokens / self._context_limit * 100
+                if pct >= 90:
+                    color = "red"
+                elif pct >= 70:
+                    color = "yellow"
+                else:
+                    color = "cyan"
+                status.context_text = f"[{color}]Context:[/] {self._context_tokens:,} / {self._context_limit:,} ({pct:.0f}%)"
+            else:
+                status.context_text = ""
+            
+            # Show last kill reason if any
+            if self._last_kill_reason:
+                status.kill_text = f"[red]Last Kill:[/] {self._last_kill_reason}"
+                if self._last_kill_activity:
+                    status.kill_text += f" @ {self._last_kill_activity}"
+            else:
+                status.kill_text = ""
             
             pending = len(state.pending)
             done = len(state.done)
@@ -2163,11 +2202,15 @@ class FallbackDashboard:
         self.cost = 0.0
         self.tokens_in = 0
         self.tokens_out = 0
+        self.context_tokens = 0
+        self.context_limit = DEFAULT_CONTEXT_WINDOW
         self.branch = ""
         self.is_running = False
         self.running_count = 0
         self.kills_timeout = 0
         self.kills_context = 0
+        self.last_kill_reason = ""
+        self.last_kill_activity = ""
     
     def get_input(self) -> Optional[str | tuple[str, int]]:
         """Non-blocking keyboard input with coalescing for scroll keys.
@@ -2292,13 +2335,17 @@ class FallbackDashboard:
             cost=self.cost,
             tokens_in=self.tokens_in,
             tokens_out=self.tokens_out,
+            context_tokens=self.context_tokens,
+            context_limit=self.context_limit,
             iteration=self.iteration,
             output_lines=visible_output,
             is_running=self.is_running,
             running_count=self.running_count,
             footer_text=f"q:quit j/k:scroll g/G:top/bot f:follow | {scroll_info}",
             kills_timeout=self.kills_timeout,
-            kills_context=self.kills_context
+            kills_context=self.kills_context,
+            last_kill_reason=self.last_kill_reason,
+            last_kill_activity=self.last_kill_activity
         )
         
         # Move cursor to top and render
@@ -2338,6 +2385,7 @@ class FallbackDashboard:
             self.cost = cost_info[0]
             self.tokens_in = cost_info[1]
             self.tokens_out = cost_info[2]
+            self.context_tokens = cost_info[1]  # input tokens = context size
 
 
 def render_dashboard(state: DashboardState, term_width: int, term_height: int) -> list[str]:
@@ -2411,6 +2459,24 @@ def render_dashboard(state: DashboardState, term_width: int, term_height: int) -
         status_lines.append(f"💰 {Colors.CYAN}Cost:{Colors.NC} ${state.cost:.4f}")
     else:
         status_lines.append(f"💰 {Colors.CYAN}Cost:{Colors.NC} --")
+    
+    # Show context usage
+    if state.context_tokens > 0:
+        pct = state.context_tokens / state.context_limit * 100
+        if pct >= 90:
+            ctx_color = Colors.RED
+        elif pct >= 70:
+            ctx_color = Colors.YELLOW
+        else:
+            ctx_color = Colors.CYAN
+        status_lines.append(f"🧠 {ctx_color}Context:{Colors.NC} {state.context_tokens:,} / {state.context_limit:,} ({pct:.0f}%)")
+    
+    # Show last kill reason if any
+    if state.last_kill_reason:
+        kill_msg = f"⚠️  {Colors.RED}Kill:{Colors.NC} {state.last_kill_reason}"
+        if state.last_kill_activity:
+            kill_msg += f" @ {state.last_kill_activity[:30]}"
+        status_lines.append(kill_msg)
     
     pending = len(ralph_state.pending)
     done = len(ralph_state.done)
@@ -2674,15 +2740,12 @@ def cmd_stream():
         elif event_type == "step_finish":
             cost = part.get("cost", 0)
             tokens = part.get("tokens", {})
-            input_tokens = tokens.get("input", 0)
+            input_tokens = tokens.get("input", 0)  # This IS the context window size
             output_tokens = tokens.get("output", 0)
-            cache = tokens.get("cache", {})
-            cache_read = cache.get("read", 0)
-            total_input = input_tokens + cache_read
             # Soft divider
             print(f"\n{C.BRIGHT_BLACK}· · ·{C.RESET}")
             # Metrics line for parse_cost_line() - prefixed with \x00 to filter from display
-            print(f"\x00Cost: ${cost:.4f} | Tokens: {total_input}in/{output_tokens}out")
+            print(f"\x00Cost: ${cost:.4f} | Tokens: {input_tokens}in/{output_tokens}out")
             sys.stdout.flush()
 
 
@@ -2693,7 +2756,7 @@ class OutputBuffer:
     lock: threading.Lock = field(default_factory=threading.Lock)
     total_output: list = field(default_factory=list)  # For completion promise check
     last_activity: str = ""  # Last tool/action observed
-    iteration_tokens: int = 0  # Cumulative tokens this iteration
+    iteration_tokens: int = 0  # Latest context window size (not cumulative)
     
     def add(self, line: str):
         with self.lock:
@@ -2708,9 +2771,10 @@ class OutputBuffer:
         with self.lock:
             return self.last_activity
     
-    def add_tokens(self, tokens: int):
+    def set_context_tokens(self, tokens: int):
+        """Set current context window size (replaces, doesn't accumulate)."""
         with self.lock:
-            self.iteration_tokens += tokens
+            self.iteration_tokens = tokens
     
     def get_iteration_tokens(self) -> int:
         with self.lock:
@@ -2743,6 +2807,7 @@ def run_with_live_ui(process, config: RalphConfig, iteration: int,
     app._tokens_out = metrics.total_tokens_out
     app._branch = branch
     app._is_running = True
+    app._output_buffer = output_buffer  # For context tracking
     
     # We need to run the app and stream output simultaneously
     # The output thread is already running, we just need to hook it up
@@ -2756,6 +2821,10 @@ def run_with_live_ui(process, config: RalphConfig, iteration: int,
             app._is_running = False
             # Give a moment for final output then exit
             app.set_timer(0.5, lambda: app.exit())
+        
+        # Update context tokens from output buffer
+        if app._output_buffer:
+            app._context_tokens = app._output_buffer.get_iteration_tokens()
         
         # Feed new output lines to the app
         for line in output_buffer.get_lines()[-50:]:  # Get recent lines
@@ -2823,6 +2892,9 @@ def _run_with_simple_ui(process, config: RalphConfig, iteration: int,
             dashboard.tokens_out = metrics.total_tokens_out
             dashboard.kills_timeout = metrics.kills_timeout
             dashboard.kills_context = metrics.kills_context
+            dashboard.context_tokens = output_buffer.get_iteration_tokens()
+            dashboard.last_kill_reason = metrics.last_kill_reason
+            dashboard.last_kill_activity = metrics.last_kill_activity
             
             # Handle keyboard input
             action = dashboard.get_input()
@@ -2892,8 +2964,9 @@ def _process_stream_line(decoded: str, output_buffer: OutputBuffer, metrics: Met
         metrics.total_cost = cost_info[0]
         metrics.total_tokens_in = cost_info[1]
         metrics.total_tokens_out = cost_info[2]
-        # Track cumulative tokens for this iteration
-        output_buffer.add_tokens(cost_info[1])
+        # Track context window size (latest value, not cumulative)
+        # The tokens reported are the current context size, not a delta
+        output_buffer.set_context_tokens(cost_info[1])
     
     # Track last activity from tool calls (look for tool indicators)
     # Match emoji followed by tool name and description
@@ -3358,6 +3431,9 @@ def cmd_run(config: RalphConfig, mode: str, max_iterations: int, max_cost: float
             elif kill_state["killed"]:
                 # Killed by monitor (timeout or context limit) - don't count as failure
                 # The next iteration will get guidance to break down the problem
+                kill_info = kill_state["info"]
+                metrics.last_kill_reason = kill_state["reason"]
+                metrics.last_kill_activity = kill_info.last_activity or "unknown"
                 if kill_state["reason"] == "timeout":
                     metrics.kills_timeout += 1
                 elif kill_state["reason"] == "context_limit":
@@ -3646,10 +3722,75 @@ def cmd_task(config: RalphConfig, action: str, desc: Optional[str] = None):
         state.tasks = [t for t in state.tasks if t.id != task_id]
         save_state(config, state)
         print(f"{Colors.GREEN}Task deleted:{Colors.NC} {task_id} - {task_name}")
+    
+    elif action == 'prioritize':
+        pending = state.pending
+        if not pending:
+            print(json.dumps({"prioritized": 0, "high": 0, "medium": 0, "low": 0}))
+            return 0
+        
+        blocking_count = {}
+        for task in pending:
+            blocking_count[task.id] = 0
+        for task in pending:
+            if task.deps:
+                for dep_id in task.deps:
+                    if dep_id in blocking_count:
+                        blocking_count[dep_id] += 1
+        
+        def estimate_complexity(task: Task) -> str:
+            text = (task.name + " " + (task.notes or "")).lower()
+            large_indicators = ["refactor", "redesign", "rewrite", "implement", "overhaul", "migrate", "architecture"]
+            small_indicators = ["rename", "fix typo", "update", "add flag", "add field", "change", "alias", "tweak"]
+            for ind in large_indicators:
+                if ind in text:
+                    return "large"
+            for ind in small_indicators:
+                if ind in text:
+                    return "small"
+            return "medium"
+        
+        def is_docs_cleanup(task: Task) -> bool:
+            text = (task.name + " " + (task.notes or "")).lower()
+            indicators = ["doc", "readme", "comment", "cleanup", "clean up", "lint", "format", "typo"]
+            for ind in indicators:
+                if ind in text:
+                    return True
+            return False
+        
+        counts = {"high": 0, "medium": 0, "low": 0}
+        prioritized = 0
+        
+        for task in pending:
+            if task.priority:
+                counts[task.priority] += 1
+                continue
+            
+            complexity = estimate_complexity(task)
+            blocks = blocking_count[task.id]
+            
+            if is_docs_cleanup(task):
+                task.priority = "low"
+            elif complexity == "small" and blocks >= 2:
+                task.priority = "high"
+            elif blocks >= 3:
+                task.priority = "high"
+            elif complexity == "small" and blocks >= 1:
+                task.priority = "high"
+            elif complexity == "large":
+                task.priority = "medium"
+            else:
+                task.priority = "medium"
+            
+            counts[task.priority] += 1
+            prioritized += 1
+        
+        save_state(config, state)
+        print(json.dumps({"prioritized": prioritized, "high": counts["high"], "medium": counts["medium"], "low": counts["low"]}))
         
     else:
         print(f"{Colors.RED}Unknown task action: {action}{Colors.NC}")
-        print("Usage: ralph task [done|add|accept|reject|delete]")
+        print("Usage: ralph task [done|add|accept|reject|delete|prioritize]")
         return 1
 
 
