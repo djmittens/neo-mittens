@@ -1,3 +1,2 @@
 {"t": "config", "timeout_ms": 300000, "max_iterations": 10, "context_warn": 0.7, "context_compact": 0.85, "context_kill": 0.95}
 {"t": "spec", "spec": "construct-mode.md"}
-{"t": "reject", "id": "t-5ht9", "done_at": "532922f", "reason": "Compaction is a stub - immediately fails with 'cannot compact mid-execution'. No actual compaction logic: no summary production, no preservation of key state, no COMPACTED CONTEXT format, no resume logic."}

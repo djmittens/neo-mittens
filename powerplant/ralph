@@ -57,6 +57,123 @@ def _check_textual():
     return _textual_available
 
 
+# =============================================================================
+# Global Configuration System
+# =============================================================================
+# Config file location: ~/.config/ralph/config.toml
+# Supports profiles for different environments (work, home, etc.)
+#
+# Example config.toml:
+#   [default]
+#   model = "anthropic/claude-sonnet-4"
+#   
+#   [profiles.work]
+#   model = "anthropic/claude-opus-4"
+#   
+#   [profiles.home]
+#   model = "openrouter/anthropic/claude-opus-4"
+#   provider = "openrouter"
+#
+# Set RALPH_PROFILE=work to use a specific profile
+
+@dataclass
+class GlobalConfig:
+    """Global Ralph configuration loaded from ~/.config/ralph/config.toml"""
+    # Model settings
+    model: str = 'anthropic/claude-opus-4-5'
+    
+    # Context limits
+    context_window: int = 200_000
+    context_warn_pct: int = 70
+    context_compact_pct: int = 85
+    context_kill_pct: int = 95
+    
+    # Timeouts (milliseconds)
+    stage_timeout_ms: int = 300_000
+    iteration_timeout_ms: int = 300_000
+    
+    # Circuit breaker
+    max_failures: int = 3
+    
+    # Decomposition
+    max_decompose_depth: int = 3
+    
+    # Git settings
+    commit_prefix: str = 'ralph:'
+    recent_commits_display: int = 3
+    
+    # UI settings
+    art_style: str = 'braille'
+    dashboard_buffer_lines: int = 2000
+    
+    # Directories (relative to repo root, or absolute)
+    ralph_dir: str = 'ralph'
+    log_dir: str = 'build/ralph-logs'
+    
+    # Profile name (for display/debugging)
+    _profile_name: str = 'default'
+
+    @classmethod
+    def load(cls) -> 'GlobalConfig':
+        """Load config from ~/.config/ralph/config.toml with profile support."""
+        config_path = Path.home() / '.config' / 'ralph' / 'config.toml'
+        
+        if not config_path.exists():
+            return cls()
+        
+        try:
+            import tomllib
+        except ImportError:
+            # Python < 3.11 fallback
+            try:
+                import tomli as tomllib
+            except ImportError:
+                # No TOML parser available, use defaults
+                return cls()
+        
+        try:
+            with open(config_path, 'rb') as f:
+                data = tomllib.load(f)
+        except Exception:
+            return cls()
+        
+        # Start with defaults from [default] section
+        config_dict = {}
+        if 'default' in data:
+            config_dict.update(data['default'])
+        
+        # Apply profile if RALPH_PROFILE is set
+        profile_name = os.environ.get('RALPH_PROFILE', '')
+        if profile_name and 'profiles' in data and profile_name in data['profiles']:
+            config_dict.update(data['profiles'][profile_name])
+            config_dict['_profile_name'] = profile_name
+        
+        # Also check RALPH_ART_STYLE env var for backward compatibility
+        if 'RALPH_ART_STYLE' in os.environ:
+            config_dict['art_style'] = os.environ['RALPH_ART_STYLE']
+        
+        # Build config object
+        return cls(**{k: v for k, v in config_dict.items() if hasattr(cls, k) or k.startswith('_')})
+
+
+# Global singleton - loaded once at import time
+_global_config: Optional[GlobalConfig] = None
+
+def get_global_config() -> GlobalConfig:
+    """Get the global configuration singleton."""
+    global _global_config
+    if _global_config is None:
+        _global_config = GlobalConfig.load()
+    return _global_config
+
+
+def reload_global_config() -> GlobalConfig:
+    """Force reload of global configuration."""
+    global _global_config
+    _global_config = GlobalConfig.load()
+    return _global_config
+
+
 # Colors
 class Colors:
     RED = '\033[0;31m'
@@ -85,29 +202,40 @@ class Colors:
 # =============================================================================
 # Context and Timeout Limits
 # =============================================================================
-# Context window size for Claude models (in tokens)
+# These are now loaded from global config, but we keep module-level constants
+# for backward compatibility. They're initialized lazily on first access.
+
+def _get_default_context_window():
+    return get_global_config().context_window
+
+def _get_context_soft_limit_pct():
+    return get_global_config().context_warn_pct
+
+def _get_context_compact_limit_pct():
+    return get_global_config().context_compact_pct
+
+def _get_context_hard_limit_pct():
+    return get_global_config().context_kill_pct
+
+def _get_default_stage_timeout_ms():
+    return get_global_config().stage_timeout_ms
+
+def _get_default_iteration_timeout_ms():
+    return get_global_config().iteration_timeout_ms
+
+# Legacy constants (kept for backward compatibility in code that imports them directly)
 DEFAULT_CONTEXT_WINDOW = 200_000
-
-# Soft limit: warn when context usage exceeds this percentage
 CONTEXT_SOFT_LIMIT_PCT = 70
-
-# Compact limit: attempt compaction when context usage exceeds this percentage
 CONTEXT_COMPACT_LIMIT_PCT = 85
-
-# Hard limit: kill iteration when context usage exceeds this percentage  
 CONTEXT_HARD_LIMIT_PCT = 95
-
-# Default stage timeout in milliseconds (5 minutes per stage, per spec)
 DEFAULT_STAGE_TIMEOUT_MS = 300000
-
-# Default iteration timeout in milliseconds (5 minutes)
 DEFAULT_ITERATION_TIMEOUT_MS = 300000
 
 
 # =============================================================================
 # Ralph Wiggum ASCII Art Options
 # =============================================================================
-# Multiple art styles available. Set RALPH_ART_STYLE environment variable to choose:
+# Art style can be set via config file or RALPH_ART_STYLE environment variable:
 #   - "braille" (default): Braille dot art with colored regions (11 lines)
 #   - "braille_full": Full-body braille art (15 lines, includes legs)
 #   - "blocks": Block art using ░▒▓█ characters (11 lines)
@@ -889,12 +1017,29 @@ def clear_runtime_state(config: RalphConfig):
 # Benefits: Git-friendly merges (line-based), clean diffs, no conflicts on parallel adds
 
 def _generate_id(prefix: str = 't') -> str:
-    """Generate a short random ID like t-a1b2 or i-c3d4."""
+    """Generate a unique ID with timestamp and random suffix to reduce collisions.
+    
+    Format: {prefix}-{timestamp_base36}{random} (e.g., t-k5x9ab, i-k5x9cd)
+    
+    The timestamp component (2 chars) provides uniqueness across time,
+    while the random suffix (4 chars) provides uniqueness within the same second.
+    This reduces collision probability when multiple Ralph instances run in parallel.
+    """
     import random
     import string
+    import time
+    
     chars = string.ascii_lowercase + string.digits
-    suffix = ''.join(random.choice(chars) for _ in range(4))
-    return f"{prefix}-{suffix}"
+    # Use last 2 chars of base36 timestamp for some time-based uniqueness
+    timestamp_part = int(time.time()) % (36 * 36)  # 0-1295, fits in 2 base36 chars
+    ts_chars = ""
+    for _ in range(2):
+        ts_chars = chars[timestamp_part % 36] + ts_chars
+        timestamp_part //= 36
+    
+    # Add 4 random chars
+    random_part = ''.join(random.choice(chars) for _ in range(4))
+    return f"{prefix}-{ts_chars}{random_part}"
 
 
 @dataclass
@@ -916,6 +1061,8 @@ class Task:
     parent: Optional[str] = None  # Task ID this was decomposed from (DECOMPOSE stage)
     created_from: Optional[str] = None  # Issue ID this task was created from (INVESTIGATE stage)
     supersedes: Optional[str] = None  # Task ID this replaces (when rejection leads to new approach)
+    decompose_depth: int = 0  # How many times this task's lineage has been decomposed (max 3)
+    timeout_ms: Optional[int] = None  # Per-task timeout override (None = use stage default)
     
     def to_jsonl(self) -> str:
         d = {"t": "task", "id": self.id, "spec": self.spec, "name": self.name, "s": self.status}
@@ -943,6 +1090,10 @@ class Task:
             d["created_from"] = self.created_from
         if self.supersedes:
             d["supersedes"] = self.supersedes
+        if self.decompose_depth > 0:
+            d["decompose_depth"] = self.decompose_depth
+        if self.timeout_ms is not None:
+            d["timeout_ms"] = self.timeout_ms
         return json.dumps(d)
     
     @classmethod
@@ -965,7 +1116,9 @@ class Task:
             reject_reason=d.get("reject"),
             parent=d.get("parent"),
             created_from=d.get("created_from"),
-            supersedes=d.get("supersedes")
+            supersedes=d.get("supersedes"),
+            decompose_depth=d.get("decompose_depth", 0),
+            timeout_ms=d.get("timeout_ms")
         )
 
 
@@ -1775,6 +1928,29 @@ def has_uncommitted_plan(config: RalphConfig) -> bool:
     )
     # Porcelain output is empty if file is clean
     return bool(result.stdout.strip())
+
+
+def check_opencode_available() -> tuple[bool, Optional[str]]:
+    """Check if opencode is available and working.
+    
+    Returns:
+        Tuple of (is_available, error_message)
+    """
+    try:
+        result = subprocess.run(
+            ['opencode', 'version'],
+            capture_output=True, text=True, timeout=10
+        )
+        if result.returncode == 0:
+            return True, None
+        else:
+            return False, f"opencode returned error: {result.stderr.strip()}"
+    except FileNotFoundError:
+        return False, "opencode not found in PATH. Install it with: npm install -g @anthropic/opencode"
+    except subprocess.TimeoutExpired:
+        return False, "opencode timed out during version check"
+    except Exception as e:
+        return False, f"Error checking opencode: {e}"
 
 
 def find_repo_root() -> Optional[Path]:
@@ -2714,6 +2890,94 @@ def cmd_status(config: RalphConfig):
     
     # Footer
     print(f"{Colors.DIM}Use 'ralph query' for JSON output, 'ralph watch' for live dashboard{Colors.NC}")
+
+
+def cmd_config():
+    """Show current global configuration."""
+    cfg = get_global_config()
+    config_path = Path.home() / '.config' / 'ralph' / 'config.toml'
+    
+    print(f"{Colors.BLUE}{'='*60}{Colors.NC}")
+    print(f"{Colors.BLUE}RALPH GLOBAL CONFIGURATION{Colors.NC}")
+    print(f"{Colors.BLUE}{'='*60}{Colors.NC}")
+    print()
+    
+    # Config file location
+    print(f"{Colors.CYAN}Config File{Colors.NC}")
+    if config_path.exists():
+        print(f"  {Colors.GREEN}✓{Colors.NC} {config_path}")
+    else:
+        print(f"  {Colors.YELLOW}Not found:{Colors.NC} {config_path}")
+        print(f"  {Colors.DIM}Using default values{Colors.NC}")
+    print()
+    
+    # Active profile
+    profile = cfg._profile_name
+    profile_env = os.environ.get('RALPH_PROFILE', '')
+    print(f"{Colors.CYAN}Active Profile{Colors.NC}")
+    print(f"  Profile: {Colors.GREEN}{profile}{Colors.NC}")
+    if profile_env:
+        print(f"  {Colors.DIM}(set via RALPH_PROFILE={profile_env}){Colors.NC}")
+    print()
+    
+    # Model settings
+    print(f"{Colors.CYAN}Model Settings{Colors.NC}")
+    print(f"  model: {Colors.GREEN}{cfg.model}{Colors.NC}")
+    print()
+    
+    # Context limits
+    print(f"{Colors.CYAN}Context Limits{Colors.NC}")
+    print(f"  context_window:     {cfg.context_window:,} tokens")
+    print(f"  context_warn_pct:   {cfg.context_warn_pct}%")
+    print(f"  context_compact_pct: {cfg.context_compact_pct}%")
+    print(f"  context_kill_pct:   {cfg.context_kill_pct}%")
+    print()
+    
+    # Timeouts
+    print(f"{Colors.CYAN}Timeouts{Colors.NC}")
+    print(f"  stage_timeout_ms:     {cfg.stage_timeout_ms:,}ms ({cfg.stage_timeout_ms / 60000:.1f} min)")
+    print(f"  iteration_timeout_ms: {cfg.iteration_timeout_ms:,}ms ({cfg.iteration_timeout_ms / 60000:.1f} min)")
+    print()
+    
+    # Circuit breaker
+    print(f"{Colors.CYAN}Circuit Breaker{Colors.NC}")
+    print(f"  max_failures:       {cfg.max_failures}")
+    print(f"  max_decompose_depth: {cfg.max_decompose_depth}")
+    print()
+    
+    # Git settings
+    print(f"{Colors.CYAN}Git Settings{Colors.NC}")
+    print(f"  commit_prefix:        {cfg.commit_prefix}")
+    print(f"  recent_commits_display: {cfg.recent_commits_display}")
+    print()
+    
+    # UI settings
+    print(f"{Colors.CYAN}UI Settings{Colors.NC}")
+    print(f"  art_style:            {cfg.art_style}")
+    print(f"  dashboard_buffer_lines: {cfg.dashboard_buffer_lines}")
+    print()
+    
+    # Directories
+    print(f"{Colors.CYAN}Directories{Colors.NC}")
+    print(f"  ralph_dir: {cfg.ralph_dir}")
+    print(f"  log_dir:   {cfg.log_dir}")
+    print()
+    
+    # Example config
+    print(f"{Colors.DIM}{'─'*60}{Colors.NC}")
+    print(f"{Colors.CYAN}Example config.toml:{Colors.NC}")
+    print(f"""{Colors.DIM}
+[default]
+model = "anthropic/claude-sonnet-4"
+
+[profiles.work]
+model = "anthropic/claude-opus-4"
+
+[profiles.home]
+model = "openrouter/anthropic/claude-opus-4"
+
+# Set RALPH_PROFILE=work or RALPH_PROFILE=home to switch
+{Colors.NC}""")
 
 
 @dataclass
@@ -4407,7 +4671,12 @@ def run_single_stage(config: RalphConfig, stage: Stage, state: RalphState,
         current_task_name = current_task.name
     
     output_buffer = OutputBuffer()
-    iteration_timeout = stage_timeout_ms / 1000.0
+    
+    # Use per-task timeout if available, otherwise fall back to stage timeout
+    if current_task and current_task.timeout_ms is not None:
+        iteration_timeout = current_task.timeout_ms / 1000.0
+    else:
+        iteration_timeout = stage_timeout_ms / 1000.0
     
     # Calculate context limits
     plan_config = state.config
@@ -4416,9 +4685,10 @@ def run_single_stage(config: RalphConfig, stage: Stage, state: RalphState,
         compact_limit_pct = plan_config.context_compact * 100
         soft_limit_pct = plan_config.context_warn * 100
     else:
-        hard_limit_pct = CONTEXT_HARD_LIMIT_PCT
-        compact_limit_pct = CONTEXT_COMPACT_LIMIT_PCT
-        soft_limit_pct = CONTEXT_SOFT_LIMIT_PCT
+        gcfg = get_global_config()
+        hard_limit_pct = gcfg.context_kill_pct
+        compact_limit_pct = gcfg.context_compact_pct
+        soft_limit_pct = gcfg.context_warn_pct
     
     hard_limit = int(context_limit * hard_limit_pct / 100)
     compact_limit = int(context_limit * compact_limit_pct / 100)
@@ -4438,7 +4708,8 @@ def run_single_stage(config: RalphConfig, stage: Stage, state: RalphState,
     opencode_env['OPENCODE_PERMISSION'] = json.dumps(permission_config)
     
     # Build command
-    cmd = ['opencode', 'run', '--model', 'anthropic/claude-opus-4-5',
+    model = get_global_config().model
+    cmd = ['opencode', 'run', '--model', model,
            '--format', 'json', prompt_content]
     
     # Start opencode process
@@ -4577,11 +4848,175 @@ def run_single_stage(config: RalphConfig, stage: Stage, state: RalphState,
     reader_stop.set()
     reader_thread.join(timeout=2.0)
     
-    # Handle compaction (simplified - just mark as failure for now, let DECOMPOSE handle it)
+    # Handle compaction - attempt to resume with compacted context
     if kill_state["compact_requested"] and not kill_state["killed"]:
-        # Processes already killed by monitor_limits, just update state
-        kill_state["killed"] = True
-        kill_state["reason"] = "compaction_failed"
+        print(f"{Colors.YELLOW}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━{Colors.NC}")
+        print(f"{Colors.YELLOW}COMPACTION: Building compacted context...{Colors.NC}")
+        
+        # Clean up current processes
+        reader_stop.set()
+        try:
+            ralph_stream_proc.kill()
+            opencode_proc.kill()
+        except:
+            pass
+        reader_thread.join(timeout=2.0)
+        if opencode_proc.poll() is None:
+            opencode_proc.wait()
+        
+        # Build compacted context
+        if current_task:
+            compacted = build_compacted_context(
+                current_task,
+                config.repo_root,
+                output_buffer.get_all()
+            )
+            compacted_prompt = compacted.to_prompt()
+            
+            # Combine with original prompt
+            full_prompt = compacted_prompt + "\n\n" + prompt_content
+            
+            print(f"{Colors.GREEN}[RALPH] Context compacted. Resuming execution...{Colors.NC}")
+            print(f"{Colors.YELLOW}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━{Colors.NC}")
+            
+            # Create new output buffer for resumed execution
+            output_buffer = OutputBuffer()
+            
+            # Start new opencode process with compacted context
+            model = get_global_config().model
+            cmd = ['opencode', 'run', '--model', model, 
+                   '--format', 'json', full_prompt]
+            
+            opencode_proc = subprocess.Popen(
+                cmd,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                cwd=config.repo_root,
+                env=opencode_env
+            )
+            
+            ralph_stream_proc = subprocess.Popen(
+                [sys.executable, '-u', __file__, 'stream'],
+                stdin=opencode_proc.stdout,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+            )
+            
+            if opencode_proc.stdout:
+                opencode_proc.stdout.close()
+            
+            # Reset kill state for resumed execution
+            kill_state = {"killed": False, "reason": "none", "info": None, "compact_requested": False}
+            reader_stop = threading.Event()
+            
+            # Start new reader thread
+            reader_thread = threading.Thread(
+                target=stream_output,
+                args=(ralph_stream_proc.stdout, output_buffer, metrics, not interactive, config.output_fifo, reader_stop)
+            )
+            reader_thread.daemon = True
+            reader_thread.start()
+            
+            # Start new monitor thread - check for resume success and hard limit
+            resumed_start_time = time.time()
+            resume_check_done = [False]
+            
+            def monitor_resumed():
+                """Monitor thread for resumed execution after compaction."""
+                resumed_deadline = resumed_start_time + (stage_timeout_ms / 1000.0)
+                check_interval = 2.0
+                
+                while ralph_stream_proc.poll() is None and opencode_proc.poll() is None:
+                    if kill_state["killed"]:
+                        break
+                    
+                    resumed_elapsed = int(time.time() - resumed_start_time)
+                    current_tokens = output_buffer.get_iteration_tokens()
+                    
+                    # Check timeout
+                    if time.time() >= resumed_deadline:
+                        kill_state["killed"] = True
+                        kill_state["reason"] = "timeout"
+                        kill_state["info"] = IterationKillInfo(
+                            reason="timeout",
+                            task_name=current_task_name,
+                            timeout_seconds=int(stage_timeout_ms / 1000),
+                            elapsed_seconds=resumed_elapsed,
+                            last_activity=output_buffer.get_last_activity()
+                        )
+                        try:
+                            opencode_proc.terminate()
+                            ralph_stream_proc.terminate()
+                        except:
+                            pass
+                        break
+                    
+                    # Check if compaction failed (still > 80% after resume)
+                    if current_tokens > 0 and not resume_check_done[0]:
+                        resume_check_done[0] = True
+                        pct = current_tokens / context_limit * 100
+                        if current_tokens > int(context_limit * 0.80):
+                            print(f"\n{Colors.RED}[RALPH] Compaction failed - still at {pct:.0f}% after resume{Colors.NC}")
+                            kill_state["killed"] = True
+                            kill_state["reason"] = "compaction_failed"
+                            kill_state["info"] = IterationKillInfo(
+                                reason="compaction_failed",
+                                task_name=current_task_name,
+                                tokens_used=current_tokens,
+                                context_limit=context_limit,
+                                elapsed_seconds=resumed_elapsed,
+                                last_activity=output_buffer.get_last_activity()
+                            )
+                            try:
+                                opencode_proc.terminate()
+                                ralph_stream_proc.terminate()
+                            except:
+                                pass
+                            break
+                        else:
+                            print(f"\n{Colors.GREEN}[RALPH] Context compacted: resumed at {pct:.0f}%{Colors.NC}")
+                    
+                    # Check hard limit (95%)
+                    if current_tokens >= hard_limit:
+                        kill_state["killed"] = True
+                        kill_state["reason"] = "context_limit"
+                        kill_state["info"] = IterationKillInfo(
+                            reason="context_limit",
+                            task_name=current_task_name,
+                            tokens_used=current_tokens,
+                            context_limit=context_limit,
+                            elapsed_seconds=resumed_elapsed,
+                            last_activity=output_buffer.get_last_activity()
+                        )
+                        try:
+                            opencode_proc.terminate()
+                            ralph_stream_proc.terminate()
+                        except:
+                            pass
+                        break
+                    
+                    time.sleep(check_interval)
+            
+            resumed_monitor_thread = threading.Thread(target=monitor_resumed, daemon=True)
+            resumed_monitor_thread.start()
+            
+            # Wait for resumed process
+            while ralph_stream_proc.poll() is None:
+                if kill_state["killed"]:
+                    break
+                time.sleep(0.1)
+            exit_code = ralph_stream_proc.returncode if ralph_stream_proc.returncode is not None else -1
+            
+            resumed_monitor_thread.join(timeout=1.0)
+            
+            # Update start_time for duration calculation
+            start_time = resumed_start_time
+        else:
+            # No current task - treat as failure
+            print(f"{Colors.RED}[RALPH] No current task for compaction - treating as failure{Colors.NC}")
+            kill_state["killed"] = True
+            kill_state["reason"] = "compaction_failed"
     
     duration = time.time() - start_time
     
@@ -4715,6 +5150,15 @@ def cmd_construct(config: RalphConfig, max_iterations: int, max_cost: float,
         print(f"{Colors.RED}Ralph not initialized. Run 'ralph init' first.{Colors.NC}")
         return 1
     
+    # Pre-flight check: verify opencode is available
+    opencode_ok, opencode_error = check_opencode_available()
+    if not opencode_ok:
+        print(f"{Colors.RED}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━{Colors.NC}")
+        print(f"{Colors.RED}OPENCODE NOT AVAILABLE{Colors.NC}")
+        print(f"{opencode_error}")
+        print(f"{Colors.RED}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━{Colors.NC}")
+        return 1
+    
     # Initialize metrics
     metrics = Metrics(started_at=datetime.now().isoformat())
     config.log_dir.mkdir(parents=True, exist_ok=True)
@@ -4755,9 +5199,10 @@ def cmd_construct(config: RalphConfig, max_iterations: int, max_cost: float,
         compact_limit_pct = plan_config.context_compact * 100
         hard_limit_pct = plan_config.context_kill * 100
     else:
-        soft_limit_pct = CONTEXT_SOFT_LIMIT_PCT
-        compact_limit_pct = CONTEXT_COMPACT_LIMIT_PCT
-        hard_limit_pct = CONTEXT_HARD_LIMIT_PCT
+        gcfg = get_global_config()
+        soft_limit_pct = gcfg.context_warn_pct
+        compact_limit_pct = gcfg.context_compact_pct
+        hard_limit_pct = gcfg.context_kill_pct
     
     soft_limit = int(context_limit * soft_limit_pct / 100)
     compact_limit = int(context_limit * compact_limit_pct / 100)
@@ -4922,6 +5367,15 @@ def cmd_run(config: RalphConfig, mode: str, max_iterations: int, max_cost: float
         print(f"{Colors.RED}Plan mode requires a spec file: ralph plan <spec.md>{Colors.NC}")
         return 1
 
+    # Pre-flight check: verify opencode is available
+    opencode_ok, opencode_error = check_opencode_available()
+    if not opencode_ok:
+        print(f"{Colors.RED}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━{Colors.NC}")
+        print(f"{Colors.RED}OPENCODE NOT AVAILABLE{Colors.NC}")
+        print(f"{opencode_error}")
+        print(f"{Colors.RED}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━{Colors.NC}")
+        return 1
+
     # Initialize metrics
     metrics = Metrics(started_at=datetime.now().isoformat())
     config.log_dir.mkdir(parents=True, exist_ok=True)
@@ -4959,9 +5413,10 @@ def cmd_run(config: RalphConfig, mode: str, max_iterations: int, max_cost: float
         compact_limit_pct = plan_config.context_compact * 100
         hard_limit_pct = plan_config.context_kill * 100
     else:
-        soft_limit_pct = CONTEXT_SOFT_LIMIT_PCT
-        compact_limit_pct = CONTEXT_COMPACT_LIMIT_PCT
-        hard_limit_pct = CONTEXT_HARD_LIMIT_PCT
+        gcfg = get_global_config()
+        soft_limit_pct = gcfg.context_warn_pct
+        compact_limit_pct = gcfg.context_compact_pct
+        hard_limit_pct = gcfg.context_kill_pct
     
     soft_limit = int(context_limit * soft_limit_pct / 100)
     compact_limit = int(context_limit * compact_limit_pct / 100)
@@ -5088,7 +5543,8 @@ def cmd_run(config: RalphConfig, mode: str, max_iterations: int, max_cost: float
             
             output_buffer = OutputBuffer()
 
-            cmd = ['opencode', 'run', '--model', 'anthropic/claude-opus-4-5', 
+            model = get_global_config().model
+            cmd = ['opencode', 'run', '--model', model, 
                    '--format', 'json', prompt_content]
             
             # Use ephemeral state directory to avoid polluting session list
@@ -5287,7 +5743,8 @@ def cmd_run(config: RalphConfig, mode: str, max_iterations: int, max_cost: float
                     compaction_in_progress[0] = True
                     
                     # Start new opencode process with compacted context
-                    cmd = ['opencode', 'run', '--model', 'anthropic/claude-opus-4-5', 
+                    model = get_global_config().model
+                    cmd = ['opencode', 'run', '--model', model, 
                            '--format', 'json', full_prompt]
                     
                     opencode_proc = subprocess.Popen(
@@ -5759,29 +6216,73 @@ def cmd_task(config: RalphConfig, action: str, desc: Optional[str] = None, arg3:
                 accept = d.get("accept")
                 deps = d.get("deps")  # List of task IDs
                 priority = d.get("priority")  # Priority inherited from issue
+                parent = d.get("parent")  # Parent task ID for decomposition
+                created_from = d.get("created_from")  # Issue ID for investigate
             else:
                 name = desc
                 notes = None
                 accept = None
                 deps = None
                 priority = None
+                parent = None
+                created_from = None
         except json.JSONDecodeError:
             name = desc
             notes = None
             accept = None
             deps = None
             priority = None
+            parent = None
+            created_from = None
         
         if not name:
             print(f"{Colors.RED}Task name is required{Colors.NC}")
             return 1
+        
+        # Calculate decompose_depth from parent task
+        decompose_depth = 0
+        if parent:
+            parent_task = next((t for t in state.tasks if t.id == parent), None)
+            if parent_task:
+                decompose_depth = parent_task.decompose_depth + 1
+                # Check for maximum decomposition depth
+                MAX_DECOMPOSE_DEPTH = 3
+                if decompose_depth > MAX_DECOMPOSE_DEPTH:
+                    print(f"{Colors.RED}ERROR: Maximum decomposition depth ({MAX_DECOMPOSE_DEPTH}) exceeded!{Colors.NC}")
+                    print(f"  Parent task: {parent_task.name} (depth {parent_task.decompose_depth})")
+                    print(f"  {Colors.YELLOW}This task has been decomposed too many times.{Colors.NC}")
+                    print(f"  {Colors.YELLOW}Create an issue for human review instead:{Colors.NC}")
+                    print(f"  {Colors.DIM}ralph issue add \"Task too complex for auto-decomposition: {name[:50]}\"{Colors.NC}")
+                    return 1
+        
+        # Auto-inherit priority from issue if created_from is specified but no priority
+        if created_from and not priority:
+            source_issue = next((i for i in state.issues if i.id == created_from), None)
+            if source_issue and source_issue.priority:
+                priority = source_issue.priority
             
-        task = Task(id=_generate_id('t'), name=name, spec=state.spec, notes=notes, accept=accept, deps=deps, status="p", priority=priority)
+        task = Task(
+            id=_generate_id('t'), 
+            name=name, 
+            spec=state.spec, 
+            notes=notes, 
+            accept=accept, 
+            deps=deps, 
+            status="p", 
+            priority=priority,
+            parent=parent,
+            created_from=created_from,
+            decompose_depth=decompose_depth
+        )
         state.tasks.append(task)
         save_state(config, state)  # No auto-commit, let caller batch
         print(f"{Colors.GREEN}Task added:{Colors.NC} {task.id} - {name}")
         if deps:
             print(f"  {Colors.DIM}Depends on: {', '.join(deps)}{Colors.NC}")
+        if parent:
+            print(f"  {Colors.DIM}Parent: {parent} (depth {decompose_depth}){Colors.NC}")
+        if created_from:
+            print(f"  {Colors.DIM}From issue: {created_from}{Colors.NC}")
         
     elif action == 'accept':
         done = state.done
@@ -6201,6 +6702,7 @@ Examples:
   ralph plan spec.md            Plan tasks for a specific spec
   ralph construct               Construct mode, unlimited (Ctrl+C to stop)
   ralph construct 10            Construct mode, max 10 iterations
+  ralph config                  Show global config (model, timeouts, etc.)
   ralph query                   Show current state as JSON
   ralph query stage             Show current stage (PLAN/BUILD/VERIFY/etc)
   ralph query iteration         Show current iteration number
@@ -6217,23 +6719,25 @@ Examples:
     )
     
     parser.add_argument('command', nargs='?', default='construct',
-                       help='Command: init, plan, construct, query, task, issue, set-spec, log, status, watch, stream (build is alias for construct)')
+                       help='Command: init, plan, construct, config, query, task, issue, set-spec, log, status, watch, stream (build is alias for construct)')
     parser.add_argument('arg', nargs='?', default=None,
                        help='Subcommand or argument')
     parser.add_argument('arg2', nargs='?', default=None,
                        help='Additional argument (e.g., task description)')
     parser.add_argument('arg3', nargs='?', default=None,
                        help='Third argument (e.g., reject reason)')
+    # Get defaults from global config
+    gcfg = get_global_config()
     parser.add_argument('--max-cost', type=float, default=0,
                        help='Stop when cost exceeds $N')
-    parser.add_argument('--max-failures', type=int, default=3,
-                       help='Circuit breaker: stop after N consecutive failures')
+    parser.add_argument('--max-failures', type=int, default=gcfg.max_failures,
+                       help=f'Circuit breaker: stop after N consecutive failures (default: {gcfg.max_failures})')
     parser.add_argument('--completion-promise', type=str, default='',
                        help='Stop when output contains this text')
-    parser.add_argument('--timeout', type=int, default=DEFAULT_STAGE_TIMEOUT_MS,
-                       help=f'Kill stage after N milliseconds (default: {DEFAULT_STAGE_TIMEOUT_MS}ms)')
-    parser.add_argument('--context-limit', type=int, default=DEFAULT_CONTEXT_WINDOW,
-                       help=f'Context window size in tokens (default: {DEFAULT_CONTEXT_WINDOW})')
+    parser.add_argument('--timeout', type=int, default=gcfg.stage_timeout_ms,
+                       help=f'Kill stage after N milliseconds (default: {gcfg.stage_timeout_ms}ms)')
+    parser.add_argument('--context-limit', type=int, default=gcfg.context_window,
+                       help=f'Context window size in tokens (default: {gcfg.context_window})')
     parser.add_argument('--no-ui', action='store_true',
                        help='Disable interactive dashboard, show streaming output')
     parser.add_argument('--all', action='store_true',
@@ -6279,6 +6783,8 @@ Examples:
     # Dispatch command
     if args.command == 'init':
         cmd_init(config)
+    elif args.command == 'config':
+        cmd_config()
     elif args.command == 'status':
         cmd_status(config)
     elif args.command == 'watch':
