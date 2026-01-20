@@ -297,6 +297,7 @@ append_require_if_missing "$NVIM_DIR/init.lua"
 
 # 4) Add powerplant to PATH via managed block
 install_path_block "$HOME/.profile" "$SCRIPT_DIR/powerplant"
+install_path_block "$HOME/.zshrc" "$SCRIPT_DIR/powerplant"
 
 # 5) Disable ohmyzsh auto-title to allow custom tmux pane titles
 disable_omz_auto_title
