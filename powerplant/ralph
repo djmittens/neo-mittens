@@ -372,6 +372,7 @@ class RalphConfig:
     specs_dir: Path
     output_fifo: Path
     plan_file: Path
+    runtime_file: Path
 
     @classmethod
     def from_repo(cls, repo_root: Path) -> 'RalphConfig':
@@ -389,7 +390,33 @@ class RalphConfig:
             specs_dir=ralph_dir / 'specs',
             output_fifo=log_dir / 'output.fifo',
             plan_file=ralph_dir / 'plan.jsonl',
+            runtime_file=ralph_dir / '.runtime',
         )
+
+
+# =============================================================================
+# Runtime State (ephemeral, not committed)
+# =============================================================================
+
+def write_runtime_iteration(config: RalphConfig, iteration: int):
+    """Write current iteration number to runtime file."""
+    config.runtime_file.write_text(str(iteration))
+
+
+def read_runtime_iteration(config: RalphConfig) -> Optional[int]:
+    """Read current iteration number from runtime file, or None if not running."""
+    if config.runtime_file.exists():
+        try:
+            return int(config.runtime_file.read_text().strip())
+        except (ValueError, IOError):
+            return None
+    return None
+
+
+def clear_runtime_state(config: RalphConfig):
+    """Clear runtime state file (call when construct mode exits)."""
+    if config.runtime_file.exists():
+        config.runtime_file.unlink()
 
 
 # =============================================================================
@@ -3359,6 +3386,7 @@ def cmd_run(config: RalphConfig, mode: str, max_iterations: int, max_cost: float
 
             iteration += 1
             metrics.total_iterations += 1
+            write_runtime_iteration(config, iteration)
             start_time = time.time()
 
             if not interactive:
@@ -3789,6 +3817,7 @@ def cmd_run(config: RalphConfig, mode: str, max_iterations: int, max_cost: float
     except KeyboardInterrupt:
         print(f"\n{Colors.YELLOW}Interrupted by user{Colors.NC}")
     finally:
+        clear_runtime_state(config)
         # Summary with success/failure status
         if metrics.failures == 0 and metrics.successes > 0:
             status = f"{Colors.GREEN}SUCCESS{Colors.NC}"
@@ -3819,6 +3848,9 @@ def cmd_query(config: RalphConfig, subquery: Optional[str] = None, done_only: bo
     
     if subquery == 'stage':
         print(state.get_stage())
+    elif subquery == 'iteration':
+        iteration = read_runtime_iteration(config)
+        print(iteration if iteration is not None else 0)
     elif subquery == 'next':
         print(json.dumps(state.get_next(), indent=2))
     elif subquery == 'tasks':
@@ -4243,6 +4275,7 @@ Examples:
   ralph construct 10            Construct mode, max 10 iterations
   ralph query                   Show current state as JSON
   ralph query stage             Show current stage (PLAN/BUILD/VERIFY/etc)
+  ralph query iteration         Show current iteration number
   ralph task done               Mark first pending task as done
   ralph task add "description"  Add a new task
   ralph task accept             Accept all done tasks (after verification)

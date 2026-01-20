@@ -8,8 +8,19 @@ Run `ralph query` to get current state. The `next.task` field shows:
 - `name`: what to do
 - `notes`: implementation hints (if provided)
 - `accept`: how to verify it works (if provided)
+- `reject`: why it was rejected (if this is a retry)
 
-## Step 2: Understand Context
+## Step 2: Check if Rejected Task
+
+If `reject` field is present, this task was previously attempted and rejected by VERIFY:
+
+1. **Read the rejection reason** - understand why it failed
+2. **The code is already there** - don't start from scratch
+3. **Fix the specific gap** - the rejection reason tells you what's wrong
+
+Do NOT re-explore the whole codebase. Focus on fixing what's broken.
+
+## Step 3: Understand Context
 
 1. Read the spec file: `ralph/specs/<spec>`
 2. Review `notes` for implementation hints
@@ -41,13 +52,13 @@ Task: "Find how X is implemented in the codebase. Search for Y, read relevant fi
 
 Each subagent gets a fresh context window. Use them liberally for exploration.
 
-## Step 3: Implement
+## Step 4: Implement
 
 Build the feature/fix. Rules:
 - Complete implementations only, no stubs
 - No code comments unless explicitly requested
 
-## Step 4: Check Acceptance Criteria
+## Step 5: Check Acceptance Criteria
 
 Before marking done, verify the task's acceptance criteria:
 1. Check **only** the `accept` criteria for this task
@@ -56,7 +67,7 @@ Before marking done, verify the task's acceptance criteria:
 
 If acceptance criteria pass, mark done. VERIFY stage will do the thorough spec check later.
 
-## Step 5: Complete
+## Step 6: Complete
 
 ```
 ralph task done
