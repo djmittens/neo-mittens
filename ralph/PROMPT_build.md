@@ -47,12 +47,14 @@ Build the feature/fix. Rules:
 - Complete implementations only, no stubs
 - No code comments unless explicitly requested
 
-## Step 4: Validate
+## Step 4: Check Acceptance Criteria
 
-Before marking done, verify the implementation:
-1. If `accept` criteria provided, verify those specifically
-2. Run relevant tests
-3. Ensure the implementation matches the spec
+Before marking done, verify the task's acceptance criteria:
+1. Check **only** the `accept` criteria for this task
+2. Run any tests specified in the criteria
+3. Do NOT re-read the full spec - that's VERIFY stage's job
+
+If acceptance criteria pass, mark done. VERIFY stage will do the thorough spec check later.
 
 ## Step 5: Complete
 

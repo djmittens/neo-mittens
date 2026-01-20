@@ -17,7 +17,7 @@ Construct mode is Ralph's autonomous execution mode for implementing specs. It r
     |                         ITERATION N                                   |
     |                                                                       |
     |  +---------------+     +---------------+     +-------------------+    |
-    |  |  INVESTIGATE  |---->|    BUILD      |---->|     VALIDATE      |    |
+    |  |  INVESTIGATE  |---->|    BUILD      |---->|     VERIFY      |    |
     |  | (issues ->    |     | (execute      |     | (verify code vs   |    |
     |  |  tasks)       |     |  tasks)       |     |  spec)            |    |
     |  +-------+-------+     +-------+-------+     +---------+---------+    |
@@ -66,7 +66,7 @@ Construct mode is Ralph's autonomous execution mode for implementing specs. It r
 
 ## Task Prioritization
 
-Both PLAN and VALIDATE stages create new tasks/issues. They share the same prioritization logic, which runs **at the end of each stage** before transitioning.
+Both PLAN and VERIFY stages create new tasks/issues. They share the same prioritization logic, which runs **at the end of each stage** before transitioning.
 
 ### Prioritization Algorithm
 
@@ -92,12 +92,12 @@ PRIORITIZE(tasks):
 | PLAN | Yes (initial tasks) | Yes, at end |
 | INVESTIGATE | Yes (from issues) | No (inherits from issue) |
 | BUILD | No | No |
-| VALIDATE | Yes (gaps, new issues) | Yes, at end |
+| VERIFY | Yes (gaps, new issues) | Yes, at end |
 | DECOMPOSE | Yes (subtasks) | No (inherits from parent) |
 
 ### Shared Prioritization Logic
 
-PLAN and VALIDATE both call the same prioritization function:
+PLAN and VERIFY both call the same prioritization function:
 
 ```
 ralph task prioritize
@@ -123,7 +123,7 @@ ralph construct [spec]
 Each iteration consists of three phases executed sequentially:
 
 ```
-INVESTIGATE -> BUILD -> VALIDATE
+INVESTIGATE -> BUILD -> VERIFY
 ```
 
 #### Phase 1: INVESTIGATE
@@ -185,7 +185,7 @@ INVESTIGATE -> BUILD -> VALIDATE
   NO          YES           |
    |            |           |
    v            v           |
-VALIDATE   Execute task     |
+VERIFY   Execute task     |
            (highest priority|
             unblocked)      |
                 |           |
@@ -207,15 +207,15 @@ VALIDATE   Execute task     |
 4. Mark task done: `ralph task done`
 5. Loop back for next task
 
-**Exit**: When no pending tasks remain, proceed to VALIDATE
+**Exit**: When no pending tasks remain, proceed to VERIFY
 
-#### Phase 3: VALIDATE
+#### Phase 3: VERIFY
 
 **Purpose**: Compare completed work (tasks + code) against spec to identify gaps, create new work items, and accept/reject completed tasks.
 
 ```
 +--------------------+
-|      VALIDATE      |
+|      VERIFY      |
 +--------------------+
           |
           v
@@ -281,10 +281,10 @@ VALIDATE   Execute task     |
 
 **Parallel Task Verification (Fork/Join)**:
 
-VALIDATE is embarrassingly parallelizable. For each done task, spawn a subagent to verify independently:
+VERIFY is embarrassingly parallelizable. For each done task, spawn a subagent to verify independently:
 
 ```
-VALIDATE:
+VERIFY:
   1. Get all done tasks: tasks = ralph query tasks --done
   2. FORK: For each task in tasks, spawn subagent:
      "Verify task '{task.name}' meets acceptance criteria: {task.accept}
@@ -307,7 +307,7 @@ VALIDATE:
   5. Create tasks/issues from any gaps found
 ```
 
-This parallelization is critical for efficiency - a VALIDATE stage with 10 done tasks should verify all 10 concurrently, not sequentially.
+This parallelization is critical for efficiency - a VERIFY stage with 10 done tasks should verify all 10 concurrently, not sequentially.
 
 **Gap Types**:
 | Gap Type | Action |
@@ -321,7 +321,7 @@ This parallelization is critical for efficiency - a VALIDATE stage with 10 done 
 
 ## Failure Conditions
 
-At any point during INVESTIGATE, BUILD, or VALIDATE:
+At any point during INVESTIGATE, BUILD, or VERIFY:
 
 ```
 +-------------------+
@@ -493,7 +493,7 @@ Next step: <what to do next>
 |  ===========                                                             |
 |                                                                          |
 |  +-------------+       +-----------+       +-------------+               |
-|  | INVESTIGATE |------>|   BUILD   |------>|   VALIDATE  |               |
+|  | INVESTIGATE |------>|   BUILD   |------>|   VERIFY  |               |
 |  | (issues ->  |       | (execute  |       | (verify vs  |               |
 |  |  tasks)     |       |  tasks)   |       |  spec)      |               |
 |  +------+------+       +-----+-----+       +------+------+               |
@@ -540,7 +540,7 @@ Next step: <what to do next>
             |                  |             | from plan)|
             |                  |             +----------+
             |                  |                 
-            |             [VALIDATE]             
+            |             [VERIFY]             
             |             checks task            
             |                  |                 
             |          [meets acceptance?]       
@@ -563,7 +563,7 @@ Next step: <what to do next>
                    (split into                   
                     subtasks)                    
 
-  VALIDATE may also CREATE NEW WORK:
+  VERIFY may also CREATE NEW WORK:
   
     Spec Gap Found -----> New TASK (pending)
     Bug Discovered -----> New ISSUE (investigate)
@@ -584,7 +584,7 @@ Next step: <what to do next>
 
 | Command | Output | Description |
 |---------|--------|-------------|
-| `ralph query stage` | String | Current stage: INVESTIGATE, BUILD, VALIDATE, DECOMPOSE |
+| `ralph query stage` | String | Current stage: INVESTIGATE, BUILD, VERIFY, DECOMPOSE |
 | `ralph query iteration` | Number | Current iteration number |
 | `ralph query next` | JSON | Next action with item |
 
@@ -600,7 +600,7 @@ Next step: <what to do next>
 
 ### Prioritization Command
 
-`ralph task prioritize` is called by both PLAN and VALIDATE stages:
+`ralph task prioritize` is called by both PLAN and VERIFY stages:
 
 ```bash
 ralph task prioritize [--spec <file>]
@@ -635,7 +635,7 @@ Stages are determined by state:
 |-------|-------|
 | Has issues | INVESTIGATE |
 | Has pending tasks | BUILD |
-| Has done tasks, no pending | VALIDATE |
+| Has done tasks, no pending | VERIFY |
 | Has rejected task with kill_reason | DECOMPOSE |
 | Empty (no tasks, no issues) | COMPLETE |
 
@@ -676,7 +676,7 @@ Iteration 1:
 Iteration 2:
   INVESTIGATE: (no issues)
   BUILD: t-3a done, t-3b done
-  VALIDATE: 
+  VERIFY: 
     - t-3a ACCEPTED (meets criteria)
     - t-3b REJECTED (incomplete edge case)
     - Gap found: missing error handling
@@ -688,7 +688,7 @@ Iteration 2:
 Iteration 3:
   INVESTIGATE: i-1 -> t-5 created
   BUILD: t-3b done, t-4 done, t-5 done
-  VALIDATE: 
+  VERIFY: 
     - All tasks ACCEPTED
     - Spec requirements satisfied
     - PRIORITIZE: (no pending tasks)
@@ -699,18 +699,18 @@ Iteration 3:
 
 ### Core Flow
 - [ ] Rename "build mode" to "construct mode" in CLI and code
-- [ ] Implement three-phase iteration loop: INVESTIGATE -> BUILD -> VALIDATE
+- [ ] Implement three-phase iteration loop: INVESTIGATE -> BUILD -> VERIFY
 - [ ] BUILD stage processes tasks in priority/dependency order
-- [ ] VALIDATE stage compares done tasks against spec requirements
-- [ ] VALIDATE stage creates new tasks/issues for identified gaps
-- [ ] VALIDATE can accept (clear) or reject (tombstone) individual tasks
-- [ ] VALIDATE uses fork/join to verify all done tasks in parallel (one subagent per task)
+- [ ] VERIFY stage compares done tasks against spec requirements
+- [ ] VERIFY stage creates new tasks/issues for identified gaps
+- [ ] VERIFY can accept (clear) or reject (tombstone) individual tasks
+- [ ] VERIFY uses fork/join to verify all done tasks in parallel (one subagent per task)
 - [ ] Spec acceptance terminates construct mode
 
 ### Prioritization
 - [ ] Implement `ralph task prioritize` command with shared logic
 - [ ] PLAN stage calls prioritize at end before transitioning
-- [ ] VALIDATE stage calls prioritize at end before transitioning
+- [ ] VERIFY stage calls prioritize at end before transitioning
 - [ ] Prioritization considers dependencies, complexity, and critical path
 
 ### Context Management (Tiered)

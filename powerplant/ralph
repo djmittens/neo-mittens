@@ -1173,12 +1173,14 @@ Build the feature/fix. Rules:
 - Complete implementations only, no stubs
 - No code comments unless explicitly requested
 
-## Step 4: Validate
+## Step 4: Check Acceptance Criteria
 
-Before marking done, verify the implementation:
-1. If `accept` criteria provided, verify those specifically
-2. Run relevant tests
-3. Ensure the implementation matches the spec
+Before marking done, verify the task's acceptance criteria:
+1. Check **only** the `accept` criteria for this task
+2. Run any tests specified in the criteria
+3. Do NOT re-read the full spec - that's VERIFY stage's job
+
+If acceptance criteria pass, mark done. VERIFY stage will do the thorough spec check later.
 
 ## Step 5: Complete
 
@@ -1250,57 +1252,112 @@ Design decisions belong to the user, not the agent.
 
 All tasks are done. Verify the spec is actually complete.
 
-## Step 1: Get Context
+## CRITICAL: The Spec File is the Source of Truth
 
-Run `ralph query` to see completed tasks.
+**Do NOT just check task acceptance criteria.** The spec file may have been updated since tasks were created. You MUST verify against the CURRENT spec file content.
 
-Read the spec file: `ralph/specs/<spec>`
+## Step 1: Read the Spec File
 
-## Step 2: Verify Each Requirement
+Read the ENTIRE spec file: `ralph/specs/<spec>`
 
-For EACH requirement/acceptance criterion in the spec:
+Extract ALL requirements, including:
+- Acceptance criteria checkboxes (`- [ ]`)
+- Requirements stated in prose
+- Behavioral expectations in examples
+- Edge cases mentioned anywhere
 
-1. **Check implementation exists** - search codebase, read relevant files
-2. **Check tests exist and pass** - run the test suite
-3. **Check edge cases** - verify the implementation handles them
+**List every requirement you find.** Do not skip any.
 
-Be thorough. The goal is to catch gaps before marking the spec complete.
+## Step 2: Get Completed Tasks
 
-## Step 3: Decision
+Run `ralph query` to see completed tasks (status "done").
 
-### If ALL requirements are met:
+## Step 3: Verify Each Done Task (Parallelized)
+
+For EACH done task, spawn a subagent to verify:
 
 ```
-ralph task accept
+Task: "Verify task '{task.name}' with acceptance criteria: {task.accept}
+
+1. RE-CHECK: Does the implementation meet the acceptance criteria?
+   - Search codebase for the implementation
+   - Run any tests specified
+   - Check edge cases
+
+2. ALIGNMENT CHECK (only if re-check passes): 
+   - Does the acceptance criteria fully cover the related spec requirement?
+   - Are there aspects of the spec requirement not covered by the criteria?
+
+Return JSON:
+{
+  \\"task_id\\": \\"{task.id}\\",
+  \\"recheck_passed\\": true | false,
+  \\"recheck_evidence\\": \\"<what you found>\\",
+  \\"alignment_ok\\": true | false,  // only if recheck passed
+  \\"alignment_gap\\": \\"<what criteria missed>\\"  // only if alignment failed
+}"
 ```
 
-Then output:
+**Run all task verification subagents in parallel** (fork/join pattern).
+
+## Step 4: Verify Spec Coverage (Parallelized)
+
+For EACH requirement extracted from the spec file, spawn a subagent:
+
+```
+Task: "Verify this spec requirement is satisfied: <requirement>
+
+1. Search codebase for the implementation
+2. Check if it fully satisfies the requirement
+3. Identify any gaps
+
+Return JSON:
+{
+  \\"requirement\\": \\"<the requirement>\\",
+  \\"satisfied\\": true | false,
+  \\"evidence\\": \\"<what you found>\\",
+  \\"gap\\": \\"<what's missing>\\"  // only if not satisfied
+}"
+```
+
+**Run all spec verification subagents in parallel** (fork/join pattern).
+
+## Step 5: Collect Results and Apply
+
+After all subagents return:
+
+### For each task:
+- **Re-check failed** → `ralph task reject "<task_id>" "<reason>"`
+- **Re-check passed, alignment gap** → `ralph task accept` + create new task for gap
+- **Both passed** → `ralph task accept`
+
+### For spec gaps:
+- Create new task: `ralph task add '{"name": "what's missing", "accept": "how to verify"}'`
+
+### Final decision:
+
+If NO rejections and NO gaps:
 ```
 [RALPH] SPEC_COMPLETE
 ```
 
-### If requirements are NOT met:
-
-For each gap found, add a task:
+If ANY rejections or gaps:
 ```
-ralph task add '{"name": "what's missing", "accept": "how to verify"}'
+[RALPH] SPEC_INCOMPLETE: <summary>
 ```
 
-Then output:
-```
-[RALPH] SPEC_INCOMPLETE: <summary of what's missing>
-```
-
-The loop will continue with BUILD stage to implement the new tasks.
+The loop will continue with BUILD stage.
 
 ## Progress Reporting
 
 ```
 [RALPH] === VERIFY: <spec name> ===
-[RALPH] Checking: <requirement being verified>
+[RALPH] Requirements found: <count>
+[RALPH] Tasks to verify: <count>
+[RALPH] Verifying...
 ```
 
-## EXIT after either accepting or adding tasks
+## EXIT after applying all verdicts
 '''
 
     investigate_prompt_template = '''\
@@ -4295,8 +4352,49 @@ Examples:
                 args.completion_promise, args.no_ui, spec_file=spec_path.name,
                 iteration_timeout=args.timeout, context_limit=args.context_limit)
     elif args.command in ('construct', 'build', ''):
-        # Ensure plan.jsonl is committed before starting construct mode
         # Note: 'build' is supported as an alias for backward compatibility
+        
+        # Check if a spec file was provided as argument
+        spec_arg = args.arg
+        if spec_arg and not spec_arg.isdigit():
+            # Looks like a spec file argument - validate and switch to it
+            spec_path = Path(spec_arg)
+            if spec_path.is_absolute() or spec_path.exists():
+                if not spec_path.exists():
+                    print(f"{Colors.RED}Spec not found: {spec_arg}{Colors.NC}")
+                    sys.exit(1)
+            else:
+                spec_path = config.specs_dir / spec_arg
+                if not spec_path.exists():
+                    if not spec_arg.endswith('.md'):
+                        spec_path = config.specs_dir / f"{spec_arg}.md"
+                    if not spec_path.exists():
+                        print(f"{Colors.RED}Spec not found: {spec_arg}{Colors.NC}")
+                        print(f"Expected at: {config.specs_dir / spec_arg}")
+                        sys.exit(1)
+            
+            # Check for unfinished tasks before switching specs
+            if not check_unfinished_tasks(config, spec_path.name):
+                sys.exit(0)
+            
+            # Load current state to check if this spec has tasks
+            state = load_state(config)
+            
+            # Check if we're switching specs or using current spec
+            if state.spec != spec_path.name:
+                # Switching to a different spec - set it (this clears tasks)
+                cmd_set_spec(config, spec_path.name)
+                state = load_state(config)  # Reload after set
+            
+            # Check if there are any tasks for this spec
+            if not state.tasks:
+                print(f"{Colors.YELLOW}No tasks found for spec: {spec_path.name}{Colors.NC}")
+                print()
+                print("To generate tasks, run:")
+                print(f"  {Colors.CYAN}ralph plan {spec_path.name}{Colors.NC}")
+                sys.exit(1)
+        
+        # Ensure plan.jsonl is committed before starting construct mode
         if has_uncommitted_plan(config):
             print(f"{Colors.YELLOW}plan.jsonl has uncommitted changes.{Colors.NC}")
             try:
