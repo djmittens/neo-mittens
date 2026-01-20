@@ -52,25 +52,41 @@ if ! git diff --cached --quiet 2>/dev/null; then
   trap 'rm -f "$TEMP_MSG"' EXIT
 
   # Use OpenCode to generate a commit message
-  # The prompt asks for a concise conventional commit message
-  PROMPT="Generate a concise git commit message for the following staged changes. 
-Use conventional commit format (type: description).
-Focus on the 'why' not the 'what'.
-Keep it to 1-2 lines maximum.
-Do NOT include any explanations, just output the commit message itself.
-Do NOT wrap in quotes or code blocks.
+  PROMPT="Write a git commit message for these changes.
 
-Stats:
+STRICT FORMAT (follow exactly):
+<subject line: max 50 chars, type(scope): description>
+
+<body: 2-4 lines explaining the changes, each line max 72 chars>
+
+Example:
+feat(hooks): add commit message generation
+
+Add prepare-commit-msg hook that uses OpenCode to generate
+commit messages automatically. Integrates with bootstrap.sh
+for global installation.
+
+NOW GENERATE FOR THESE CHANGES:
+
 $STAGED_DIFF
 
-Diff (truncated):
 $STAGED_DIFF_FULL"
 
   # Run opencode in non-interactive mode
   # Use perl for timeout (works on macOS without coreutils)
   if perl -e 'alarm 60; exec @ARGV' opencode run "$PROMPT" > "$TEMP_MSG" 2>/dev/null; then
-    # Read the generated message (strip any trailing whitespace/newlines)
-    GENERATED_MSG="$(sed '/^$/d' "$TEMP_MSG" | head -5)"
+    # Extract the commit message from the code block in the output
+    # OpenCode often wraps the message in ```...``` and adds explanations
+    GENERATED_MSG="$(awk '
+      /^```/ { if (in_block) { print block; in_block=0 } else { in_block=1; block="" }; next }
+      in_block { block = block (block ? "\n" : "") $0 }
+    ' "$TEMP_MSG")"
+    
+    # If no code block found, try to extract lines that look like a commit message
+    # (start with a conventional commit type)
+    if [ -z "$GENERATED_MSG" ]; then
+      GENERATED_MSG="$(grep -A 20 '^[a-z]\+\(([^)]*)\)\?: ' "$TEMP_MSG" | head -20)"
+    fi
     
     if [ -n "$GENERATED_MSG" ]; then
       # Preserve existing comments from the commit message template

@@ -1,0 +1,130 @@
+#!/usr/bin/env bash
+#
+# gcai - Git Commit with AI-generated message
+# Uses OpenCode to generate a commit message, then opens your editor for review
+#
+# Usage: gcai [git-commit-options]
+#   e.g., gcai           - commit staged changes with AI message
+#         gcai -a        - stage all and commit with AI message
+#         gcai --amend   - amend with AI message
+
+set -euo pipefail
+
+# Pass through any flags to determine behavior
+COMMIT_ARGS=("$@")
+AMEND=false
+ALL=false
+
+for arg in "$@"; do
+  case "$arg" in
+    --amend) AMEND=true ;;
+    -a|--all) ALL=true ;;
+  esac
+done
+
+# Stage all if -a was passed (so we can see the diff)
+if $ALL; then
+  git add -u
+fi
+
+# Check if opencode is available
+if ! command -v opencode >/dev/null 2>&1; then
+  echo "Error: opencode not found in PATH" >&2
+  exit 1
+fi
+
+# Check if there are staged changes (or if amending)
+if git diff --cached --quiet 2>/dev/null && ! $AMEND; then
+  echo "No staged changes. Stage files first or use 'gcai -a'" >&2
+  exit 1
+fi
+
+# Get the diff
+if $AMEND; then
+  # For amend, show what's staged plus what was in the last commit
+  STAGED_DIFF="$(git diff --cached --stat 2>/dev/null || true)"
+  STAGED_DIFF_FULL="$(git diff --cached 2>/dev/null | head -500 || true)"
+  if [ -z "$STAGED_DIFF" ]; then
+    # No new changes, just use the last commit's diff
+    STAGED_DIFF="$(git show --stat --format='' HEAD 2>/dev/null || true)"
+    STAGED_DIFF_FULL="$(git show --format='' HEAD 2>/dev/null | head -500 || true)"
+  fi
+else
+  STAGED_DIFF="$(git diff --cached --stat 2>/dev/null || true)"
+  STAGED_DIFF_FULL="$(git diff --cached 2>/dev/null | head -500 || true)"
+fi
+
+if [ -z "$STAGED_DIFF" ]; then
+  echo "No changes to commit" >&2
+  exit 1
+fi
+
+echo "Generating commit message..."
+
+# Create temp file for opencode output
+TEMP_MSG="$(mktemp)"
+trap 'rm -f "$TEMP_MSG"' EXIT
+
+# Build the prompt
+PROMPT="Write a git commit message for these changes.
+
+STRICT FORMAT (follow exactly):
+<subject line: max 50 chars, type(scope): description>
+
+<body: 2-4 lines explaining the changes, each line max 72 chars>
+
+Example:
+feat(hooks): add commit message generation
+
+Add prepare-commit-msg hook that uses OpenCode to generate
+commit messages automatically. Integrates with bootstrap.sh
+for global installation.
+
+NOW GENERATE FOR THESE CHANGES:
+
+$STAGED_DIFF
+
+$STAGED_DIFF_FULL"
+
+# Run opencode
+if ! perl -e 'alarm 90; exec @ARGV' opencode run "$PROMPT" > "$TEMP_MSG" 2>/dev/null; then
+  echo "Failed to generate commit message" >&2
+  # Fall back to normal commit
+  exec git commit ${COMMIT_ARGS[@]+"${COMMIT_ARGS[@]}"}
+fi
+
+# Extract the commit message from code block
+GENERATED_MSG="$(awk '
+  /^```/ { if (in_block) { print block; in_block=0 } else { in_block=1; block="" }; next }
+  in_block { block = block (block ? "\n" : "") $0 }
+' "$TEMP_MSG")"
+
+# Fallback: try to extract lines starting with conventional commit type
+if [ -z "$GENERATED_MSG" ]; then
+  GENERATED_MSG="$(grep -A 20 '^[a-z]\+\(([^)]*)\)\?: ' "$TEMP_MSG" | head -20)"
+fi
+
+if [ -z "$GENERATED_MSG" ]; then
+  echo "Could not extract commit message from OpenCode output" >&2
+  # Fall back to normal commit
+  exec git commit ${COMMIT_ARGS[@]+"${COMMIT_ARGS[@]}"}
+fi
+
+# Create the commit message file
+COMMIT_MSG_FILE="$(mktemp)"
+trap 'rm -f "$TEMP_MSG" "$COMMIT_MSG_FILE"' EXIT
+
+{
+  printf '%s\n' "$GENERATED_MSG"
+  echo ""
+  echo "# ─────────────────────────────────────────────────────────────────"
+  echo "# AI-generated message above. Edit as needed."
+  echo "# Lines starting with '#' will be ignored."
+  echo "# ─────────────────────────────────────────────────────────────────"
+  echo "#"
+  echo "# Changes to be committed:"
+  git diff --cached --stat | sed 's/^/#   /'
+} > "$COMMIT_MSG_FILE"
+
+# Run git commit with the generated message file
+exec git commit ${COMMIT_ARGS[@]+"${COMMIT_ARGS[@]}"} --edit --file="$COMMIT_MSG_FILE"

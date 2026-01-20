@@ -10,7 +10,7 @@ set -euo pipefail
 # - Symlinks Hyprland config to ~/.config/hypr and Rofi config to ~/.config/rofi
 # - Symlinks tmux config (both XDG ~/.config/tmux and ~/.tmux.conf)
 # - Ensures TPM exists and installs plugins (Catppuccin via TPM)
-# - Configures global git hooks for OpenCode commit message generation
+# - Adds bin/ to PATH (includes gcai for AI-assisted git commits)
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" >/dev/null 2>&1 && pwd -P)"
 
@@ -342,20 +342,11 @@ for pattern in "target/" ".bsp/" ".metals/" ".bloop/" "*.class" "*.jar"; do
   fi
 done
 
-# 14) Setup global git hooks (OpenCode commit message generation)
-GLOBAL_HOOKS_DIR="$HOME/.config/git/hooks"
-ensure_dir "$GLOBAL_HOOKS_DIR"
+# 14) Add bin/ to PATH (contains gcai and other tools)
+install_path_block "$HOME/.profile" "$SCRIPT_DIR/bin"
+install_path_block "$HOME/.zshrc" "$SCRIPT_DIR/bin"
 
-# Link our prepare-commit-msg hook
-if [ -f "$SCRIPT_DIR/git-hooks/prepare-commit-msg" ]; then
-  link_symlink "$SCRIPT_DIR/git-hooks/prepare-commit-msg" "$GLOBAL_HOOKS_DIR/prepare-commit-msg"
-fi
-
-# Configure git to use global hooks directory
-git config --global core.hooksPath "$GLOBAL_HOOKS_DIR"
-echo "OK: Global git hooks configured at $GLOBAL_HOOKS_DIR"
-
-# 15) Install global Claude commands (ralph)
+# 15) Install global Claude commands (ralph alias)
 CLAUDE_COMMANDS_DIR="$HOME/.claude/commands"
 ensure_dir "$CLAUDE_COMMANDS_DIR"
 for cmd in "$SCRIPT_DIR/.claude/commands"/ralph-*.md; do
