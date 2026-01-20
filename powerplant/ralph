@@ -360,6 +360,183 @@ class IterationKillInfo:
 
 
 @dataclass
+class CompactedContext:
+    """Compacted context for resuming execution after context pressure."""
+    task_name: str
+    task_notes: Optional[str]
+    task_accept: Optional[str]
+    progress_summary: str
+    uncommitted_changes: str
+    key_files: list
+    blockers: list
+    next_step: str
+    
+    def to_prompt(self) -> str:
+        """Generate the compacted context prompt for resumption."""
+        lines = [
+            "=== COMPACTED CONTEXT ===",
+            "",
+            f"Task: {self.task_name}",
+            "",
+        ]
+        
+        if self.task_notes:
+            lines.append(f"Notes: {self.task_notes}")
+            lines.append("")
+        
+        if self.task_accept:
+            lines.append(f"Accept criteria: {self.task_accept}")
+            lines.append("")
+        
+        lines.extend([
+            f"Progress: {self.progress_summary}",
+            "",
+            f"Current state: Execution was compacted due to context pressure",
+            "",
+        ])
+        
+        if self.key_files:
+            lines.append(f"Key files: {', '.join(self.key_files)}")
+            lines.append("")
+        
+        if self.uncommitted_changes:
+            lines.extend([
+                "Uncommitted changes:",
+                "```",
+                self.uncommitted_changes[:2000],  # Truncate to avoid bloating context
+                "```" if len(self.uncommitted_changes) <= 2000 else "``` (truncated)",
+                "",
+            ])
+        
+        if self.blockers:
+            lines.append(f"Blockers: {'; '.join(self.blockers)}")
+            lines.append("")
+        
+        lines.extend([
+            f"Next step: {self.next_step}",
+            "",
+            "=== END COMPACTED ===",
+            "",
+            "## IMPORTANT: You are resuming from a compacted context",
+            "",
+            "The previous execution was stopped due to context pressure. Your context has been compacted.",
+            "Continue from where you left off. Do NOT re-explore the codebase - use the information above.",
+            "",
+            "If you need to explore more code, use subagents (Task tool) to avoid filling context again.",
+            "",
+        ])
+        
+        return "\n".join(lines)
+
+
+def capture_uncommitted_changes(repo_root: Path) -> str:
+    """Capture git diff of uncommitted changes (staged + unstaged)."""
+    try:
+        # Get combined diff of staged and unstaged changes
+        result = subprocess.run(
+            ['git', 'diff', 'HEAD'],
+            capture_output=True, text=True, cwd=repo_root, timeout=10
+        )
+        if result.returncode == 0 and result.stdout.strip():
+            return result.stdout.strip()
+        
+        # If no HEAD diff, try just unstaged
+        result = subprocess.run(
+            ['git', 'diff'],
+            capture_output=True, text=True, cwd=repo_root, timeout=10
+        )
+        return result.stdout.strip() if result.returncode == 0 else ""
+    except (subprocess.TimeoutExpired, Exception):
+        return ""
+
+
+def extract_key_files_from_diff(diff_text: str) -> list:
+    """Extract file paths from a git diff."""
+    files = []
+    for line in diff_text.split('\n'):
+        if line.startswith('diff --git a/'):
+            # Extract path from "diff --git a/path b/path"
+            parts = line.split(' ')
+            if len(parts) >= 3:
+                path = parts[2][2:]  # Remove "a/" prefix
+                files.append(path)
+    return files[:10]  # Limit to 10 most relevant files
+
+
+def extract_progress_from_output(output_text: str) -> tuple[str, str, list]:
+    """Extract progress summary, next step hints, and blockers from output.
+    
+    Returns: (progress_summary, next_step, blockers)
+    """
+    lines = output_text.split('\n')
+    
+    # Look for progress markers
+    progress_hints = []
+    blockers = []
+    last_activities = []
+    
+    for line in lines[-200:]:  # Check last 200 lines
+        lower_line = line.lower()
+        
+        # Capture progress markers
+        if '[ralph]' in lower_line and ('start' in lower_line or 'done' in lower_line):
+            progress_hints.append(line.strip())
+        
+        # Capture error/blocker indicators
+        if 'error' in lower_line or 'failed' in lower_line or 'exception' in lower_line:
+            blockers.append(line.strip()[:200])
+        
+        # Capture recent tool activities
+        if any(marker in lower_line for marker in ['running', 'editing', 'reading', 'writing', 'searching']):
+            last_activities.append(line.strip()[:100])
+    
+    # Build progress summary
+    if progress_hints:
+        progress = progress_hints[-1]  # Most recent progress
+    else:
+        progress = "In progress (no explicit markers found)"
+    
+    # Build next step hint from last activities
+    if last_activities:
+        next_step = f"Was working on: {last_activities[-1]}"
+    else:
+        next_step = "Continue implementing the task"
+    
+    # Limit blockers
+    blockers = blockers[-3:] if blockers else []
+    
+    return progress, next_step, blockers
+
+
+def build_compacted_context(
+    task: 'Task',
+    repo_root: Path,
+    output_text: str
+) -> CompactedContext:
+    """Build a compacted context for resumption after context pressure."""
+    
+    # Capture uncommitted changes
+    uncommitted = capture_uncommitted_changes(repo_root)
+    
+    # Extract key files from the diff
+    key_files = extract_key_files_from_diff(uncommitted)
+    
+    # Extract progress from output
+    progress, next_step, blockers = extract_progress_from_output(output_text)
+    
+    return CompactedContext(
+        task_name=task.name,
+        task_notes=task.notes,
+        task_accept=task.accept,
+        progress_summary=progress,
+        uncommitted_changes=uncommitted,
+        key_files=key_files,
+        blockers=blockers,
+        next_step=next_step
+    )
+
+
+@dataclass
 class RalphConfig:
     repo_root: Path
     ralph_dir: Path
@@ -1391,15 +1568,35 @@ Return JSON:
 After all subagents return:
 
 ### For each task:
-- **Re-check failed** → `ralph task reject "<task_id>" "<reason>"`
-  - Task will be retried with the same approach
-  - If the approach itself is wrong, create a NEW task with `supersedes` field instead:
-    `ralph task add '{"name": "new approach", "accept": "...", "supersedes": "<rejected-task-id>"}'`
+- **Re-check failed** → Choose the right response:
+
+  1. **Implementation bug** (retry will help): 
+     `ralph task reject "<task_id>" "<reason>"`
+     
+  2. **Wrong approach** (need different strategy):
+     `ralph task add '{"name": "new approach", "accept": "...", "supersedes": "<task-id>"}'`
+     Then delete the old task: `ralph task delete <task-id>`
+     
+  3. **Architectural blocker** (cannot be done with current system):
+     `ralph issue add "Task <task-id> cannot be implemented: <why>. Spec may need revision or architectural change required."`
+     Then delete the blocked task: `ralph task delete <task-id>`
+
 - **Re-check passed, alignment gap** → `ralph task accept` + create new task for gap
 - **Both passed** → `ralph task accept`
 
+### Recognizing Architectural Blockers
+
+If a task has been rejected before (check `reject` field or Rejection History) and the same fundamental issue persists, it is likely an architectural blocker, not an implementation bug. Signs:
+
+- "Cannot do X mid-execution" 
+- "Architecture does not support Y"
+- "Would require changes to Z which is outside this spec"
+- Same rejection reason keeps recurring
+
+**Do NOT keep rejecting the same task.** Log an issue and delete the task.
+
 ### For spec gaps:
-- Create new task: `ralph task add '{"name": "what's missing", "accept": "how to verify"}'`
+- Create new task: `ralph task add '{"name": "what is missing", "accept": "how to verify"}'`
 
 ### Final decision:
 
@@ -3575,9 +3772,10 @@ def cmd_run(config: RalphConfig, mode: str, max_iterations: int, max_cost: float
                 opencode_proc.stdout.close()
             
             # Track if we killed this iteration (shared state for monitor thread)
-            kill_state = {"killed": False, "reason": "none", "info": None}
+            kill_state = {"killed": False, "reason": "none", "info": None, "compact_requested": False}
             soft_warned = [False]  # Use list for mutability in closure
             compact_attempted = [False]  # Track if we've attempted compaction at 85%
+            compaction_in_progress = [False]  # Track if we're running with compacted context
             reader_stop = threading.Event()
             
             # Start reader thread with stop event for clean shutdown
@@ -3639,27 +3837,23 @@ def cmd_run(config: RalphConfig, mode: str, max_iterations: int, max_cost: float
                             pass
                         break
                     
-                    # Check compact limit (85%) - attempt compaction, then kill if still high
+                    # Check compact limit (85%) - attempt compaction by terminating and resuming
                     if not interactive and current_tokens >= compact_limit and not compact_attempted[0]:
                         compact_attempted[0] = True
                         pct = current_tokens / context_limit * 100
-                        print(f"\n{Colors.YELLOW}[RALPH] Context at {pct:.0f}% - attempting compaction...{Colors.NC}")
+                        print(f"\n{Colors.YELLOW}[RALPH] Context at {pct:.0f}% - requesting compaction...{Colors.NC}")
                         
-                        # Compaction cannot be done mid-execution (stdin is DEVNULL).
-                        # Log the attempt and proceed to kill since compaction "fails".
-                        print(f"{Colors.RED}[RALPH] Compaction failed (cannot compact mid-execution) - killing iteration{Colors.NC}")
-                        
-                        kill_state["killed"] = True
-                        kill_state["reason"] = "compaction_failed"
+                        # Request compaction - main loop will handle resumption
+                        kill_state["compact_requested"] = True
                         kill_state["info"] = IterationKillInfo(
-                            reason="compaction_failed",
+                            reason="compaction_requested",
                             task_name=current_task_name,
                             tokens_used=current_tokens,
                             context_limit=context_limit,
                             elapsed_seconds=elapsed,
                             last_activity=output_buffer.get_last_activity()
                         )
-                        # Kill the processes
+                        # Terminate the processes gracefully
                         try:
                             opencode_proc.terminate()
                             ralph_stream_proc.terminate()
@@ -3685,7 +3879,7 @@ def cmd_run(config: RalphConfig, mode: str, max_iterations: int, max_cost: float
             else:
                 # Poll instead of blocking wait, so monitor thread can kill us
                 while ralph_stream_proc.poll() is None:
-                    if kill_state["killed"]:
+                    if kill_state["killed"] or kill_state["compact_requested"]:
                         break
                     time.sleep(0.1)
                 exit_code = ralph_stream_proc.returncode if ralph_stream_proc.returncode is not None else -1
@@ -3693,14 +3887,190 @@ def cmd_run(config: RalphConfig, mode: str, max_iterations: int, max_cost: float
             # Wait for monitor to finish
             monitor_thread.join(timeout=1.0)
             
+            # Handle compaction request - attempt to resume with compacted context
+            if kill_state["compact_requested"] and not kill_state["killed"]:
+                print(f"{Colors.YELLOW}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━{Colors.NC}")
+                print(f"{Colors.YELLOW}COMPACTION: Building compacted context...{Colors.NC}")
+                
+                # Clean up current processes
+                reader_stop.set()
+                try:
+                    ralph_stream_proc.kill()
+                    opencode_proc.kill()
+                except:
+                    pass
+                reader_thread.join(timeout=2.0)
+                if opencode_proc.poll() is None:
+                    opencode_proc.wait()
+                
+                # Build compacted context
+                current_task = state.get_next_task()
+                if current_task:
+                    compacted = build_compacted_context(
+                        current_task,
+                        config.repo_root,
+                        output_buffer.get_all()
+                    )
+                    compacted_prompt = compacted.to_prompt()
+                    
+                    # Combine with original prompt
+                    full_prompt = compacted_prompt + "\n\n" + prompt_content
+                    
+                    print(f"{Colors.GREEN}[RALPH] Context compacted. Resuming execution...{Colors.NC}")
+                    print(f"{Colors.YELLOW}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━{Colors.NC}")
+                    
+                    # Create new output buffer for resumed execution
+                    output_buffer = OutputBuffer()
+                    compaction_in_progress[0] = True
+                    
+                    # Start new opencode process with compacted context
+                    cmd = ['opencode', 'run', '--model', 'anthropic/claude-opus-4-5', 
+                           '--format', 'json', full_prompt]
+                    
+                    opencode_proc = subprocess.Popen(
+                        cmd,
+                        stdin=subprocess.DEVNULL,
+                        stdout=subprocess.PIPE,
+                        stderr=subprocess.STDOUT,
+                        cwd=config.repo_root,
+                        env=opencode_env
+                    )
+                    
+                    ralph_stream_proc = subprocess.Popen(
+                        [sys.executable, __file__, 'stream'],
+                        stdin=opencode_proc.stdout,
+                        stdout=subprocess.PIPE,
+                        stderr=subprocess.STDOUT,
+                    )
+                    
+                    if opencode_proc.stdout:
+                        opencode_proc.stdout.close()
+                    
+                    # Reset kill state for resumed execution (but keep compact_attempted=True)
+                    kill_state = {"killed": False, "reason": "none", "info": None, "compact_requested": False}
+                    reader_stop = threading.Event()
+                    
+                    # Start new reader thread
+                    reader_thread = threading.Thread(
+                        target=stream_output,
+                        args=(ralph_stream_proc.stdout, output_buffer, metrics, not interactive, config.output_fifo, reader_stop)
+                    )
+                    reader_thread.daemon = True
+                    reader_thread.start()
+                    
+                    # Start new monitor thread - only check 70% resume threshold and hard limit
+                    resumed_start_time = time.time()
+                    resume_check_done = [False]
+                    
+                    def monitor_resumed():
+                        """Monitor thread for resumed execution after compaction."""
+                        resumed_deadline = resumed_start_time + iteration_timeout
+                        check_interval = 2.0
+                        resume_threshold = int(context_limit * 0.70)  # Check if < 70% after compaction
+                        
+                        while ralph_stream_proc.poll() is None and opencode_proc.poll() is None:
+                            if kill_state["killed"]:
+                                break
+                            
+                            resumed_elapsed = int(time.time() - resumed_start_time)
+                            current_tokens = output_buffer.get_iteration_tokens()
+                            
+                            # Check timeout
+                            if time.time() >= resumed_deadline:
+                                kill_state["killed"] = True
+                                kill_state["reason"] = "timeout"
+                                kill_state["info"] = IterationKillInfo(
+                                    reason="timeout",
+                                    task_name=current_task_name,
+                                    timeout_seconds=iteration_timeout,
+                                    elapsed_seconds=resumed_elapsed,
+                                    last_activity=output_buffer.get_last_activity()
+                                )
+                                try:
+                                    opencode_proc.terminate()
+                                    ralph_stream_proc.terminate()
+                                except:
+                                    pass
+                                break
+                            
+                            # Check if context is too high after compaction (compaction failed)
+                            # We give it some time to start, then check if still > 80%
+                            if current_tokens > 0 and not resume_check_done[0]:
+                                resume_check_done[0] = True
+                                pct = current_tokens / context_limit * 100
+                                if current_tokens > int(context_limit * 0.80):
+                                    print(f"\n{Colors.RED}[RALPH] Compaction failed - still at {pct:.0f}% after resume{Colors.NC}")
+                                    kill_state["killed"] = True
+                                    kill_state["reason"] = "compaction_failed"
+                                    kill_state["info"] = IterationKillInfo(
+                                        reason="compaction_failed",
+                                        task_name=current_task_name,
+                                        tokens_used=current_tokens,
+                                        context_limit=context_limit,
+                                        elapsed_seconds=resumed_elapsed,
+                                        last_activity=output_buffer.get_last_activity()
+                                    )
+                                    try:
+                                        opencode_proc.terminate()
+                                        ralph_stream_proc.terminate()
+                                    except:
+                                        pass
+                                    break
+                                else:
+                                    print(f"\n{Colors.GREEN}[RALPH] Context compacted: resumed at {pct:.0f}%{Colors.NC}")
+                            
+                            # Check hard limit (95%)
+                            if current_tokens >= hard_limit:
+                                kill_state["killed"] = True
+                                kill_state["reason"] = "context_limit"
+                                kill_state["info"] = IterationKillInfo(
+                                    reason="context_limit",
+                                    task_name=current_task_name,
+                                    tokens_used=current_tokens,
+                                    context_limit=context_limit,
+                                    elapsed_seconds=resumed_elapsed,
+                                    last_activity=output_buffer.get_last_activity()
+                                )
+                                try:
+                                    opencode_proc.terminate()
+                                    ralph_stream_proc.terminate()
+                                except:
+                                    pass
+                                break
+                            
+                            time.sleep(check_interval)
+                    
+                    resumed_monitor_thread = threading.Thread(target=monitor_resumed, daemon=True)
+                    resumed_monitor_thread.start()
+                    
+                    # Wait for resumed process
+                    while ralph_stream_proc.poll() is None:
+                        if kill_state["killed"]:
+                            break
+                        time.sleep(0.1)
+                    exit_code = ralph_stream_proc.returncode if ralph_stream_proc.returncode is not None else -1
+                    
+                    resumed_monitor_thread.join(timeout=1.0)
+                    
+                    # Update start_time for duration calculation
+                    start_time = resumed_start_time
+                else:
+                    # No current task - treat as failure
+                    print(f"{Colors.RED}[RALPH] No current task for compaction - treating as failure{Colors.NC}")
+                    kill_state["killed"] = True
+                    kill_state["reason"] = "compaction_failed"
+            
             # Check if we were killed by the monitor
             if kill_state["killed"]:
                 print(f"\n{Colors.RED}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━{Colors.NC}")
                 if kill_state["reason"] == "timeout":
                     print(f"{Colors.RED}TIMEOUT: Iteration killed after {iteration_timeout_ms}ms{Colors.NC}")
-                else:
+                elif kill_state["info"] and kill_state["info"].tokens_used > 0:
                     pct = kill_state["info"].tokens_used / context_limit * 100
-                    print(f"{Colors.RED}CONTEXT LIMIT: Iteration killed at {kill_state['info'].tokens_used:,} tokens ({pct:.0f}%){Colors.NC}")
+                    reason_text = "COMPACTION FAILED" if kill_state["reason"] == "compaction_failed" else "CONTEXT LIMIT"
+                    print(f"{Colors.RED}{reason_text}: Iteration killed at {kill_state['info'].tokens_used:,} tokens ({pct:.0f}%){Colors.NC}")
+                else:
+                    print(f"{Colors.RED}KILLED: {kill_state['reason']}{Colors.NC}")
                 print(f"Last activity: {output_buffer.get_last_activity() or 'unknown'}")
                 
                 print(f"{Colors.RED}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━{Colors.NC}")
@@ -3731,10 +4101,10 @@ def cmd_run(config: RalphConfig, mode: str, max_iterations: int, max_cost: float
                 # The next iteration will get guidance to break down the problem
                 kill_info = kill_state["info"]
                 metrics.last_kill_reason = kill_state["reason"]
-                metrics.last_kill_activity = kill_info.last_activity or "unknown"
+                metrics.last_kill_activity = kill_info.last_activity if kill_info else "unknown"
                 if kill_state["reason"] == "timeout":
                     metrics.kills_timeout += 1
-                elif kill_state["reason"] == "context_limit":
+                elif kill_state["reason"] in ("context_limit", "compaction_failed"):
                     metrics.kills_context += 1
             else:
                 consecutive_failures += 1

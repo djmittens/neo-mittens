@@ -77,12 +77,32 @@ Return JSON:
 After all subagents return:
 
 ### For each task:
-- **Re-check failed** → `ralph task reject "<task_id>" "<reason>"`
-  - Task will be retried with the same approach
-  - If the approach itself is wrong, create a NEW task with `supersedes` field instead:
-    `ralph task add '{"name": "new approach", "accept": "...", "supersedes": "<rejected-task-id>"}'`
+- **Re-check failed** → Choose the right response:
+
+  1. **Implementation bug** (retry will help): 
+     `ralph task reject "<task_id>" "<reason>"`
+     
+  2. **Wrong approach** (need different strategy):
+     `ralph task add '{"name": "new approach", "accept": "...", "supersedes": "<task-id>"}'`
+     Then delete the old task: `ralph task delete <task-id>`
+     
+  3. **Architectural blocker** (can't be done with current system):
+     `ralph issue add "Task <task-id> cannot be implemented: <why>. Spec may need revision or architectural change required."`
+     Then delete the blocked task: `ralph task delete <task-id>`
+
 - **Re-check passed, alignment gap** → `ralph task accept` + create new task for gap
 - **Both passed** → `ralph task accept`
+
+### Recognizing Architectural Blockers
+
+If a task has been rejected before (check `reject` field or Rejection History) and the same fundamental issue persists, it's likely an architectural blocker, not an implementation bug. Signs:
+
+- "Cannot do X mid-execution" 
+- "Architecture doesn't support Y"
+- "Would require changes to Z which is outside this spec"
+- Same rejection reason keeps recurring
+
+**Do NOT keep rejecting the same task.** Log an issue and delete the task.
 
 ### For spec gaps:
 - Create new task: `ralph task add '{"name": "what's missing", "accept": "how to verify"}'`
