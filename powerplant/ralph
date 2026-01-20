@@ -96,8 +96,11 @@ CONTEXT_COMPACT_LIMIT_PCT = 85
 # Hard limit: kill iteration when context usage exceeds this percentage  
 CONTEXT_HARD_LIMIT_PCT = 95
 
-# Default iteration timeout in milliseconds (15 minutes)
-DEFAULT_ITERATION_TIMEOUT_MS = 900000
+# Default stage timeout in milliseconds (5 minutes per stage, per spec)
+DEFAULT_STAGE_TIMEOUT_MS = 300000
+
+# Default iteration timeout in milliseconds (5 minutes)
+DEFAULT_ITERATION_TIMEOUT_MS = 300000
 
 
 # =============================================================================
@@ -3232,11 +3235,11 @@ def print_plan_report(state: RalphState, mode: str):
 
 def cmd_run(config: RalphConfig, mode: str, max_iterations: int, max_cost: float,
             max_failures: int, completion_promise: str, no_ui: bool = False,
-            spec_file: Optional[str] = None, iteration_timeout_ms: int = DEFAULT_ITERATION_TIMEOUT_MS,
+            spec_file: Optional[str] = None, stage_timeout_ms: int = DEFAULT_STAGE_TIMEOUT_MS,
             context_limit: int = DEFAULT_CONTEXT_WINDOW):
     """Run the main loop."""
     # Convert timeout from milliseconds to seconds for internal use
-    iteration_timeout = iteration_timeout_ms / 1000.0
+    iteration_timeout = stage_timeout_ms / 1000.0
     
     if not config.ralph_dir.exists():
         print(f"{Colors.RED}Ralph not initialized. Run 'ralph init' first.{Colors.NC}")
@@ -4237,8 +4240,8 @@ Examples:
                        help='Circuit breaker: stop after N consecutive failures')
     parser.add_argument('--completion-promise', type=str, default='',
                        help='Stop when output contains this text')
-    parser.add_argument('--timeout', type=int, default=DEFAULT_ITERATION_TIMEOUT_MS,
-                       help=f'Kill iteration after N milliseconds (default: {DEFAULT_ITERATION_TIMEOUT_MS}ms)')
+    parser.add_argument('--timeout', type=int, default=DEFAULT_STAGE_TIMEOUT_MS,
+                       help=f'Kill stage after N milliseconds (default: {DEFAULT_STAGE_TIMEOUT_MS}ms)')
     parser.add_argument('--context-limit', type=int, default=DEFAULT_CONTEXT_WINDOW,
                        help=f'Context window size in tokens (default: {DEFAULT_CONTEXT_WINDOW})')
     parser.add_argument('--no-ui', action='store_true',
@@ -4353,7 +4356,7 @@ Examples:
         
         cmd_run(config, 'plan', 1, args.max_cost, args.max_failures, 
                 args.completion_promise, args.no_ui, spec_file=spec_path.name,
-                iteration_timeout_ms=args.timeout, context_limit=args.context_limit)
+                stage_timeout_ms=args.timeout, context_limit=args.context_limit)
     elif args.command in ('construct', 'build', ''):
         # Note: 'build' is supported as an alias for backward compatibility
         
@@ -4417,7 +4420,7 @@ Examples:
         
         cmd_run(config, 'build', iterations, args.max_cost, args.max_failures, 
                 args.completion_promise, args.no_ui,
-                iteration_timeout_ms=args.timeout, context_limit=args.context_limit)
+                stage_timeout_ms=args.timeout, context_limit=args.context_limit)
     elif args.command == 'help':
         parser.print_help()
     else:
