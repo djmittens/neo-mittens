@@ -1,0 +1,89 @@
+#!/usr/bin/env bash
+#
+# prepare-commit-msg hook that uses OpenCode to auto-generate commit messages
+# Installed globally via neo-mittens bootstrap.sh
+#
+# Arguments:
+#   $1 - Path to the file containing the commit message
+#   $2 - Source of the commit message (message, template, merge, squash, commit)
+#   $3 - Commit SHA (only when $2 is "commit")
+
+set -euo pipefail
+
+COMMIT_MSG_FILE="$1"
+COMMIT_SOURCE="${2:-}"
+
+# Skip if this is a merge, squash, or amend (already has a message)
+case "$COMMIT_SOURCE" in
+  merge|squash|commit)
+    exit 0
+    ;;
+esac
+
+# Skip if message was provided via -m flag
+if [ "$COMMIT_SOURCE" = "message" ]; then
+  exit 0
+fi
+
+# Skip if there's already a non-comment message in the file
+# Only check content BEFORE the scissors line (>8), as everything after is ignored by git
+CONTENT_BEFORE_SCISSORS="$(sed '/^# -.*>8/,$d' "$COMMIT_MSG_FILE" 2>/dev/null || cat "$COMMIT_MSG_FILE")"
+if echo "$CONTENT_BEFORE_SCISSORS" | grep -qv '^#' 2>/dev/null && echo "$CONTENT_BEFORE_SCISSORS" | grep -v '^#' | grep -q '[^[:space:]]'; then
+  exit 0
+fi
+
+# Check if opencode is available
+if ! command -v opencode >/dev/null 2>&1; then
+  exit 0
+fi
+
+# Check if there are staged changes
+if ! git diff --cached --quiet 2>/dev/null; then
+  # Get the diff of staged changes
+  STAGED_DIFF="$(git diff --cached --stat 2>/dev/null || true)"
+  STAGED_DIFF_FULL="$(git diff --cached 2>/dev/null | head -500 || true)"
+  
+  if [ -z "$STAGED_DIFF" ]; then
+    exit 0
+  fi
+
+  # Create a temp file for the generated message
+  TEMP_MSG="$(mktemp)"
+  trap 'rm -f "$TEMP_MSG"' EXIT
+
+  # Use OpenCode to generate a commit message
+  # The prompt asks for a concise conventional commit message
+  PROMPT="Generate a concise git commit message for the following staged changes. 
+Use conventional commit format (type: description).
+Focus on the 'why' not the 'what'.
+Keep it to 1-2 lines maximum.
+Do NOT include any explanations, just output the commit message itself.
+Do NOT wrap in quotes or code blocks.
+
+Stats:
+$STAGED_DIFF
+
+Diff (truncated):
+$STAGED_DIFF_FULL"
+
+  # Run opencode in non-interactive mode
+  # Use perl for timeout (works on macOS without coreutils)
+  if perl -e 'alarm 60; exec @ARGV' opencode run "$PROMPT" > "$TEMP_MSG" 2>/dev/null; then
+    # Read the generated message (strip any trailing whitespace/newlines)
+    GENERATED_MSG="$(sed '/^$/d' "$TEMP_MSG" | head -5)"
+    
+    if [ -n "$GENERATED_MSG" ]; then
+      # Preserve existing comments from the commit message template
+      COMMENTS="$(grep '^#' "$COMMIT_MSG_FILE" 2>/dev/null || true)"
+      
+      # Write generated message followed by blank line and comments
+      {
+        printf '%s\n' "$GENERATED_MSG"
+        echo ""
+        printf '%s\n' "$COMMENTS"
+      } > "$COMMIT_MSG_FILE"
+    fi
+  fi
+fi
+
+exit 0

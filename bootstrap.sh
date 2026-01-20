@@ -10,6 +10,7 @@ set -euo pipefail
 # - Symlinks Hyprland config to ~/.config/hypr and Rofi config to ~/.config/rofi
 # - Symlinks tmux config (both XDG ~/.config/tmux and ~/.tmux.conf)
 # - Ensures TPM exists and installs plugins (Catppuccin via TPM)
+# - Configures global git hooks for OpenCode commit message generation
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" >/dev/null 2>&1 && pwd -P)"
 
@@ -341,7 +342,20 @@ for pattern in "target/" ".bsp/" ".metals/" ".bloop/" "*.class" "*.jar"; do
   fi
 done
 
-# 14) Install global Claude commands (ralph)
+# 14) Setup global git hooks (OpenCode commit message generation)
+GLOBAL_HOOKS_DIR="$HOME/.config/git/hooks"
+ensure_dir "$GLOBAL_HOOKS_DIR"
+
+# Link our prepare-commit-msg hook
+if [ -f "$SCRIPT_DIR/git-hooks/prepare-commit-msg" ]; then
+  link_symlink "$SCRIPT_DIR/git-hooks/prepare-commit-msg" "$GLOBAL_HOOKS_DIR/prepare-commit-msg"
+fi
+
+# Configure git to use global hooks directory
+git config --global core.hooksPath "$GLOBAL_HOOKS_DIR"
+echo "OK: Global git hooks configured at $GLOBAL_HOOKS_DIR"
+
+# 15) Install global Claude commands (ralph)
 CLAUDE_COMMANDS_DIR="$HOME/.claude/commands"
 ensure_dir "$CLAUDE_COMMANDS_DIR"
 for cmd in "$SCRIPT_DIR/.claude/commands"/ralph-*.md; do
@@ -350,7 +364,7 @@ for cmd in "$SCRIPT_DIR/.claude/commands"/ralph-*.md; do
   fi
 done
 
-# 15) Install ralph shell completions
+# 16) Install ralph shell completions
 install_ralph_completion_bash() {
   local bashrc="$HOME/.bashrc"
   local completion_file="$SCRIPT_DIR/powerplant/ralph-completion.bash"
@@ -420,7 +434,7 @@ ${end}"
 install_ralph_completion_bash
 install_ralph_completion_zsh
 
-# 16) Install textual for ralph TUI (optional, best-effort)
+# 17) Install textual for ralph TUI (optional, best-effort)
 install_ralph_textual() {
   # Check if textual is already available
   if python3 -c "import textual" 2>/dev/null; then
@@ -457,7 +471,7 @@ install_ralph_textual() {
 
 install_ralph_textual
 
-# 17) Install global OpenCode tools (to ~/.config/opencode/tools/)
+# 18) Install global OpenCode tools (to ~/.config/opencode/tools/)
 OPENCODE_CONFIG_DIR="$HOME/.config/opencode"
 OPENCODE_TOOLS_DIR="$OPENCODE_CONFIG_DIR/tools"
 ensure_dir "$OPENCODE_TOOLS_DIR"
@@ -480,7 +494,7 @@ if [ -f "$SCRIPT_DIR/.opencode/package.json" ]; then
   fi
 fi
 
-# 18) Install global OpenCode skills (to ~/.config/opencode/skills/)
+# 19) Install global OpenCode skills (to ~/.config/opencode/skills/)
 OPENCODE_SKILLS_DIR="$OPENCODE_CONFIG_DIR/skills"
 ensure_dir "$OPENCODE_SKILLS_DIR"
 
