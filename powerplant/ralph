@@ -4035,14 +4035,72 @@ def cmd_task(config: RalphConfig, action: str, desc: Optional[str] = None, arg3:
             print(json.dumps({"prioritized": 0, "high": 0, "medium": 0, "low": 0}))
             return 0
         
-        blocking_count = {}
-        for task in pending:
-            blocking_count[task.id] = 0
+        task_ids = {task.id for task in pending}
+        
+        dependents: dict[str, list[str]] = {task.id: [] for task in pending}
         for task in pending:
             if task.deps:
                 for dep_id in task.deps:
-                    if dep_id in blocking_count:
-                        blocking_count[dep_id] += 1
+                    if dep_id in dependents:
+                        dependents[dep_id].append(task.id)
+        
+        blocking_count = {tid: len(deps) for tid, deps in dependents.items()}
+        
+        critical_path_length: dict[str, int] = {}
+        
+        def compute_critical_path(task_id: str, visited: set[str]) -> int:
+            if task_id in critical_path_length:
+                return critical_path_length[task_id]
+            if task_id in visited:
+                return 0
+            visited.add(task_id)
+            
+            deps = dependents.get(task_id, [])
+            if not deps:
+                critical_path_length[task_id] = 0
+                return 0
+            
+            max_path = 0
+            for dep_id in deps:
+                if dep_id in task_ids:
+                    path_len = 1 + compute_critical_path(dep_id, visited)
+                    max_path = max(max_path, path_len)
+            
+            critical_path_length[task_id] = max_path
+            return max_path
+        
+        for task in pending:
+            compute_critical_path(task.id, set())
+        
+        task_by_id = {task.id: task for task in pending}
+        depth_from_root: dict[str, int] = {}
+        
+        def compute_depth(task_id: str, visited: set[str]) -> int:
+            if task_id in depth_from_root:
+                return depth_from_root[task_id]
+            if task_id in visited or task_id not in task_by_id:
+                return 0
+            visited.add(task_id)
+            
+            task = task_by_id[task_id]
+            if not task.deps:
+                depth_from_root[task_id] = 0
+                return 0
+            
+            max_depth = 0
+            for dep_id in task.deps:
+                if dep_id in task_ids:
+                    d = 1 + compute_depth(dep_id, visited)
+                    max_depth = max(max_depth, d)
+            
+            depth_from_root[task_id] = max_depth
+            return max_depth
+        
+        for task in pending:
+            compute_depth(task.id, set())
+        
+        total_chain_length = {tid: depth_from_root.get(tid, 0) + critical_path_length.get(tid, 0) 
+                              for tid in task_ids}
         
         def estimate_complexity(task: Task) -> str:
             text = (task.name + " " + (task.notes or "")).lower()
@@ -4074,9 +4132,15 @@ def cmd_task(config: RalphConfig, action: str, desc: Optional[str] = None, arg3:
             
             complexity = estimate_complexity(task)
             blocks = blocking_count[task.id]
+            path_len = critical_path_length.get(task.id, 0)
+            chain_len = total_chain_length.get(task.id, 0)
             
             if is_docs_cleanup(task):
                 task.priority = "low"
+            elif path_len >= 2:
+                task.priority = "high"
+            elif chain_len >= 2 and blocks >= 1:
+                task.priority = "high"
             elif complexity == "small" and blocks >= 2:
                 task.priority = "high"
             elif blocks >= 3:
