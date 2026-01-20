@@ -1700,7 +1700,7 @@ def cmd_status(config: RalphConfig):
     }
     print(f"  Stage: {stage_colors.get(stage, '')}{stage}{Colors.NC}")
     
-    # Tasks
+    # Tasks summary
     pending = len(state.pending)
     done = len(state.done)
     print(f"  Tasks: {pending} pending, {done} done (awaiting verification)")
@@ -1708,6 +1708,18 @@ def cmd_status(config: RalphConfig):
     # Issues
     if state.issues:
         print(f"  Issues: {Colors.RED}{len(state.issues)} discovered{Colors.NC}")
+    
+    # Task list
+    if state.pending or state.done:
+        print()
+        print(f"{Colors.BLUE}Plan:{Colors.NC}")
+        for task in state.done:
+            print(f"  {Colors.GREEN}[done]{Colors.NC} {task.id}: {task.name[:60]}")
+        for task in state.pending:
+            marker = f"{Colors.YELLOW}[pend]{Colors.NC}"
+            if task.reject_reason:
+                marker = f"{Colors.RED}[retry]{Colors.NC}"
+            print(f"  {marker} {task.id}: {task.name[:60]}")
     
     # Count specs
     spec_count = len(list(config.specs_dir.glob('*.md'))) if config.specs_dir.exists() else 0
@@ -4255,6 +4267,14 @@ def cmd_log(config: RalphConfig, show_all: bool = False, spec_filter: Optional[s
             tasks[task_id]["rejected"] = tombstone_data
     
     task_list = list(tasks.values())
+    
+    for task in task_list:
+        if task.get("accepted"):
+            task["status"] = "accepted"
+        elif task.get("rejected"):
+            task["status"] = "rejected"
+        else:
+            task["status"] = "pending"
     
     if spec_filter:
         task_list = [t for t in task_list if t.get("spec") == spec_filter]
