@@ -3821,8 +3821,8 @@ def cmd_query(config: RalphConfig, subquery: Optional[str] = None):
         print(json.dumps(output, indent=2))
 
 
-def cmd_task(config: RalphConfig, action: str, desc: Optional[str] = None):
-    """Task mutations: done, add, accept."""
+def cmd_task(config: RalphConfig, action: str, desc: Optional[str] = None, arg3: Optional[str] = None):
+    """Task mutations: done, add, accept, reject."""
     state = load_state(config)
     
     if action == 'done':
@@ -3900,21 +3900,27 @@ def cmd_task(config: RalphConfig, action: str, desc: Optional[str] = None):
         print(f"{Colors.GREEN}Accepted {count} tasks{Colors.NC}")
         
     elif action == 'reject':
-        if not desc:
-            print(f"{Colors.RED}Usage: ralph task reject \"reason\"{Colors.NC}")
+        if not desc or not arg3:
+            print(f"{Colors.RED}Usage: ralph task reject <task-id> \"reason\"{Colors.NC}")
             return 1
+        task_id = desc
+        reason = arg3
         done = state.done
         if not done:
             print(f"{Colors.YELLOW}No done tasks to reject{Colors.NC}")
             return 1
-        task = done[0]
-        tombstone = Tombstone(id=task.id, done_at=task.done_at or "unknown", reason=desc)
+        task = next((t for t in done if t.id == task_id), None)
+        if not task:
+            print(f"{Colors.RED}Task not found in done tasks: {task_id}{Colors.NC}")
+            print(f"  {Colors.DIM}Done tasks: {', '.join(t.id for t in done)}{Colors.NC}")
+            return 1
+        tombstone = Tombstone(id=task.id, done_at=task.done_at or "unknown", reason=reason)
         state.tombstones.append(tombstone)
         task.status = "p"
         task.done_at = None
         save_state(config, state, f"ralph: task reject - {task.name[:50]}")
         print(f"{Colors.YELLOW}Task rejected:{Colors.NC} {task.name}")
-        print(f"  {Colors.DIM}Reason: {desc}{Colors.NC}")
+        print(f"  {Colors.DIM}Reason: {reason}{Colors.NC}")
         print(json.dumps(state.to_dict(), indent=2))
     
     elif action == 'delete':
@@ -4234,6 +4240,8 @@ Examples:
                        help='Subcommand or argument')
     parser.add_argument('arg2', nargs='?', default=None,
                        help='Additional argument (e.g., task description)')
+    parser.add_argument('arg3', nargs='?', default=None,
+                       help='Third argument (e.g., reject reason)')
     parser.add_argument('--max-cost', type=float, default=0,
                        help='Stop when cost exceeds $N')
     parser.add_argument('--max-failures', type=int, default=3,
@@ -4295,9 +4303,9 @@ Examples:
         cmd_query(config, args.arg)
     elif args.command == 'task':
         if not args.arg:
-            print(f"{Colors.RED}Usage: ralph task [done|add|accept]{Colors.NC}")
+            print(f"{Colors.RED}Usage: ralph task [done|add|accept|reject]{Colors.NC}")
             sys.exit(1)
-        cmd_task(config, args.arg, args.arg2)
+        cmd_task(config, args.arg, args.arg2, args.arg3)
     elif args.command == 'issue':
         if not args.arg:
             print(f"{Colors.RED}Usage: ralph issue [done|add]{Colors.NC}")
