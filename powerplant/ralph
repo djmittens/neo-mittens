@@ -360,6 +360,16 @@ class IterationKillInfo:
 
 
 @dataclass
+class ToolSummaries:
+    """Summarized tool activity from conversation."""
+    files_read: dict  # path -> summary of content
+    files_edited: list  # paths that were edited
+    searches_performed: list  # list of search summaries
+    tests_run: list  # test execution summaries
+    subagents_spawned: list  # task summaries
+
+
+@dataclass
 class CompactedContext:
     """Compacted context for resuming execution after context pressure."""
     task_name: str
@@ -371,6 +381,7 @@ class CompactedContext:
     blockers: list
     next_step: str
     key_decisions: list
+    tool_summaries: Optional[ToolSummaries] = None
     
     def to_prompt(self) -> str:
         """Generate the compacted context prompt for resumption."""
@@ -418,6 +429,37 @@ class CompactedContext:
             for decision in self.key_decisions:
                 lines.append(f"  - {decision}")
             lines.append("")
+        
+        if self.tool_summaries:
+            ts = self.tool_summaries
+            
+            if ts.searches_performed:
+                lines.append("Exploration performed:")
+                for search in ts.searches_performed[:10]:
+                    lines.append(f"  - {search}")
+                lines.append("")
+            
+            if ts.files_read:
+                lines.append("Files read:")
+                for path, summary in list(ts.files_read.items())[:15]:
+                    lines.append(f"  - {path}: {summary}")
+                lines.append("")
+            
+            if ts.files_edited:
+                lines.append(f"Files edited: {', '.join(ts.files_edited[:20])}")
+                lines.append("")
+            
+            if ts.tests_run:
+                lines.append("Tests run:")
+                for test in ts.tests_run[:5]:
+                    lines.append(f"  - {test}")
+                lines.append("")
+            
+            if ts.subagents_spawned:
+                lines.append("Subagent tasks:")
+                for task in ts.subagents_spawned[:10]:
+                    lines.append(f"  - {task}")
+                lines.append("")
         
         lines.extend([
             f"Next step: {self.next_step}",
@@ -468,6 +510,220 @@ def extract_key_files_from_diff(diff_text: str) -> list:
                 path = parts[2][2:]  # Remove "a/" prefix
                 files.append(path)
     return files[:10]  # Limit to 10 most relevant files
+
+
+def _strip_ansi(text: str) -> str:
+    """Remove ANSI escape codes from text."""
+    return re.sub(r'\x1b\[[0-9;]*m', '', text)
+
+
+def _extract_tool_summaries(output_text: str) -> ToolSummaries:
+    """Extract detailed summaries of tool usage from output.
+    
+    Parses the formatted tool output (with emojis and ANSI codes) to produce
+    detailed summaries for:
+    - Exploration results (glob, grep)
+    - Code reads (file contents)
+    - Test execution (bash tests)
+    - File edits
+    - Subagent tasks
+    """
+    lines = output_text.split('\n')
+    
+    files_read = {}  # path -> summary
+    files_edited = []
+    searches_performed = []
+    tests_run = []
+    subagents_spawned = []
+    
+    i = 0
+    while i < len(lines):
+        line = _strip_ansi(lines[i])
+        
+        # Glob: 📁 Glob: <pattern>
+        if '📁' in line and 'Glob:' in line:
+            pattern_match = re.search(r'Glob:\s*(.+)', line)
+            pattern = pattern_match.group(1).strip() if pattern_match else "?"
+            
+            # Look for result count in next few lines
+            file_count = 0
+            for j in range(i+1, min(i+5, len(lines))):
+                next_line = _strip_ansi(lines[j])
+                count_match = re.search(r'\((\d+)\s*(?:files?|matches?|lines?)\)', next_line)
+                if count_match:
+                    file_count = int(count_match.group(1))
+                    break
+                # Check for "Found X" pattern
+                found_match = re.search(r'Found\s+(\d+)', next_line)
+                if found_match:
+                    file_count = int(found_match.group(1))
+                    break
+            
+            if file_count > 0:
+                searches_performed.append(f"Glob '{pattern}': found {file_count} files")
+            else:
+                searches_performed.append(f"Glob '{pattern}'")
+        
+        # Grep: 🔍 Grep: <pattern>
+        elif '🔍' in line and 'Grep:' in line:
+            pattern_match = re.search(r'Grep:\s*(.+)', line)
+            pattern = pattern_match.group(1).strip() if pattern_match else "?"
+            
+            # Look for result count in next few lines
+            match_count = 0
+            for j in range(i+1, min(i+5, len(lines))):
+                next_line = _strip_ansi(lines[j])
+                count_match = re.search(r'\((\d+)\s*(?:files?|matches?|lines?)\)', next_line)
+                if count_match:
+                    match_count = int(count_match.group(1))
+                    break
+                found_match = re.search(r'Found\s+(\d+)', next_line)
+                if found_match:
+                    match_count = int(found_match.group(1))
+                    break
+            
+            if match_count > 0:
+                searches_performed.append(f"Grep '{pattern}': found {match_count} matches")
+            else:
+                searches_performed.append(f"Grep '{pattern}'")
+        
+        # Read: 📖 Read: <path>
+        elif '📖' in line and 'Read:' in line:
+            path_match = re.search(r'Read:\s*(.+)', line)
+            path = path_match.group(1).strip() if path_match else "?"
+            
+            # Try to extract meaningful summary from context
+            filename = os.path.basename(path)
+            ext = os.path.splitext(path)[1].lower()
+            
+            summary = _infer_file_summary(path, ext, lines, i)
+            files_read[path] = summary
+        
+        # Edit: ✏️ Edit: <path>
+        elif '✏️' in line and 'Edit:' in line:
+            path_match = re.search(r'Edit:\s*(.+)', line)
+            path = path_match.group(1).strip() if path_match else "?"
+            if path not in files_edited:
+                files_edited.append(path)
+        
+        # Write: 📝 Write: <path>
+        elif '📝' in line and 'Write:' in line:
+            path_match = re.search(r'Write:\s*(.+)', line)
+            path = path_match.group(1).strip() if path_match else "?"
+            if path not in files_edited:
+                files_edited.append(path)
+        
+        # Bash: ⚡ Bash: <cmd>
+        elif '⚡' in line and 'Bash:' in line:
+            cmd_match = re.search(r'Bash:\s*(.+)', line)
+            cmd = cmd_match.group(1).strip() if cmd_match else ""
+            
+            # Check if this is a test command
+            test_cmds = ['test', 'pytest', 'jest', 'npm test', 'npm run test', 'cargo test', 
+                        'go test', 'make test', 'unittest', 'vitest', 'mocha']
+            is_test = any(tc in cmd.lower() for tc in test_cmds)
+            
+            if is_test:
+                # Try to extract test results from subsequent lines
+                test_result = _extract_test_results(lines, i)
+                if test_result:
+                    tests_run.append(test_result)
+                else:
+                    tests_run.append(f"Ran: {cmd[:60]}")
+        
+        # Task: 🤖 Task: <description>
+        elif '🤖' in line and 'Task:' in line:
+            desc_match = re.search(r'Task:\s*(.+)', line)
+            desc = desc_match.group(1).strip() if desc_match else "?"
+            subagents_spawned.append(desc[:80])
+        
+        i += 1
+    
+    return ToolSummaries(
+        files_read=files_read,
+        files_edited=files_edited,
+        searches_performed=searches_performed,
+        tests_run=tests_run,
+        subagents_spawned=subagents_spawned
+    )
+
+
+def _infer_file_summary(path: str, ext: str, lines: list, start_idx: int) -> str:
+    """Infer a summary of file contents based on context and path."""
+    filename = os.path.basename(path)
+    
+    # Look at assistant text after the read for clues
+    for j in range(start_idx + 1, min(start_idx + 20, len(lines))):
+        text = _strip_ansi(lines[j]).lower()
+        
+        # Look for function/class mentions
+        func_match = re.search(r'(?:exports?|defines?|contains?|implements?)\s+(?:functions?|methods?|classes?)?\s*[`\']?(\w+)[`\']?', text)
+        if func_match:
+            return f"contains {func_match.group(0)[:50]}"
+        
+        # Look for "X functions" or "X classes" pattern
+        count_match = re.search(r'(\d+)\s+(functions?|classes?|methods?|components?)', text)
+        if count_match:
+            return f"{count_match.group(1)} {count_match.group(2)}"
+    
+    # Fallback: describe by file type
+    type_hints = {
+        '.ts': 'TypeScript source',
+        '.tsx': 'React component',
+        '.js': 'JavaScript source', 
+        '.jsx': 'React component',
+        '.py': 'Python source',
+        '.go': 'Go source',
+        '.rs': 'Rust source',
+        '.md': 'documentation',
+        '.json': 'config/data',
+        '.yaml': 'config',
+        '.yml': 'config',
+        '.css': 'styles',
+        '.scss': 'styles',
+        '.html': 'HTML template',
+    }
+    
+    return type_hints.get(ext, 'source file')
+
+
+def _extract_test_results(lines: list, start_idx: int) -> Optional[str]:
+    """Extract test results summary from output following a test command."""
+    for j in range(start_idx + 1, min(start_idx + 50, len(lines))):
+        text = _strip_ansi(lines[j])
+        
+        # Common test result patterns
+        # pytest: "5 passed, 2 failed"
+        pytest_match = re.search(r'(\d+)\s*passed(?:.*?(\d+)\s*failed)?', text, re.IGNORECASE)
+        if pytest_match:
+            passed = pytest_match.group(1)
+            failed = pytest_match.group(2) or "0"
+            return f"{passed} passed, {failed} failed"
+        
+        # Jest/vitest: "Tests: 5 passed, 2 failed"
+        jest_match = re.search(r'Tests?:\s*(\d+)\s*passed,?\s*(\d+)\s*failed', text, re.IGNORECASE)
+        if jest_match:
+            return f"{jest_match.group(1)} passed, {jest_match.group(2)} failed"
+        
+        # Generic: "X tests passed" or "all tests passed"
+        generic_match = re.search(r'(\d+|all)\s*tests?\s*passed', text, re.IGNORECASE)
+        if generic_match:
+            return f"{generic_match.group(1)} tests passed"
+        
+        # Failure only: "X failed"
+        fail_match = re.search(r'(\d+)\s*(?:tests?\s*)?failed', text, re.IGNORECASE)
+        if fail_match and int(fail_match.group(1)) > 0:
+            return f"{fail_match.group(1)} tests failed"
+        
+        # OK pattern (unittest)
+        if re.search(r'\bOK\b', text) and 'test' in text.lower():
+            return "all tests passed"
+        
+        # FAILED pattern
+        if 'FAILED' in text and 'test' in text.lower():
+            return "tests failed"
+    
+    return None
 
 
 def extract_progress_from_output(output_text: str) -> tuple[str, str, list, list]:
@@ -542,6 +798,9 @@ def build_compacted_context(
     # Extract progress from output
     progress, next_step, blockers, key_decisions = extract_progress_from_output(output_text)
     
+    # Extract detailed tool summaries
+    tool_summaries = _extract_tool_summaries(output_text)
+    
     return CompactedContext(
         task_name=task.name,
         task_notes=task.notes,
@@ -551,7 +810,8 @@ def build_compacted_context(
         key_files=key_files,
         blockers=blockers,
         next_step=next_step,
-        key_decisions=key_decisions
+        key_decisions=key_decisions,
+        tool_summaries=tool_summaries
     )
 
 
