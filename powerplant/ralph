@@ -1670,27 +1670,30 @@ Describe what you want to build.
 
 
 def cmd_status(config: RalphConfig):
-    """Show current status."""
+    """Show current status with full plan report."""
     if not config.ralph_dir.exists():
         print(f"{Colors.YELLOW}Ralph not initialized. Run 'ralph init' first.{Colors.NC}")
         return 1
 
-    print(f"{Colors.BLUE}Ralph Status{Colors.NC}")
-    print(f"  Repo: {config.repo_root}")
-    print(f"  Branch: {get_current_branch()}")
-    print()
-    
     # Load state
     state = load_state(config)
-    
-    # Current spec
-    if state.spec:
-        print(f"  Spec: {Colors.CYAN}{state.spec}{Colors.NC}")
-    else:
-        print(f"  Spec: {Colors.YELLOW}None - run 'ralph plan <spec.md>'{Colors.NC}")
-    
-    # Stage
     stage = state.get_stage()
+    
+    # Header
+    print(f"{Colors.BLUE}{'='*60}{Colors.NC}")
+    print(f"{Colors.BLUE}RALPH STATUS{Colors.NC}")
+    print(f"{Colors.BLUE}{'='*60}{Colors.NC}")
+    print()
+    
+    # Overview
+    print(f"{Colors.CYAN}Overview{Colors.NC}")
+    print(f"  Repo:   {config.repo_root}")
+    print(f"  Branch: {get_current_branch()}")
+    if state.spec:
+        print(f"  Spec:   {Colors.CYAN}{state.spec}{Colors.NC}")
+    else:
+        print(f"  Spec:   {Colors.YELLOW}None - run 'ralph plan <spec.md>'{Colors.NC}")
+    
     stage_colors = {
         'PLAN': Colors.YELLOW,
         'BUILD': Colors.GREEN,
@@ -1698,43 +1701,7 @@ def cmd_status(config: RalphConfig):
         'INVESTIGATE': Colors.RED,
         'COMPLETE': Colors.GREEN,
     }
-    print(f"  Stage: {stage_colors.get(stage, '')}{stage}{Colors.NC}")
-    
-    # Tasks summary
-    pending = len(state.pending)
-    done = len(state.done)
-    print(f"  Tasks: {pending} pending, {done} done (awaiting verification)")
-    
-    # Issues
-    if state.issues:
-        print(f"  Issues: {Colors.RED}{len(state.issues)} discovered{Colors.NC}")
-    
-    # Task list
-    if state.pending or state.done:
-        print()
-        print(f"{Colors.BLUE}Plan:{Colors.NC}")
-        for task in state.done:
-            print(f"  {Colors.GREEN}[done]{Colors.NC} {task.id}: {task.name[:60]}")
-        for task in state.pending:
-            marker = f"{Colors.YELLOW}[pend]{Colors.NC}"
-            if task.reject_reason:
-                marker = f"{Colors.RED}[retry]{Colors.NC}"
-            print(f"  {marker} {task.id}: {task.name[:60]}")
-    
-    # Count specs
-    spec_count = len(list(config.specs_dir.glob('*.md'))) if config.specs_dir.exists() else 0
-    print(f"  Specs available: {spec_count} files")
-    
-    print()
-    
-    # Check for project rules
-    rules_file = None
-    for candidate in ['AGENTS.md', 'CLAUDE.md']:
-        if (config.repo_root / candidate).exists():
-            rules_file = candidate
-            break
-    if rules_file:
-        print(f"  Rules: {Colors.GREEN}{rules_file}{Colors.NC}")
+    print(f"  Stage:  {stage_colors.get(stage, '')}{stage}{Colors.NC}")
     
     # Running status
     running = count_running_opencode(config.repo_root)
@@ -1742,22 +1709,78 @@ def cmd_status(config: RalphConfig):
         print(f"  Status: {Colors.GREEN}Running{Colors.NC} ({running} process(es))")
     else:
         print(f"  Status: {Colors.YELLOW}Stopped{Colors.NC}")
+    print()
+    
+    # Tasks section
+    pending = state.pending
+    done = state.done
+    print(f"{Colors.CYAN}Tasks ({len(done)} done, {len(pending)} pending){Colors.NC}")
+    print(f"{Colors.DIM}{'-'*60}{Colors.NC}")
+    
+    if done:
+        for task in done:
+            priority_str = f"[{task.priority}]" if task.priority else ""
+            print(f"  {Colors.GREEN}✓{Colors.NC} {task.id} {priority_str} {task.name}")
+            if task.accept:
+                print(f"    {Colors.DIM}accept: {task.accept[:70]}{'...' if len(task.accept) > 70 else ''}{Colors.NC}")
+    
+    if pending:
+        for task in pending:
+            priority_str = f"[{task.priority}]" if task.priority else ""
+            if task.reject_reason:
+                print(f"  {Colors.RED}✗{Colors.NC} {task.id} {priority_str} {task.name} {Colors.RED}(retry){Colors.NC}")
+                print(f"    {Colors.RED}reject: {task.reject_reason[:70]}{'...' if len(task.reject_reason) > 70 else ''}{Colors.NC}")
+            elif task.kill_reason:
+                print(f"  {Colors.YELLOW}!{Colors.NC} {task.id} {priority_str} {task.name} {Colors.YELLOW}(killed: {task.kill_reason}){Colors.NC}")
+            else:
+                print(f"  {Colors.YELLOW}○{Colors.NC} {task.id} {priority_str} {task.name}")
+            if task.accept:
+                print(f"    {Colors.DIM}accept: {task.accept[:70]}{'...' if len(task.accept) > 70 else ''}{Colors.NC}")
+            if task.deps:
+                print(f"    {Colors.DIM}deps: {', '.join(task.deps)}{Colors.NC}")
+    
+    if not done and not pending:
+        print(f"  {Colors.DIM}No tasks{Colors.NC}")
+    print()
+    
+    # Issues section
+    print(f"{Colors.CYAN}Issues ({len(state.issues)}){Colors.NC}")
+    print(f"{Colors.DIM}{'-'*60}{Colors.NC}")
+    if state.issues:
+        for issue in state.issues:
+            print(f"  {Colors.RED}•{Colors.NC} {issue.id}: {issue.desc}")
+    else:
+        print(f"  {Colors.DIM}No issues{Colors.NC}")
+    print()
+    
+    # Tombstones section (rejected tasks history)
+    if state.tombstones:
+        print(f"{Colors.CYAN}Rejection History ({len(state.tombstones)}){Colors.NC}")
+        print(f"{Colors.DIM}{'-'*60}{Colors.NC}")
+        for tombstone in state.tombstones:
+            print(f"  {Colors.RED}✗{Colors.NC} {tombstone.id}: {tombstone.reason}")
+        print()
     
     # Next action
     next_action = state.get_next()
     action = next_action['action']
-    print()
-    print(f"{Colors.CYAN}Next: {action}{Colors.NC}")
+    print(f"{Colors.CYAN}Next Action{Colors.NC}")
+    print(f"{Colors.DIM}{'-'*60}{Colors.NC}")
+    print(f"  {Colors.GREEN}{action}{Colors.NC}")
     if action in ('BUILD', 'DECOMPOSE') and next_action.get('task'):
         task = next_action['task']
-        print(f"  {task['id']}: {task['name'][:60]}...")
+        print(f"    Task: {task['id']} - {task['name']}")
+        if task.get('accept'):
+            print(f"    Accept: {task['accept'][:60]}{'...' if len(task['accept']) > 60 else ''}")
     elif action == 'INVESTIGATE' and next_action.get('items'):
-        print(f"  {next_action['count']} issue(s) to investigate")
+        print(f"    {next_action['count']} issue(s) to investigate")
+    elif action == 'VERIFY':
+        print(f"    {len(done)} task(s) awaiting verification")
     elif next_action.get('item'):
-        print(f"  {next_action['item']}")
-    
-    # Hint
+        print(f"    {next_action['item']}")
     print()
+    
+    # Footer
     print(f"{Colors.DIM}Use 'ralph query' for JSON output, 'ralph watch' for live dashboard{Colors.NC}")
 
 
@@ -3611,8 +3634,8 @@ def cmd_run(config: RalphConfig, mode: str, max_iterations: int, max_cost: float
                             pass
                         break
                     
-                    # Soft warning at 70% (only in non-interactive mode)
-                    if not interactive and current_tokens >= soft_limit and not soft_warned[0]:
+                    # Soft warning at 70% (both interactive and non-interactive modes)
+                    if current_tokens >= soft_limit and not soft_warned[0]:
                         pct = current_tokens / context_limit * 100
                         print(f"\n{Colors.YELLOW}[RALPH] Context pressure: {pct:.0f}% - consider wrapping up ({current_tokens:,}/{context_limit:,} tokens){Colors.NC}")
                         soft_warned[0] = True
