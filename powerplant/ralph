@@ -370,6 +370,7 @@ class CompactedContext:
     key_files: list
     blockers: list
     next_step: str
+    key_decisions: list
     
     def to_prompt(self) -> str:
         """Generate the compacted context prompt for resumption."""
@@ -410,6 +411,12 @@ class CompactedContext:
         
         if self.blockers:
             lines.append(f"Blockers: {'; '.join(self.blockers)}")
+            lines.append("")
+        
+        if self.key_decisions:
+            lines.append("Key decisions made:")
+            for decision in self.key_decisions:
+                lines.append(f"  - {decision}")
             lines.append("")
         
         lines.extend([
@@ -463,10 +470,10 @@ def extract_key_files_from_diff(diff_text: str) -> list:
     return files[:10]  # Limit to 10 most relevant files
 
 
-def extract_progress_from_output(output_text: str) -> tuple[str, str, list]:
-    """Extract progress summary, next step hints, and blockers from output.
+def extract_progress_from_output(output_text: str) -> tuple[str, str, list, list]:
+    """Extract progress summary, next step hints, blockers, and key decisions from output.
     
-    Returns: (progress_summary, next_step, blockers)
+    Returns: (progress_summary, next_step, blockers, key_decisions)
     """
     lines = output_text.split('\n')
     
@@ -474,8 +481,18 @@ def extract_progress_from_output(output_text: str) -> tuple[str, str, list]:
     progress_hints = []
     blockers = []
     last_activities = []
+    key_decisions = []
     
-    for line in lines[-200:]:  # Check last 200 lines
+    for line in lines:  # Scan entire output for decisions
+        # Capture key decision markers (case-insensitive)
+        if '[ralph] decision:' in line.lower():
+            # Extract decision text after the marker
+            marker_idx = line.lower().find('[ralph] decision:')
+            decision_text = line[marker_idx + len('[ralph] decision:'):].strip()
+            if decision_text:
+                key_decisions.append(decision_text[:300])  # Limit length
+    
+    for line in lines[-200:]:  # Check last 200 lines for recent activity
         lower_line = line.lower()
         
         # Capture progress markers
@@ -502,10 +519,11 @@ def extract_progress_from_output(output_text: str) -> tuple[str, str, list]:
     else:
         next_step = "Continue implementing the task"
     
-    # Limit blockers
+    # Limit blockers and decisions
     blockers = blockers[-3:] if blockers else []
+    key_decisions = key_decisions[-10:] if key_decisions else []  # Keep last 10 decisions
     
-    return progress, next_step, blockers
+    return progress, next_step, blockers, key_decisions
 
 
 def build_compacted_context(
@@ -522,7 +540,7 @@ def build_compacted_context(
     key_files = extract_key_files_from_diff(uncommitted)
     
     # Extract progress from output
-    progress, next_step, blockers = extract_progress_from_output(output_text)
+    progress, next_step, blockers, key_decisions = extract_progress_from_output(output_text)
     
     return CompactedContext(
         task_name=task.name,
@@ -532,7 +550,8 @@ def build_compacted_context(
         uncommitted_changes=uncommitted,
         key_files=key_files,
         blockers=blockers,
-        next_step=next_step
+        next_step=next_step,
+        key_decisions=key_decisions
     )
 
 
@@ -1491,137 +1510,79 @@ Design decisions belong to the user, not the agent.
     verify_prompt_template = '''\
 # VERIFY Stage
 
-All tasks are done. Verify the spec is actually complete.
+All tasks are done. Verify they meet their acceptance criteria.
 
-## CRITICAL: The Spec File is the Source of Truth
+## Step 1: Get State
 
-**Do NOT just check task acceptance criteria.** The spec file may have been updated since tasks were created. You MUST verify against the CURRENT spec file content.
+Run `ralph query` to get:
+- `spec`: the current spec name (e.g., "construct-mode.md")
+- `tasks.done`: list of done tasks with their acceptance criteria
 
-## Step 1: Read the Spec File
-
-Read the ENTIRE spec file: `ralph/specs/<spec>`
-
-Extract ALL requirements, including:
-- Acceptance criteria checkboxes (`- [ ]`)
-- Requirements stated in prose
-- Behavioral expectations in examples
-- Edge cases mentioned anywhere
-
-**List every requirement you find.** Do not skip any.
-
-## Step 2: Get Completed Tasks
-
-Run `ralph query` to see completed tasks (status "done").
-
-## Step 3: Verify Each Done Task (Parallelized)
+## Step 2: Verify Each Done Task
 
 For EACH done task, spawn a subagent to verify:
 
 ```
-Task: "Verify task '{task.name}' with acceptance criteria: {task.accept}
+Task: "Verify task '{task.name}' meets its acceptance criteria: {task.accept}
 
-1. RE-CHECK: Does the implementation meet the acceptance criteria?
-   - Search codebase for the implementation
-   - Run any tests specified
-   - Check edge cases
-
-2. ALIGNMENT CHECK (only if re-check passes): 
-   - Does the acceptance criteria fully cover the related spec requirement?
-   - Are there aspects of the spec requirement not covered by the criteria?
+1. Search codebase for the implementation
+2. Check if acceptance criteria is satisfied
+3. Run any tests mentioned in criteria
 
 Return JSON:
 {
   \\"task_id\\": \\"{task.id}\\",
-  \\"recheck_passed\\": true | false,
-  \\"recheck_evidence\\": \\"<what you found>\\",
-  \\"alignment_ok\\": true | false,  // only if recheck passed
-  \\"alignment_gap\\": \\"<what criteria missed>\\"  // only if alignment failed
-}"
-```
-
-**Run all task verification subagents in parallel** (fork/join pattern).
-
-## Step 4: Verify Spec Coverage (Parallelized)
-
-For EACH requirement extracted from the spec file, spawn a subagent:
-
-```
-Task: "Verify this spec requirement is satisfied: <requirement>
-
-1. Search codebase for the implementation
-2. Check if it fully satisfies the requirement
-3. Identify any gaps
-
-Return JSON:
-{
-  \\"requirement\\": \\"<the requirement>\\",
-  \\"satisfied\\": true | false,
+  \\"passed\\": true | false,
   \\"evidence\\": \\"<what you found>\\",
-  \\"gap\\": \\"<what's missing>\\"  // only if not satisfied
+  \\"reason\\": \\"<why it failed>\\"  // only if passed=false
 }"
 ```
 
-**Run all spec verification subagents in parallel** (fork/join pattern).
+**Run all verifications in parallel.**
 
-## Step 5: Collect Results and Apply
-
-After all subagents return:
+## Step 3: Apply Results
 
 ### For each task:
-- **Re-check failed** → Choose the right response:
 
-  1. **Implementation bug** (retry will help): 
-     `ralph task reject "<task_id>" "<reason>"`
-     
-  2. **Wrong approach** (need different strategy):
-     `ralph task add '{"name": "new approach", "accept": "...", "supersedes": "<task-id>"}'`
-     Then delete the old task: `ralph task delete <task-id>`
-     
-  3. **Architectural blocker** (cannot be done with current system):
-     `ralph issue add "Task <task-id> cannot be implemented: <why>. Spec may need revision or architectural change required."`
-     Then delete the blocked task: `ralph task delete <task-id>`
+**If passed** → `ralph task accept <task-id>`
 
-- **Re-check passed, alignment gap** → `ralph task accept` + create new task for gap
-- **Both passed** → `ralph task accept`
+**If failed** → Choose one:
 
-### Recognizing Architectural Blockers
+1. **Implementation bug** (can be fixed):
+   `ralph task reject <task-id> "<reason>"`
 
-If a task has been rejected before (check `reject` field or Rejection History) and the same fundamental issue persists, it is likely an architectural blocker, not an implementation bug. Signs:
+2. **Architectural blocker** (cannot be done):
+   `ralph issue add "Task <task-id> blocked: <why>"`
+   `ralph task delete <task-id>`
+   
+Signs of architectural blocker:
+- "Cannot do X mid-execution"
+- Same rejection reason recurring
+- Requires changes outside this spec
 
-- "Cannot do X mid-execution" 
-- "Architecture does not support Y"
-- "Would require changes to Z which is outside this spec"
-- Same rejection reason keeps recurring
+## Step 4: Check for Gaps
 
-**Do NOT keep rejecting the same task.** Log an issue and delete the task.
+Read the spec\\'s **Acceptance Criteria section only** (not entire spec):
+`ralph/specs/<spec-name>` - scroll to "## Acceptance Criteria"
 
-### For spec gaps:
-- Create new task: `ralph task add '{"name": "what is missing", "accept": "how to verify"}'`
+For any unchecked criteria (`- [ ]`) not covered by existing tasks:
+```
+ralph task add \'{"name": "...", "accept": "..."}\\'
+```
 
-### Final decision:
+## Step 5: Final Decision
 
-If NO rejections and NO gaps:
+If all tasks accepted and no new tasks created:
 ```
 [RALPH] SPEC_COMPLETE
 ```
 
-If ANY rejections or gaps:
+Otherwise:
 ```
 [RALPH] SPEC_INCOMPLETE: <summary>
 ```
 
-The loop will continue with BUILD stage.
-
-## Progress Reporting
-
-```
-[RALPH] === VERIFY: <spec name> ===
-[RALPH] Requirements found: <count>
-[RALPH] Tasks to verify: <count>
-[RALPH] Verifying...
-```
-
-## EXIT after applying all verdicts
+## EXIT after completing
 '''
 
     investigate_prompt_template = '''\

@@ -1,133 +1,75 @@
 # VERIFY Stage
 
-All tasks are done. Verify the spec is actually complete.
+All tasks are done. Verify they meet their acceptance criteria.
 
-## CRITICAL: The Spec File is the Source of Truth
+## Step 1: Get State
 
-**Do NOT just check task acceptance criteria.** The spec file may have been updated since tasks were created. You MUST verify against the CURRENT spec file content.
+Run `ralph query` to get:
+- `spec`: the current spec name (e.g., "construct-mode.md")
+- `tasks.done`: list of done tasks with their acceptance criteria
 
-## Step 1: Read the Spec File
-
-Read the ENTIRE spec file: `ralph/specs/<spec>`
-
-Extract ALL requirements, including:
-- Acceptance criteria checkboxes (`- [ ]`)
-- Requirements stated in prose
-- Behavioral expectations in examples
-- Edge cases mentioned anywhere
-
-**List every requirement you find.** Do not skip any.
-
-## Step 2: Get Completed Tasks
-
-Run `ralph query` to see completed tasks (status "done").
-
-## Step 3: Verify Each Done Task (Parallelized)
+## Step 2: Verify Each Done Task
 
 For EACH done task, spawn a subagent to verify:
 
 ```
-Task: "Verify task '{task.name}' with acceptance criteria: {task.accept}
+Task: "Verify task '{task.name}' meets its acceptance criteria: {task.accept}
 
-1. RE-CHECK: Does the implementation meet the acceptance criteria?
-   - Search codebase for the implementation
-   - Run any tests specified
-   - Check edge cases
-
-2. ALIGNMENT CHECK (only if re-check passes): 
-   - Does the acceptance criteria fully cover the related spec requirement?
-   - Are there aspects of the spec requirement not covered by the criteria?
+1. Search codebase for the implementation
+2. Check if acceptance criteria is satisfied
+3. Run any tests mentioned in criteria
 
 Return JSON:
 {
   \"task_id\": \"{task.id}\",
-  \"recheck_passed\": true | false,
-  \"recheck_evidence\": \"<what you found>\",
-  \"alignment_ok\": true | false,  // only if recheck passed
-  \"alignment_gap\": \"<what criteria missed>\"  // only if alignment failed
-}"
-```
-
-**Run all task verification subagents in parallel** (fork/join pattern).
-
-## Step 4: Verify Spec Coverage (Parallelized)
-
-For EACH requirement extracted from the spec file, spawn a subagent:
-
-```
-Task: "Verify this spec requirement is satisfied: <requirement>
-
-1. Search codebase for the implementation
-2. Check if it fully satisfies the requirement
-3. Identify any gaps
-
-Return JSON:
-{
-  \"requirement\": \"<the requirement>\",
-  \"satisfied\": true | false,
+  \"passed\": true | false,
   \"evidence\": \"<what you found>\",
-  \"gap\": \"<what's missing>\"  // only if not satisfied
+  \"reason\": \"<why it failed>\"  // only if passed=false
 }"
 ```
 
-**Run all spec verification subagents in parallel** (fork/join pattern).
+**Run all verifications in parallel.**
 
-## Step 5: Collect Results and Apply
-
-After all subagents return:
+## Step 3: Apply Results
 
 ### For each task:
-- **Re-check failed** → Choose the right response:
 
-  1. **Implementation bug** (retry will help): 
-     `ralph task reject "<task_id>" "<reason>"`
-     
-  2. **Wrong approach** (need different strategy):
-     `ralph task add '{"name": "new approach", "accept": "...", "supersedes": "<task-id>"}'`
-     Then delete the old task: `ralph task delete <task-id>`
-     
-  3. **Architectural blocker** (can't be done with current system):
-     `ralph issue add "Task <task-id> cannot be implemented: <why>. Spec may need revision or architectural change required."`
-     Then delete the blocked task: `ralph task delete <task-id>`
+**If passed** → `ralph task accept <task-id>`
 
-- **Re-check passed, alignment gap** → `ralph task accept` + create new task for gap
-- **Both passed** → `ralph task accept`
+**If failed** → Choose one:
 
-### Recognizing Architectural Blockers
+1. **Implementation bug** (can be fixed):
+   `ralph task reject <task-id> "<reason>"`
 
-If a task has been rejected before (check `reject` field or Rejection History) and the same fundamental issue persists, it's likely an architectural blocker, not an implementation bug. Signs:
+2. **Architectural blocker** (cannot be done):
+   `ralph issue add "Task <task-id> blocked: <why>"`
+   `ralph task delete <task-id>`
+   
+Signs of architectural blocker:
+- "Cannot do X mid-execution"
+- Same rejection reason recurring
+- Requires changes outside this spec
 
-- "Cannot do X mid-execution" 
-- "Architecture doesn't support Y"
-- "Would require changes to Z which is outside this spec"
-- Same rejection reason keeps recurring
+## Step 4: Check for Gaps
 
-**Do NOT keep rejecting the same task.** Log an issue and delete the task.
+Read the spec\'s **Acceptance Criteria section only** (not entire spec):
+`ralph/specs/<spec-name>` - scroll to "## Acceptance Criteria"
 
-### For spec gaps:
-- Create new task: `ralph task add '{"name": "what's missing", "accept": "how to verify"}'`
+For any unchecked criteria (`- [ ]`) not covered by existing tasks:
+```
+ralph task add '{"name": "...", "accept": "..."}\'
+```
 
-### Final decision:
+## Step 5: Final Decision
 
-If NO rejections and NO gaps:
+If all tasks accepted and no new tasks created:
 ```
 [RALPH] SPEC_COMPLETE
 ```
 
-If ANY rejections or gaps:
+Otherwise:
 ```
 [RALPH] SPEC_INCOMPLETE: <summary>
 ```
 
-The loop will continue with BUILD stage.
-
-## Progress Reporting
-
-```
-[RALPH] === VERIFY: <spec name> ===
-[RALPH] Requirements found: <count>
-[RALPH] Tasks to verify: <count>
-[RALPH] Verifying...
-```
-
-## EXIT after applying all verdicts
+## EXIT after completing
