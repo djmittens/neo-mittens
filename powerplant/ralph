@@ -40,8 +40,9 @@ from collections import deque
 from contextlib import redirect_stdout
 from dataclasses import dataclass, field
 from datetime import datetime
+from enum import Enum, auto
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Callable
 
 # Textual TUI framework (lazy import to avoid startup penalty for non-TUI commands)
 _textual_available = None
@@ -1125,14 +1126,29 @@ class RalphState:
         }
     
     def get_stage(self) -> str:
-        """Compute current stage based on state."""
+        """Compute current stage based on state.
+        
+        State machine per construct-mode.md spec (lines 630-640):
+        | State                                | Stage       |
+        |--------------------------------------|-------------|
+        | Has issues                           | INVESTIGATE |
+        | Has pending tasks                    | BUILD       |
+        | Has done tasks, no pending           | VERIFY      |
+        | Has task with kill_reason            | DECOMPOSE   |
+        | Empty (no tasks, no issues)          | COMPLETE    |
+        
+        Note: DECOMPOSE takes priority - a killed task must be decomposed
+        before continuing to BUILD more tasks.
+        """
         if self.spec is None:
             return "PLAN"
         # INVESTIGATE takes priority - process all issues before building
         if self.issues:
             return "INVESTIGATE"
-        # DECOMPOSE takes priority over BUILD - must break down killed tasks first
-        if any(t.needs_decompose for t in self.pending):
+        # DECOMPOSE: any task (pending or done) with kill_reason needs breakdown
+        # This covers both execution failures (timeout/context) during BUILD
+        # and rejected tasks that failed due to being too large
+        if any(t.kill_reason for t in self.tasks):
             return "DECOMPOSE"
         if self.pending:
             return "BUILD"
@@ -1141,9 +1157,9 @@ class RalphState:
         return "COMPLETE"
     
     def get_task_needing_decompose(self) -> Optional['Task']:
-        """Get first task that needs decomposition."""
-        for t in self.pending:
-            if t.needs_decompose:
+        """Get first task that needs decomposition (has kill_reason set)."""
+        for t in self.tasks:
+            if t.kill_reason:
                 return t
         return None
     
@@ -1182,12 +1198,201 @@ def task_to_query_dict(t: Task, include_decompose_info: bool = False) -> dict:
         d["deps"] = t.deps
     if t.done_at:
         d["done_at"] = t.done_at
-    if include_decompose_info and t.needs_decompose:
-        if t.kill_reason:
-            d["kill_reason"] = t.kill_reason
+    if include_decompose_info and t.kill_reason:
+        d["kill_reason"] = t.kill_reason
         if t.kill_log:
             d["kill_log"] = t.kill_log
     return d
+
+
+# =============================================================================
+# Construct Mode State Machine
+# =============================================================================
+# 
+# Per construct-mode.md spec, each iteration runs three stages sequentially:
+#   INVESTIGATE -> BUILD -> VERIFY
+# 
+# With DECOMPOSE as an interrupt handler for failures (timeout/context).
+# 
+# State machine flow:
+#   1. Each iteration starts with INVESTIGATE (if issues exist, else skip)
+#   2. Then BUILD (execute tasks until none remain or failure)
+#   3. Then VERIFY (check done tasks against spec)
+#   4. If failure during any stage -> DECOMPOSE -> continue to next iteration
+#   5. If VERIFY finds gaps -> new iteration
+#   6. If VERIFY accepts all and no gaps -> COMPLETE
+
+class Stage(Enum):
+    """Stages within construct mode's iteration loop."""
+    INVESTIGATE = auto()  # Turn issues into tasks
+    BUILD = auto()        # Execute tasks
+    VERIFY = auto()       # Verify done tasks against spec
+    DECOMPOSE = auto()    # Handle failures by breaking down work
+    COMPLETE = auto()     # Spec fully implemented
+
+
+class StageOutcome(Enum):
+    """Outcome of running a stage."""
+    SUCCESS = auto()      # Stage completed normally
+    FAILURE = auto()      # Stage failed (timeout/context/error)
+    SKIP = auto()         # Stage skipped (no work to do)
+
+
+@dataclass
+class StageResult:
+    """Result of running a single stage."""
+    stage: Stage
+    outcome: StageOutcome
+    exit_code: int = 0
+    duration_seconds: float = 0.0
+    cost: float = 0.0
+    tokens_used: int = 0
+    kill_reason: Optional[str] = None  # "timeout", "context_limit", "compaction_failed"
+    kill_log: Optional[str] = None     # Path to log file if killed
+    task_id: Optional[str] = None      # Task that was being executed (for BUILD/DECOMPOSE)
+    error: Optional[str] = None        # Error message if any
+
+
+class ConstructStateMachine:
+    """
+    State machine for construct mode iterations.
+    
+    Each iteration runs: INVESTIGATE -> BUILD -> VERIFY
+    DECOMPOSE is triggered on failures and runs before the next iteration.
+    """
+    
+    def __init__(self, config: 'RalphConfig', metrics: 'Metrics',
+                 stage_timeout_ms: int, context_limit: int,
+                 run_stage_fn: Callable[['RalphConfig', Stage, 'RalphState', 'Metrics', int, int], StageResult]):
+        """
+        Initialize the state machine.
+        
+        Args:
+            config: Ralph configuration
+            metrics: Metrics tracker
+            stage_timeout_ms: Timeout per stage in milliseconds
+            context_limit: Context window size in tokens
+            run_stage_fn: Function to actually run a stage (injected for testability)
+        """
+        self.config = config
+        self.metrics = metrics
+        self.stage_timeout_ms = stage_timeout_ms
+        self.context_limit = context_limit
+        self.run_stage = run_stage_fn
+        
+        # Track if we need to run DECOMPOSE before next iteration
+        self._pending_decompose = False
+        self._decompose_task_id: Optional[str] = None
+        self._decompose_kill_reason: Optional[str] = None
+        self._decompose_kill_log: Optional[str] = None
+    
+    def run_iteration(self, iteration: int) -> tuple[bool, bool]:
+        """
+        Run a single iteration of the construct loop.
+        
+        Per spec: INVESTIGATE -> BUILD -> VERIFY (sequentially)
+        DECOMPOSE runs if there's a pending failure from previous stage.
+        
+        Args:
+            iteration: Current iteration number
+            
+        Returns:
+            Tuple of (should_continue, spec_complete)
+            - should_continue: True if more iterations needed
+            - spec_complete: True if spec is fully implemented
+        """
+        state = load_state(self.config)
+        
+        # If we have a pending decompose from a failure, run it first
+        if self._pending_decompose:
+            print(f"{Colors.YELLOW}Running DECOMPOSE for failed task...{Colors.NC}")
+            result = self._run_stage_with_state(Stage.DECOMPOSE, state)
+            self._pending_decompose = False
+            self._decompose_task_id = None
+            self._decompose_kill_reason = None
+            self._decompose_kill_log = None
+            
+            if result.outcome == StageOutcome.FAILURE:
+                # DECOMPOSE itself failed - this is bad, but continue
+                print(f"{Colors.RED}DECOMPOSE failed: {result.error}{Colors.NC}")
+            
+            # Reload state after decompose
+            state = load_state(self.config)
+        
+        # Check for terminal state
+        if not state.spec:
+            print(f"{Colors.YELLOW}No spec configured - run 'ralph plan <spec.md>' first{Colors.NC}")
+            return False, False
+        
+        # Phase 1: INVESTIGATE (if issues exist)
+        if state.issues:
+            print(f"\n{Colors.CYAN}═══ INVESTIGATE ({len(state.issues)} issues) ═══{Colors.NC}")
+            result = self._run_stage_with_state(Stage.INVESTIGATE, state)
+            
+            if result.outcome == StageOutcome.FAILURE:
+                self._handle_failure(result)
+                return True, False  # Continue to next iteration (with DECOMPOSE)
+            
+            # Reload state after investigate
+            state = load_state(self.config)
+        
+        # Phase 2: BUILD (execute tasks until none remain)
+        if state.pending:
+            print(f"\n{Colors.CYAN}═══ BUILD ({len(state.pending)} tasks) ═══{Colors.NC}")
+            
+            # BUILD processes tasks one at a time, but can fail mid-way
+            # The BUILD prompt handles looping through tasks internally
+            result = self._run_stage_with_state(Stage.BUILD, state)
+            
+            if result.outcome == StageOutcome.FAILURE:
+                self._handle_failure(result)
+                return True, False  # Continue to next iteration (with DECOMPOSE)
+            
+            # Reload state after build
+            state = load_state(self.config)
+        
+        # Phase 3: VERIFY (if done tasks exist)
+        if state.done:
+            print(f"\n{Colors.CYAN}═══ VERIFY ({len(state.done)} done tasks) ═══{Colors.NC}")
+            result = self._run_stage_with_state(Stage.VERIFY, state)
+            
+            if result.outcome == StageOutcome.FAILURE:
+                self._handle_failure(result)
+                return True, False  # Continue to next iteration (with DECOMPOSE)
+            
+            # Reload state after verify
+            state = load_state(self.config)
+        
+        # Check if we're complete
+        if not state.pending and not state.done and not state.issues:
+            return False, True  # Spec complete!
+        
+        # More work to do
+        return True, False
+    
+    def _run_stage_with_state(self, stage: Stage, state: 'RalphState') -> StageResult:
+        """Run a stage and return the result."""
+        return self.run_stage(
+            self.config, stage, state, self.metrics,
+            self.stage_timeout_ms, self.context_limit
+        )
+    
+    def _handle_failure(self, result: StageResult):
+        """Handle a stage failure by queuing DECOMPOSE."""
+        self._pending_decompose = True
+        self._decompose_task_id = result.task_id
+        self._decompose_kill_reason = result.kill_reason
+        self._decompose_kill_log = result.kill_log
+        
+        # Mark the task with kill_reason in state
+        if result.task_id:
+            state = load_state(self.config)
+            task = next((t for t in state.tasks if t.id == result.task_id), None)
+            if task:
+                task.kill_reason = result.kill_reason
+                task.kill_log = result.kill_log
+                save_state(self.config, state)
+                print(f"{Colors.YELLOW}Task {task.id} marked for decomposition{Colors.NC}")
 
 
 def load_state(config: RalphConfig) -> RalphState:
@@ -3679,21 +3884,312 @@ def _process_stream_line(decoded: str, output_buffer: OutputBuffer, metrics: Met
                 _process_stream_line._fifo_fd = None
 
 
-def get_prompt_for_stage(config: RalphConfig, mode: str, stage: str) -> Path:
-    """Get the appropriate prompt file based on mode and stage."""
+def get_prompt_for_stage(config: RalphConfig, mode: str, stage) -> Path:
+    """Get the appropriate prompt file based on mode and stage.
+    
+    Args:
+        config: Ralph configuration
+        mode: 'plan' or 'construct'
+        stage: Stage enum or string (for backwards compatibility)
+    """
     if mode == 'plan':
         return config.prompt_plan
     
+    # Convert Stage enum to string if needed
+    stage_str = stage.name if isinstance(stage, Stage) else stage
+    
     # Build mode - select based on stage
-    if stage == 'VERIFY':
+    if stage_str == 'VERIFY':
         return config.prompt_verify
-    elif stage == 'INVESTIGATE':
+    elif stage_str == 'INVESTIGATE':
         return config.prompt_investigate
-    elif stage == 'DECOMPOSE':
+    elif stage_str == 'DECOMPOSE':
         return config.prompt_decompose
     else:
         # BUILD, PLAN, COMPLETE all use build prompt
         return config.prompt_build
+
+
+def run_single_stage(config: RalphConfig, stage: Stage, state: RalphState, 
+                     metrics: Metrics, stage_timeout_ms: int, context_limit: int,
+                     interactive: bool = False, project_rules: Optional[str] = None,
+                     spec_file: Optional[str] = None) -> StageResult:
+    """
+    Run a single stage of the construct loop.
+    
+    This is the core function that invokes the AI model via opencode.
+    Extracted from cmd_run for use by the state machine.
+    
+    Args:
+        config: Ralph configuration
+        stage: Stage to run
+        state: Current Ralph state
+        metrics: Metrics tracker
+        stage_timeout_ms: Timeout for this stage in milliseconds
+        context_limit: Context window size in tokens
+        interactive: Whether to use interactive UI
+        project_rules: Project rules content (from AGENTS.md/CLAUDE.md)
+        spec_file: Spec file name for template substitution
+        
+    Returns:
+        StageResult with outcome and details
+    """
+    start_time = time.time()
+    stage_str = stage.name
+    
+    # Get prompt for this stage
+    prompt_file = get_prompt_for_stage(config, 'construct', stage)
+    if not prompt_file.exists():
+        return StageResult(
+            stage=stage,
+            outcome=StageOutcome.FAILURE,
+            error=f"Prompt file not found: {prompt_file}"
+        )
+    
+    prompt_content = prompt_file.read_text()
+    
+    # Substitute spec file placeholder
+    if spec_file:
+        prompt_content = prompt_content.replace('{{SPEC_FILE}}', spec_file)
+    
+    # Incorporate project rules
+    if project_rules:
+        prompt_content = build_prompt_with_rules(prompt_content, project_rules)
+    
+    # Get current task info for tracking
+    current_task_id = None
+    current_task_name = None
+    current_task = state.get_next_task()
+    if current_task:
+        current_task_id = current_task.id
+        current_task_name = current_task.name
+    
+    output_buffer = OutputBuffer()
+    iteration_timeout = stage_timeout_ms / 1000.0
+    
+    # Calculate context limits
+    plan_config = state.config
+    if plan_config:
+        hard_limit_pct = plan_config.context_kill * 100
+        compact_limit_pct = plan_config.context_compact * 100
+        soft_limit_pct = plan_config.context_warn * 100
+    else:
+        hard_limit_pct = CONTEXT_HARD_LIMIT_PCT
+        compact_limit_pct = CONTEXT_COMPACT_LIMIT_PCT
+        soft_limit_pct = CONTEXT_SOFT_LIMIT_PCT
+    
+    hard_limit = int(context_limit * hard_limit_pct / 100)
+    compact_limit = int(context_limit * compact_limit_pct / 100)
+    soft_limit = int(context_limit * soft_limit_pct / 100)
+    
+    # Set up environment for opencode
+    opencode_env = os.environ.copy()
+    opencode_env['XDG_STATE_HOME'] = '/tmp/ralph-opencode-state'
+    
+    permission_config = {
+        "external_directory": "deny",
+        "doom_loop": "deny"
+    }
+    if stage == Stage.DECOMPOSE:
+        permission_config["read"] = {"*": "allow"}
+        permission_config["external_directory"] = {"*": "deny"}
+    opencode_env['OPENCODE_PERMISSION'] = json.dumps(permission_config)
+    
+    # Build command
+    cmd = ['opencode', 'run', '--model', 'anthropic/claude-opus-4-5',
+           '--format', 'json', prompt_content]
+    
+    # Start opencode process
+    opencode_proc = subprocess.Popen(
+        cmd,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        cwd=config.repo_root,
+        env=opencode_env
+    )
+    
+    # Pipe through ralph stream for parsing
+    ralph_stream_proc = subprocess.Popen(
+        [sys.executable, __file__, 'stream'],
+        stdin=opencode_proc.stdout,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+    )
+    
+    if opencode_proc.stdout:
+        opencode_proc.stdout.close()
+    
+    # Track kill state
+    kill_state = {"killed": False, "reason": "none", "info": None, "compact_requested": False}
+    soft_warned = [False]
+    compact_attempted = [False]
+    reader_stop = threading.Event()
+    
+    # Start reader thread
+    reader_thread = threading.Thread(
+        target=stream_output,
+        args=(ralph_stream_proc.stdout, output_buffer, metrics, not interactive, config.output_fifo, reader_stop)
+    )
+    reader_thread.daemon = True
+    reader_thread.start()
+    
+    # Monitor function
+    def monitor_limits():
+        deadline = time.time() + iteration_timeout
+        check_interval = 2.0
+        
+        while ralph_stream_proc.poll() is None and opencode_proc.poll() is None:
+            if kill_state["killed"]:
+                break
+            
+            elapsed = int(time.time() - start_time)
+            current_tokens = output_buffer.get_iteration_tokens()
+            
+            # Check timeout
+            if time.time() >= deadline:
+                kill_state["killed"] = True
+                kill_state["reason"] = "timeout"
+                kill_state["info"] = IterationKillInfo(
+                    reason="timeout",
+                    task_name=current_task_name,
+                    timeout_seconds=iteration_timeout,
+                    elapsed_seconds=elapsed,
+                    last_activity=output_buffer.get_last_activity()
+                )
+                try:
+                    opencode_proc.terminate()
+                    ralph_stream_proc.terminate()
+                except:
+                    pass
+                break
+            
+            # Check context hard limit (95%)
+            if current_tokens >= hard_limit:
+                kill_state["killed"] = True
+                kill_state["reason"] = "context_limit"
+                kill_state["info"] = IterationKillInfo(
+                    reason="context_limit",
+                    task_name=current_task_name,
+                    tokens_used=current_tokens,
+                    context_limit=context_limit,
+                    elapsed_seconds=elapsed,
+                    last_activity=output_buffer.get_last_activity()
+                )
+                try:
+                    opencode_proc.terminate()
+                    ralph_stream_proc.terminate()
+                except:
+                    pass
+                break
+            
+            # Check compact limit (85%) - only in non-interactive
+            if not interactive and current_tokens >= compact_limit and not compact_attempted[0]:
+                compact_attempted[0] = True
+                pct = current_tokens / context_limit * 100
+                print(f"\n{Colors.YELLOW}[RALPH] Context at {pct:.0f}% - requesting compaction...{Colors.NC}")
+                kill_state["compact_requested"] = True
+                kill_state["info"] = IterationKillInfo(
+                    reason="compaction_requested",
+                    task_name=current_task_name,
+                    tokens_used=current_tokens,
+                    context_limit=context_limit,
+                    elapsed_seconds=elapsed,
+                    last_activity=output_buffer.get_last_activity()
+                )
+                try:
+                    opencode_proc.terminate()
+                    ralph_stream_proc.terminate()
+                except:
+                    pass
+                break
+            
+            # Soft warning at 70%
+            if current_tokens >= soft_limit and not soft_warned[0]:
+                pct = current_tokens / context_limit * 100
+                print(f"\n{Colors.YELLOW}[RALPH] Context pressure: {pct:.0f}% ({current_tokens:,}/{context_limit:,} tokens){Colors.NC}")
+                soft_warned[0] = True
+            
+            time.sleep(check_interval)
+    
+    # Start monitor thread
+    monitor_thread = threading.Thread(target=monitor_limits, daemon=True)
+    monitor_thread.start()
+    
+    # Wait for process
+    if interactive:
+        exit_code = run_with_live_ui(ralph_stream_proc, config, 0, metrics, 
+                                      get_current_branch(), output_buffer)
+    else:
+        while ralph_stream_proc.poll() is None:
+            if kill_state["killed"] or kill_state["compact_requested"]:
+                break
+            time.sleep(0.1)
+        exit_code = ralph_stream_proc.returncode if ralph_stream_proc.returncode is not None else -1
+    
+    monitor_thread.join(timeout=1.0)
+    
+    # Handle compaction (simplified - just mark as failure for now, let DECOMPOSE handle it)
+    if kill_state["compact_requested"] and not kill_state["killed"]:
+        # Try compaction
+        reader_stop.set()
+        try:
+            ralph_stream_proc.kill()
+            opencode_proc.kill()
+        except:
+            pass
+        reader_thread.join(timeout=2.0)
+        
+        # For now, treat compaction request as a failure that needs decompose
+        # Full compaction logic can be added back later
+        kill_state["killed"] = True
+        kill_state["reason"] = "compaction_failed"
+    
+    duration = time.time() - start_time
+    
+    # Log output
+    config.log_dir.mkdir(parents=True, exist_ok=True)
+    timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+    log_file = config.log_dir / f"ralph-{timestamp}-{stage_str.lower()}.log"
+    log_file_written = None
+    try:
+        with log_file.open('w') as f:
+            f.write(f"# Ralph construct stage: {stage_str}\n")
+            f.write(f"# Date: {datetime.now().isoformat()}\n")
+            f.write(f"# Exit code: {exit_code}\n")
+            f.write(f"# Duration: {duration:.1f}s\n")
+            f.write(f"# Task: {current_task_name or 'N/A'}\n")
+            if kill_state["killed"]:
+                f.write(f"# Kill reason: {kill_state['reason']}\n")
+            f.write("\n")
+            f.write(output_buffer.get_all())
+        log_file_written = str(log_file)
+    except Exception:
+        pass
+    
+    # Build result
+    if kill_state["killed"]:
+        return StageResult(
+            stage=stage,
+            outcome=StageOutcome.FAILURE,
+            exit_code=exit_code,
+            duration_seconds=duration,
+            cost=metrics.iteration_cost if hasattr(metrics, 'iteration_cost') else 0,
+            tokens_used=output_buffer.get_iteration_tokens(),
+            kill_reason=kill_state["reason"],
+            kill_log=log_file_written,
+            task_id=current_task_id
+        )
+    
+    return StageResult(
+        stage=stage,
+        outcome=StageOutcome.SUCCESS,
+        exit_code=exit_code,
+        duration_seconds=duration,
+        cost=metrics.iteration_cost if hasattr(metrics, 'iteration_cost') else 0,
+        tokens_used=output_buffer.get_iteration_tokens(),
+        task_id=current_task_id
+    )
 
 
 def print_plan_report(state: RalphState, mode: str):
@@ -3763,6 +4259,197 @@ def print_plan_report(state: RalphState, mode: str):
     total = len(state.pending) + len(state.done)
     if total > 0:
         print(f"{Colors.DIM}Total: {len(state.pending)} pending, {len(state.done)} done{Colors.NC}")
+
+
+def cmd_construct(config: RalphConfig, max_iterations: int, max_cost: float,
+                  max_failures: int, completion_promise: str, no_ui: bool = False,
+                  spec_file: Optional[str] = None, stage_timeout_ms: int = DEFAULT_STAGE_TIMEOUT_MS,
+                  context_limit: int = DEFAULT_CONTEXT_WINDOW):
+    """
+    Run construct mode using the proper state machine.
+    
+    Per construct-mode.md spec, each iteration runs:
+      INVESTIGATE -> BUILD -> VERIFY (sequentially)
+    
+    With DECOMPOSE as an interrupt handler for failures.
+    """
+    if not config.ralph_dir.exists():
+        print(f"{Colors.RED}Ralph not initialized. Run 'ralph init' first.{Colors.NC}")
+        return 1
+    
+    # Initialize metrics
+    metrics = Metrics(started_at=datetime.now().isoformat())
+    config.log_dir.mkdir(parents=True, exist_ok=True)
+    
+    branch = get_current_branch()
+    consecutive_failures = 0
+    
+    # Detect interactive terminal
+    interactive = sys.stdout.isatty() and not no_ui
+    
+    # Create FIFO for watch command
+    if config.output_fifo.exists():
+        if not stat.S_ISFIFO(config.output_fifo.stat().st_mode):
+            config.output_fifo.unlink()
+            os.mkfifo(str(config.output_fifo))
+    else:
+        os.mkfifo(str(config.output_fifo))
+    
+    # Check for project rules
+    project_rules = find_project_rules(config.repo_root)
+    rules_source = None
+    if project_rules:
+        for candidate in ['AGENTS.md', 'CLAUDE.md']:
+            if (config.repo_root / candidate).exists():
+                rules_source = candidate
+                break
+    
+    # Load state to get spec
+    state = load_state(config)
+    if not state.spec:
+        print(f"{Colors.YELLOW}No spec configured - run 'ralph plan <spec.md>' first{Colors.NC}")
+        return 1
+    
+    # Calculate context limits
+    plan_config = state.config
+    if plan_config:
+        soft_limit_pct = plan_config.context_warn * 100
+        compact_limit_pct = plan_config.context_compact * 100
+        hard_limit_pct = plan_config.context_kill * 100
+    else:
+        soft_limit_pct = CONTEXT_SOFT_LIMIT_PCT
+        compact_limit_pct = CONTEXT_COMPACT_LIMIT_PCT
+        hard_limit_pct = CONTEXT_HARD_LIMIT_PCT
+    
+    soft_limit = int(context_limit * soft_limit_pct / 100)
+    compact_limit = int(context_limit * compact_limit_pct / 100)
+    hard_limit = int(context_limit * hard_limit_pct / 100)
+    
+    # Print header
+    print(f"{Colors.BLUE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━{Colors.NC}")
+    print(f"Mode:   {Colors.GREEN}construct{Colors.NC} (state machine)")
+    print(f"Spec:   {Colors.CYAN}{state.spec}{Colors.NC}")
+    print(f"Branch: {branch}")
+    if rules_source:
+        print(f"Rules:  {Colors.GREEN}{rules_source}{Colors.NC}")
+    else:
+        print(f"Rules:  {Colors.YELLOW}None{Colors.NC}")
+    if max_iterations > 0:
+        print(f"Max iterations: {max_iterations}")
+    if max_cost > 0:
+        print(f"Max cost:       ${max_cost}")
+    print(f"Max failures:   {max_failures} (circuit breaker)")
+    print(f"Timeout:        {stage_timeout_ms}ms per stage")
+    print(f"Context:        {context_limit:,} tokens (warn: {soft_limit:,}, compact: {compact_limit:,}, kill: {hard_limit:,})")
+    if completion_promise:
+        print(f"Completion:     \"{completion_promise}\"")
+    print(f"{Colors.BLUE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━{Colors.NC}")
+    
+    # Create stage runner function
+    def stage_runner(cfg, stage, st, met, timeout_ms, ctx_limit):
+        return run_single_stage(
+            cfg, stage, st, met, timeout_ms, ctx_limit,
+            interactive=interactive,
+            project_rules=project_rules,
+            spec_file=state.spec
+        )
+    
+    # Create state machine
+    state_machine = ConstructStateMachine(
+        config=config,
+        metrics=metrics,
+        stage_timeout_ms=stage_timeout_ms,
+        context_limit=context_limit,
+        run_stage_fn=stage_runner
+    )
+    
+    iteration = 0
+    try:
+        while True:
+            # Check iteration limit
+            if max_iterations > 0 and iteration >= max_iterations:
+                print(f"{Colors.BLUE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━{Colors.NC}")
+                print(f"Reached max iterations: {max_iterations}")
+                print(f"{Colors.CYAN}Total cost: ${metrics.total_cost:.4f}{Colors.NC}")
+                print(f"{Colors.BLUE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━{Colors.NC}")
+                break
+            
+            # Check cost limit
+            if max_cost > 0 and metrics.total_cost >= max_cost:
+                print(f"{Colors.YELLOW}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━{Colors.NC}")
+                print(f"{Colors.YELLOW}COST LIMIT REACHED{Colors.NC}")
+                print(f"Spent: ${metrics.total_cost:.4f} / ${max_cost}")
+                print(f"{Colors.YELLOW}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━{Colors.NC}")
+                break
+            
+            # Check circuit breaker
+            if consecutive_failures >= max_failures:
+                print(f"{Colors.RED}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━{Colors.NC}")
+                print(f"{Colors.RED}CIRCUIT BREAKER TRIPPED{Colors.NC}")
+                print(f"{consecutive_failures} consecutive failures detected")
+                print(f"{Colors.RED}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━{Colors.NC}")
+                break
+            
+            iteration += 1
+            metrics.total_iterations += 1
+            write_runtime_iteration(config, iteration)
+            
+            if not interactive:
+                if max_cost > 0:
+                    cost_display = f" | Cost: ${metrics.total_cost:.4f}/${max_cost}"
+                else:
+                    cost_display = f" | Cost: ${metrics.total_cost:.4f}"
+                
+                print()
+                print(f"{Colors.GREEN}╔═══════════════════════════════════════════════════════════════╗{Colors.NC}")
+                print(f"{Colors.GREEN}║  ITERATION {iteration} - {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}{cost_display}{Colors.NC}")
+                print(f"{Colors.GREEN}╚═══════════════════════════════════════════════════════════════╝{Colors.NC}")
+                print()
+            
+            # Run one iteration of the state machine
+            should_continue, spec_complete = state_machine.run_iteration(iteration)
+            
+            if spec_complete:
+                print(f"{Colors.GREEN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━{Colors.NC}")
+                print(f"{Colors.GREEN}SPEC COMPLETE: {state.spec}{Colors.NC}")
+                print(f"Total cost: ${metrics.total_cost:.4f}")
+                print(f"Iterations: {iteration}")
+                print(f"{Colors.GREEN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━{Colors.NC}")
+                break
+            
+            if not should_continue:
+                print(f"{Colors.YELLOW}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━{Colors.NC}")
+                print(f"{Colors.YELLOW}No more work to do{Colors.NC}")
+                print(f"Total cost: ${metrics.total_cost:.4f}")
+                print(f"{Colors.YELLOW}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━{Colors.NC}")
+                break
+            
+            # Commit any plan changes after each iteration
+            if has_uncommitted_plan(config):
+                subprocess.run(['git', 'add', str(config.plan_file)],
+                              cwd=config.repo_root, capture_output=True)
+                subprocess.run(['git', 'commit', '-m', f'ralph: iteration {iteration}'],
+                              cwd=config.repo_root, capture_output=True)
+            
+            # Push changes
+            try:
+                subprocess.run(['git', 'push', 'origin', branch],
+                              capture_output=True, cwd=config.repo_root)
+            except Exception:
+                pass
+    
+    except KeyboardInterrupt:
+        print(f"\n{Colors.YELLOW}Interrupted by user{Colors.NC}")
+    finally:
+        clear_runtime_state(config)
+        
+        # Show final state
+        final_state = load_state(config)
+        if final_state.tasks or final_state.issues:
+            print_plan_report(final_state, 'construct')
+        print(f"{Colors.BLUE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━{Colors.NC}")
+    
+    return 0
 
 
 def cmd_run(config: RalphConfig, mode: str, max_iterations: int, max_cost: float,
@@ -3938,11 +4625,13 @@ def cmd_run(config: RalphConfig, mode: str, max_iterations: int, max_cost: float
             prompt_content = build_prompt_with_rules(prompt_content, project_rules)
             
             # Get current task info for kill tracking and log naming
+            # Use get_next_task() to match the task that will actually be executed
             current_task_id = None
             current_task_name = None
-            if state.pending:
-                current_task_id = state.pending[0].id
-                current_task_name = state.pending[0].name
+            current_task = state.get_next_task()
+            if current_task:
+                current_task_id = current_task.id
+                current_task_name = current_task.name
             
             output_buffer = OutputBuffer()
 
@@ -4355,18 +5044,19 @@ def cmd_run(config: RalphConfig, mode: str, max_iterations: int, max_cost: float
                 log_file_written = None
 
             # Mark task for decomposition AFTER writing log so we can reference it
-            if kill_state["killed"] and current_task_name and stage == 'BUILD':
+            # Per construct-mode.md spec: task with kill_reason triggers DECOMPOSE stage
+            if kill_state["killed"] and current_task_id and stage == 'BUILD':
                 current_state = load_state(config)
-                task = current_state.get_next_task()
-                if task and task.name == current_task_name:
-                    task.needs_decompose = True
+                # Find task by ID (more reliable than name matching)
+                task = next((t for t in current_state.tasks if t.id == current_task_id), None)
+                if task:
                     task.kill_reason = kill_state["reason"]
                     task.kill_log = log_file_written
                     save_state(config, current_state)
                     print(f"{Colors.YELLOW}Task marked for decomposition: {task.id}{Colors.NC}")
                     if log_file_written:
                         print(f"{Colors.YELLOW}Kill log: {log_file_written}{Colors.NC}")
-                    print(f"{Colors.YELLOW}Next iteration will break it into smaller tasks{Colors.NC}")
+                    print(f"{Colors.YELLOW}Next iteration will run DECOMPOSE stage{Colors.NC}")
 
             if not interactive:
                 print()
@@ -5249,9 +5939,10 @@ Examples:
                 print(f"\n{Colors.RED}Aborted.{Colors.NC}")
                 sys.exit(1)
         
-        cmd_run(config, 'build', iterations, args.max_cost, args.max_failures, 
-                args.completion_promise, args.no_ui,
-                stage_timeout_ms=args.timeout, context_limit=args.context_limit)
+        # Use the new state machine for construct mode
+        cmd_construct(config, iterations, args.max_cost, args.max_failures, 
+                      args.completion_promise, args.no_ui,
+                      stage_timeout_ms=args.timeout, context_limit=args.context_limit)
     elif args.command == 'help':
         parser.print_help()
     else:
