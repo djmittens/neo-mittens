@@ -3798,7 +3798,7 @@ def cmd_run(config: RalphConfig, mode: str, max_iterations: int, max_cost: float
 # State CLI Commands
 # =============================================================================
 
-def cmd_query(config: RalphConfig, subquery: Optional[str] = None):
+def cmd_query(config: RalphConfig, subquery: Optional[str] = None, done_only: bool = False):
     """Query current state."""
     state = load_state(config)
     
@@ -3807,10 +3807,15 @@ def cmd_query(config: RalphConfig, subquery: Optional[str] = None):
     elif subquery == 'next':
         print(json.dumps(state.get_next(), indent=2))
     elif subquery == 'tasks':
-        print(json.dumps({
-            "pending": [task_to_query_dict(t) for t in state.pending],
-            "done": [task_to_query_dict(t) for t in state.done],
-        }, indent=2))
+        if done_only:
+            print(json.dumps({
+                "done": [task_to_query_dict(t) for t in state.done],
+            }, indent=2))
+        else:
+            print(json.dumps({
+                "pending": [task_to_query_dict(t) for t in state.pending],
+                "done": [task_to_query_dict(t) for t in state.done],
+            }, indent=2))
     elif subquery == 'issues':
         print(json.dumps([{"id": i.id, "desc": i.desc} for i in state.issues], indent=2))
     else:
@@ -4256,6 +4261,8 @@ Examples:
                        help='Disable interactive dashboard, show streaming output')
     parser.add_argument('--all', action='store_true',
                        help='For log: show all history')
+    parser.add_argument('--done', action='store_true',
+                       help='For query tasks: show only done tasks')
     parser.add_argument('--spec', type=str, default=None,
                        help='For log: filter by spec')
     parser.add_argument('--branch', type=str, default=None,
@@ -4300,7 +4307,7 @@ Examples:
     elif args.command == 'watch':
         cmd_watch(config)
     elif args.command == 'query':
-        cmd_query(config, args.arg)
+        cmd_query(config, args.arg, done_only=args.done)
     elif args.command == 'task':
         if not args.arg:
             print(f"{Colors.RED}Usage: ralph task [done|add|accept|reject]{Colors.NC}")
@@ -4403,10 +4410,27 @@ Examples:
             # Check if there are any tasks for this spec
             if not state.tasks:
                 print(f"{Colors.YELLOW}No tasks found for spec: {spec_path.name}{Colors.NC}")
+                print(f"Auto-running plan to generate tasks...")
                 print()
-                print("To generate tasks, run:")
-                print(f"  {Colors.CYAN}ralph plan {spec_path.name}{Colors.NC}")
-                sys.exit(1)
+                
+                # Run plan mode first to generate tasks
+                result = cmd_run(config, 'plan', 1, args.max_cost, args.max_failures, 
+                        args.completion_promise, args.no_ui, spec_file=spec_path.name,
+                        stage_timeout_ms=args.timeout, context_limit=args.context_limit)
+                
+                if result != 0:
+                    print(f"{Colors.RED}Plan failed. Cannot proceed with construct.{Colors.NC}")
+                    sys.exit(1)
+                
+                # Reload state to get the newly created tasks
+                state = load_state(config)
+                if not state.tasks:
+                    print(f"{Colors.RED}Plan completed but no tasks were created.{Colors.NC}")
+                    sys.exit(1)
+                
+                print()
+                print(f"{Colors.GREEN}Plan complete. Starting construct mode...{Colors.NC}")
+                print()
         
         # Ensure plan.jsonl is committed before starting construct mode
         if has_uncommitted_plan(config):
