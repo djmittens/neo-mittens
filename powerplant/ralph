@@ -455,6 +455,10 @@ class Task:
     kill_log: Optional[str] = None  # Path to log file from killed iteration
     priority: Optional[str] = None  # "high", "medium", or "low"
     reject_reason: Optional[str] = None  # Why task was rejected by VERIFY (if retrying)
+    # Relationship tracking
+    parent: Optional[str] = None  # Task ID this was decomposed from (DECOMPOSE stage)
+    created_from: Optional[str] = None  # Issue ID this task was created from (INVESTIGATE stage)
+    supersedes: Optional[str] = None  # Task ID this replaces (when rejection leads to new approach)
     
     def to_jsonl(self) -> str:
         d = {"t": "task", "id": self.id, "spec": self.spec, "name": self.name, "s": self.status}
@@ -476,6 +480,12 @@ class Task:
             d["priority"] = self.priority
         if self.reject_reason:
             d["reject"] = self.reject_reason
+        if self.parent:
+            d["parent"] = self.parent
+        if self.created_from:
+            d["created_from"] = self.created_from
+        if self.supersedes:
+            d["supersedes"] = self.supersedes
         return json.dumps(d)
     
     @classmethod
@@ -495,7 +505,10 @@ class Task:
             kill_reason=d.get("kill"),
             kill_log=d.get("kill_log"),
             priority=d.get("priority"),
-            reject_reason=d.get("reject")
+            reject_reason=d.get("reject"),
+            parent=d.get("parent"),
+            created_from=d.get("created_from"),
+            supersedes=d.get("supersedes")
         )
 
 
@@ -1717,12 +1730,28 @@ def cmd_status(config: RalphConfig):
     print(f"{Colors.CYAN}Tasks ({len(done)} done, {len(pending)} pending){Colors.NC}")
     print(f"{Colors.DIM}{'-'*60}{Colors.NC}")
     
+    def print_task_details(task):
+        """Print common task detail lines (accept, deps, relationships)."""
+        if task.accept:
+            print(f"    {Colors.DIM}accept: {task.accept[:70]}{'...' if len(task.accept) > 70 else ''}{Colors.NC}")
+        if task.deps:
+            print(f"    {Colors.DIM}deps: {', '.join(task.deps)}{Colors.NC}")
+        # Relationship tracking
+        relationships = []
+        if task.parent:
+            relationships.append(f"parent: {task.parent}")
+        if task.created_from:
+            relationships.append(f"from: {task.created_from}")
+        if task.supersedes:
+            relationships.append(f"supersedes: {task.supersedes}")
+        if relationships:
+            print(f"    {Colors.DIM}{', '.join(relationships)}{Colors.NC}")
+    
     if done:
         for task in done:
             priority_str = f"[{task.priority}]" if task.priority else ""
             print(f"  {Colors.GREEN}✓{Colors.NC} {task.id} {priority_str} {task.name}")
-            if task.accept:
-                print(f"    {Colors.DIM}accept: {task.accept[:70]}{'...' if len(task.accept) > 70 else ''}{Colors.NC}")
+            print_task_details(task)
     
     if pending:
         for task in pending:
@@ -1734,10 +1763,7 @@ def cmd_status(config: RalphConfig):
                 print(f"  {Colors.YELLOW}!{Colors.NC} {task.id} {priority_str} {task.name} {Colors.YELLOW}(killed: {task.kill_reason}){Colors.NC}")
             else:
                 print(f"  {Colors.YELLOW}○{Colors.NC} {task.id} {priority_str} {task.name}")
-            if task.accept:
-                print(f"    {Colors.DIM}accept: {task.accept[:70]}{'...' if len(task.accept) > 70 else ''}{Colors.NC}")
-            if task.deps:
-                print(f"    {Colors.DIM}deps: {', '.join(task.deps)}{Colors.NC}")
+            print_task_details(task)
     
     if not done and not pending:
         print(f"  {Colors.DIM}No tasks{Colors.NC}")
@@ -3983,12 +4009,24 @@ def cmd_task(config: RalphConfig, action: str, desc: Optional[str] = None, arg3:
         if not done:
             print(f"{Colors.YELLOW}No done tasks to accept{Colors.NC}")
             return 1
-        count = len(done)
-        # Remove all done tasks from state.tasks
-        done_ids = {t.id for t in done}
-        state.tasks = [t for t in state.tasks if t.id not in done_ids]
-        save_state(config, state)  # No auto-commit, let caller batch
-        print(f"{Colors.GREEN}Accepted {count} tasks{Colors.NC}")
+        
+        if desc:
+            task_id = desc
+            task = next((t for t in done if t.id == task_id), None)
+            if not task:
+                print(f"{Colors.RED}Task not found in done tasks: {task_id}{Colors.NC}")
+                print(f"  {Colors.DIM}Done tasks: {', '.join(t.id for t in done)}{Colors.NC}")
+                return 1
+            state.tasks = [t for t in state.tasks if t.id != task_id]
+            save_state(config, state)  # No auto-commit, let caller batch
+            print(f"{Colors.GREEN}Accepted task:{Colors.NC} {task_id} - {task.name}")
+        else:
+            count = len(done)
+            # Remove all done tasks from state.tasks
+            done_ids = {t.id for t in done}
+            state.tasks = [t for t in state.tasks if t.id not in done_ids]
+            save_state(config, state)  # No auto-commit, let caller batch
+            print(f"{Colors.GREEN}Accepted {count} tasks{Colors.NC}")
         
     elif action == 'reject':
         if not desc or not arg3:
