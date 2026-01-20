@@ -31,8 +31,25 @@ Replace the markdown-based IMPLEMENTATION_PLAN.md with a JSONL plan file (`ralph
 | `deps` | no | List of task IDs this depends on (e.g., `["t-1a2b", "t-3c4d"]`) |
 | `s` | yes | Status: `"p"` (pending) or `"d"` (done) |
 | `done_at` | no | Commit hash when marked done |
+| `priority` | no | Priority level: `"high"`, `"medium"`, or `"low"` |
+| `reject` | no | Rejection reason if task failed VERIFY and is being retried |
+| `kill` | no | Kill reason: `"timeout"` or `"context"` if iteration was killed |
+| `kill_log` | no | Path to log file from killed iteration |
+| `parent` | no | Task ID this was decomposed from (set by DECOMPOSE stage) |
+| `created_from` | no | Issue ID this task was created from (set by INVESTIGATE stage) |
+| `supersedes` | no | Task ID this replaces (when rejection leads to new approach vs retry) |
 
 Tasks are executed in topological order based on dependencies. A task is "blocked" until all its dependencies are done.
+
+#### Task Relationships
+
+Tasks can have three types of relationships:
+
+1. **`parent`**: Set when DECOMPOSE breaks a killed task into subtasks. Enables tracing "why does this task exist?" back to the original oversized task.
+
+2. **`created_from`**: Set when INVESTIGATE creates a task from an issue. Enables tracing "why does this task exist?" back to the discovered issue.
+
+3. **`supersedes`**: Set when a rejected task is replaced with a completely new approach rather than retried. The old task remains rejected; the new task supersedes it.
 
 #### Issue Fields
 

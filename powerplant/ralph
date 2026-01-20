@@ -655,6 +655,8 @@ class RalphState:
                 d["deps"] = t.deps
             if t.done_at:
                 d["done_at"] = t.done_at
+            if t.priority:
+                d["priority"] = t.priority
             return d
         
         return {
@@ -1390,6 +1392,9 @@ After all subagents return:
 
 ### For each task:
 - **Re-check failed** → `ralph task reject "<task_id>" "<reason>"`
+  - Task will be retried with the same approach
+  - If the approach itself is wrong, create a NEW task with `supersedes` field instead:
+    `ralph task add '{"name": "new approach", "accept": "...", "supersedes": "<rejected-task-id>"}'`
 - **Re-check passed, alignment gap** → `ralph task accept` + create new task for gap
 - **Both passed** → `ralph task accept`
 
@@ -1438,6 +1443,7 @@ Use the Task tool to investigate ALL issues in parallel. Launch one subagent per
 ```
 For each issue, launch a Task with prompt:
 "Investigate this issue: <issue description>
+Issue priority: <issue priority or 'medium' if not set>
 
 1. Read relevant code to understand the problem
 2. Determine root cause
@@ -1454,7 +1460,8 @@ Return a JSON object:
   \\"task\\": {  // only if resolution is \\"task\\"
     \\"name\\": \\"<fix description>\\",
     \\"notes\\": \\"<root cause and approach>\\",
-    \\"accept\\": \\"<how to verify>\\"
+    \\"accept\\": \\"<how to verify>\\",
+    \\"priority\\": \\"<inherit from issue priority above>\\"
   },
   \\"trivial_fix\\": \\"<description>\\"  // only if resolution is \\"trivial\\"
 }
@@ -1465,10 +1472,10 @@ Return a JSON object:
 
 After all subagents complete:
 
-1. Add all tasks in batch:
+1. Add all tasks in batch (include `created_from` to link back to issue, and `priority` from originating issue):
 ```
-ralph task add \'{"name": "...", "notes": "...", "accept": "..."}\'
-ralph task add \'{"name": "...", "notes": "...", "accept": "..."}\'
+ralph task add \'{"name": "...", "notes": "...", "accept": "...", "created_from": "i-xxxx", "priority": "high|medium|low"}\'
+ralph task add \'{"name": "...", "notes": "...", "accept": "...", "created_from": "i-yyyy", "priority": "high|medium|low"}\'
 ...
 ```
 
@@ -1568,9 +1575,9 @@ Break the original task into 2-5 smaller tasks that:
 - Together accomplish the original task
 - Account for any partial progress from the failed iteration
 
-For each subtask:
+For each subtask, **include `parent` to link back to the original task**:
 ```
-ralph task add \'{"name": "Specific subtask", "notes": "What to do", "accept": "How to verify"}\'
+ralph task add \'{"name": "Specific subtask", "notes": "What to do", "accept": "How to verify", "parent": "<original-task-id>"}\'
 ```
 
 Use `deps` to specify order if needed.
@@ -3982,22 +3989,25 @@ def cmd_task(config: RalphConfig, action: str, desc: Optional[str] = None, arg3:
                 notes = d.get("notes")
                 accept = d.get("accept")
                 deps = d.get("deps")  # List of task IDs
+                priority = d.get("priority")  # Priority inherited from issue
             else:
                 name = desc
                 notes = None
                 accept = None
                 deps = None
+                priority = None
         except json.JSONDecodeError:
             name = desc
             notes = None
             accept = None
             deps = None
+            priority = None
         
         if not name:
             print(f"{Colors.RED}Task name is required{Colors.NC}")
             return 1
             
-        task = Task(id=_generate_id('t'), name=name, spec=state.spec, notes=notes, accept=accept, deps=deps, status="p")
+        task = Task(id=_generate_id('t'), name=name, spec=state.spec, notes=notes, accept=accept, deps=deps, status="p", priority=priority)
         state.tasks.append(task)
         save_state(config, state)  # No auto-commit, let caller batch
         print(f"{Colors.GREEN}Task added:{Colors.NC} {task.id} - {name}")
