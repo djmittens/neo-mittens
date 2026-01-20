@@ -504,13 +504,17 @@ class Issue:
     id: str
     desc: str
     spec: str  # Spec file this issue belongs to
+    priority: Optional[str] = None  # Priority: high, medium, low - inherited by tasks created from this issue
     
     def to_jsonl(self) -> str:
-        return json.dumps({"t": "issue", "id": self.id, "spec": self.spec, "desc": self.desc})
+        d = {"t": "issue", "id": self.id, "spec": self.spec, "desc": self.desc}
+        if self.priority:
+            d["priority"] = self.priority
+        return json.dumps(d)
     
     @classmethod
     def from_jsonl(cls, d: dict) -> 'Issue':
-        return cls(id=d["id"], desc=d["desc"], spec=d.get("spec", ""))
+        return cls(id=d["id"], desc=d["desc"], spec=d.get("spec", ""), priority=d.get("priority"))
 
 
 @dataclass
