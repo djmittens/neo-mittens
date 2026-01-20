@@ -40,10 +40,10 @@ Return a JSON object:
 
 After all subagents complete:
 
-1. Add all tasks in batch:
+1. Add all tasks in batch (include `created_from` to link back to issue, and `priority` from originating issue):
 ```
-ralph task add '{"name": "...", "notes": "...", "accept": "..."}'
-ralph task add '{"name": "...", "notes": "...", "accept": "..."}'
+ralph task add '{"name": "...", "notes": "...", "accept": "...", "created_from": "i-xxxx", "priority": "high|medium|low"}'
+ralph task add '{"name": "...", "notes": "...", "accept": "...", "created_from": "i-yyyy", "priority": "high|medium|low"}'
 ...
 ```
 

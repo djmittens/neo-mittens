@@ -3848,9 +3848,9 @@ def cmd_run(config: RalphConfig, mode: str, max_iterations: int, max_cost: float
                     print(f"{Colors.GREEN}Committed plan with {task_count} tasks{Colors.NC}")
                 break
 
-            # Check for spec incomplete signal (VALIDATE created new tasks)
-            if '[RALPH] SPEC_INCOMPLETE' in output_text:
-                # Auto-prioritize new tasks before next iteration
+            # Auto-prioritize after VERIFY stage before transitioning to next iteration
+            # This covers: SPEC_INCOMPLETE signal, no signal (timeout/forgot), or SPEC_COMPLETE that was ignored
+            if stage == 'VERIFY':
                 f = io.StringIO()
                 with redirect_stdout(f):
                     prioritize_result = cmd_task(config, 'prioritize')

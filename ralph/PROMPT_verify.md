@@ -78,6 +78,9 @@ After all subagents return:
 
 ### For each task:
 - **Re-check failed** → `ralph task reject "<task_id>" "<reason>"`
+  - Task will be retried with the same approach
+  - If the approach itself is wrong, create a NEW task with `supersedes` field instead:
+    `ralph task add '{"name": "new approach", "accept": "...", "supersedes": "<rejected-task-id>"}'`
 - **Re-check passed, alignment gap** → `ralph task accept` + create new task for gap
 - **Both passed** → `ralph task accept`
 

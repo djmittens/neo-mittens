@@ -64,9 +64,9 @@ Break the original task into 2-5 smaller tasks that:
 - Together accomplish the original task
 - Account for any partial progress from the failed iteration
 
-For each subtask:
+For each subtask, **include `parent` to link back to the original task**:
 ```
-ralph task add '{"name": "Specific subtask", "notes": "What to do", "accept": "How to verify"}'
+ralph task add '{"name": "Specific subtask", "notes": "What to do", "accept": "How to verify", "parent": "<original-task-id>"}'
 ```
 
 Use `deps` to specify order if needed.
