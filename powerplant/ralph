@@ -1316,8 +1316,20 @@ class ConstructStateMachine:
                 # DECOMPOSE itself failed - this is bad, but continue
                 print(f"{Colors.RED}DECOMPOSE failed: {result.error}{Colors.NC}")
             
-            # Reload state after decompose
-            state = load_state(self.config)
+            # After DECOMPOSE, start fresh iteration rather than continuing
+            # This prevents running VERIFY immediately after DECOMPOSE
+            return True, False
+        
+        # Also check for tasks with kill_reason in persisted state (from previous run)
+        if any(t.kill_reason for t in state.tasks):
+            print(f"{Colors.YELLOW}Running DECOMPOSE for previously killed task...{Colors.NC}")
+            result = self._run_stage_with_state(Stage.DECOMPOSE, state)
+            
+            if result.outcome == StageOutcome.FAILURE:
+                print(f"{Colors.RED}DECOMPOSE failed: {result.error}{Colors.NC}")
+            
+            # After DECOMPOSE, start fresh iteration
+            return True, False
         
         # Check for terminal state
         if not state.spec:
@@ -2909,6 +2921,10 @@ def _create_textual_app():
         
         def _update_display(self):
             """Periodic display update."""
+            # Update iteration from runtime file (written by construct/run)
+            if self._watch_mode:
+                self._iteration = read_runtime_iteration(self._config)
+            
             # Update title with current time
             header = self.query_one("#header-bar Static", Static)
             header.update(self._get_title())
@@ -3483,6 +3499,7 @@ def _cmd_watch_fallback(config: RalphConfig):
             if now - last_expensive_update >= EXPENSIVE_UPDATE_INTERVAL:
                 dashboard.running_count = count_running_opencode(config.repo_root)
                 dashboard.is_running = dashboard.running_count > 0
+                dashboard.iteration = read_runtime_iteration(config)
                 if int(now) % 5 == 0:
                     dashboard.branch = get_current_branch()
                 last_expensive_update = now
@@ -3513,7 +3530,12 @@ def cmd_stream():
     Usage: opencode --format json | ralph stream
     
     Note: This command doesn't require being in a git repo since it just processes stdin.
+    
+    Features a pulsing "skeleton" indicator that shows while waiting for events,
+    similar to loading placeholders in modern apps.
     """
+    import select as sel
+    
     # ANSI color codes
     class C:
         RESET = '\033[0m'
@@ -3532,94 +3554,131 @@ def cmd_stream():
         BRIGHT_BLUE = '\033[94m'
         BRIGHT_MAGENTA = '\033[95m'
         BRIGHT_CYAN = '\033[96m'
-
-    for line in sys.stdin:
-        line = line.strip()
-        if not line:
-            continue
+        # Cursor control
+        SAVE = '\033[s'
+        RESTORE = '\033[u'
+        CLEAR_LINE = '\033[2K'
+        UP = '\033[1A'
+    
+    fd = sys.stdin.fileno()
+    frame_idx = 0
+    in_step = False  # Track if we're inside a step (between step_start and step_finish)
+    last_event_time = time.time()
+    skeleton_delay = 0.5  # Wait this long before showing skeleton
+    
+    def format_tool_output(tool, args, title, output):
+        """Format and print tool use output."""
+        if tool == "bash":
+            cmd = args.get("command", "")
+            desc = args.get("description", "") or title
+            print(f"\n⚡ {C.BRIGHT_YELLOW}Bash:{C.RESET} {C.DIM}{cmd[:80]}{C.RESET}")
+            if desc:
+                print(f"  {C.YELLOW}{desc}{C.RESET}")
+        elif tool == "read":
+            path = args.get("filePath", "")
+            print(f"\n📖 {C.BRIGHT_CYAN}Read:{C.RESET} {C.CYAN}{path}{C.RESET}")
+        elif tool == "edit":
+            path = args.get("filePath", "")
+            print(f"\n✏️  {C.BRIGHT_GREEN}Edit:{C.RESET} {C.GREEN}{path}{C.RESET}")
+        elif tool == "write":
+            path = args.get("filePath", "")
+            print(f"\n📝 {C.BRIGHT_GREEN}Write:{C.RESET} {C.GREEN}{path}{C.RESET}")
+        elif tool == "grep":
+            pattern = args.get("pattern", "")
+            print(f"\n🔍 {C.BRIGHT_MAGENTA}Grep:{C.RESET} {C.MAGENTA}{pattern}{C.RESET}")
+        elif tool == "glob":
+            pattern = args.get("pattern", "")
+            print(f"\n📁 {C.BRIGHT_MAGENTA}Glob:{C.RESET} {C.MAGENTA}{pattern}{C.RESET}")
+        elif tool == "task":
+            desc = args.get("description", "") or title
+            print(f"\n🤖 {C.BRIGHT_BLUE}Task:{C.RESET} {C.BLUE}{desc}{C.RESET}")
+        elif tool == "todowrite":
+            todos = args.get("todos", [])
+            print(f"\n🔧 {C.WHITE}todowrite:{C.RESET} {C.DIM}{len(todos)} todos{C.RESET}")
+        elif tool == "ddg-search" or tool == "webfetch":
+            query = args.get("query", "") or args.get("url", "") or title
+            print(f"\n🦆 {C.BRIGHT_CYAN}Web:{C.RESET} {C.CYAN}{query}{C.RESET}")
+        elif tool.startswith("ralph") or tool.startswith("mcp_ralph"):
+            desc = args.get("description", "") or title or tool
+            print(f"\n👮 {C.BRIGHT_YELLOW}Ralph:{C.RESET} {C.YELLOW}{desc}{C.RESET}")
+        else:
+            label = f"{tool}: {title}" if title else tool
+            print(f"\n🔧 {C.WHITE}{label}{C.RESET}")
         
-        try:
-            event = json.loads(line)
-        except json.JSONDecodeError:
-            continue
-        
-        event_type = event.get("type", "")
-        part = event.get("part", {})
-        
-        # OpenCode format
-        if event_type == "text":
-            text = part.get("text", "")
-            if text:
-                # Model's thinking/explanation text - dim white
-                print(f"\n{C.WHITE}{text}{C.RESET}")
-                sys.stdout.flush()
-        
-        elif event_type == "tool_use":
-            tool = part.get("tool", "?")
-            state = part.get("state", {})
-            args = state.get("input", {})
-            title = state.get("title", "")
-            output = state.get("output", "")
-            
-            # Tool label color based on tool type
-            if tool == "bash":
-                cmd = args.get("command", "")
-                desc = args.get("description", "") or title
-                print(f"\n⚡ {C.BRIGHT_YELLOW}Bash:{C.RESET} {C.DIM}{cmd[:80]}{C.RESET}")
-                if desc:
-                    print(f"  {C.YELLOW}{desc}{C.RESET}")
-            elif tool == "read":
-                path = args.get("filePath", "")
-                print(f"\n📖 {C.BRIGHT_CYAN}Read:{C.RESET} {C.CYAN}{path}{C.RESET}")
-            elif tool == "edit":
-                path = args.get("filePath", "")
-                print(f"\n✏️  {C.BRIGHT_GREEN}Edit:{C.RESET} {C.GREEN}{path}{C.RESET}")
-            elif tool == "write":
-                path = args.get("filePath", "")
-                print(f"\n📝 {C.BRIGHT_GREEN}Write:{C.RESET} {C.GREEN}{path}{C.RESET}")
-            elif tool == "grep":
-                pattern = args.get("pattern", "")
-                print(f"\n🔍 {C.BRIGHT_MAGENTA}Grep:{C.RESET} {C.MAGENTA}{pattern}{C.RESET}")
-            elif tool == "glob":
-                pattern = args.get("pattern", "")
-                print(f"\n📁 {C.BRIGHT_MAGENTA}Glob:{C.RESET} {C.MAGENTA}{pattern}{C.RESET}")
-            elif tool == "task":
-                desc = args.get("description", "") or title
-                print(f"\n🤖 {C.BRIGHT_BLUE}Task:{C.RESET} {C.BLUE}{desc}{C.RESET}")
-            elif tool == "ddg-search" or tool == "webfetch":
-                query = args.get("query", "") or args.get("url", "") or title
-                print(f"\n🦆 {C.BRIGHT_CYAN}Web:{C.RESET} {C.CYAN}{query}{C.RESET}")
-            elif tool.startswith("ralph") or tool.startswith("mcp_ralph"):
-                desc = args.get("description", "") or title or tool
-                print(f"\n👮 {C.BRIGHT_YELLOW}Ralph:{C.RESET} {C.YELLOW}{desc}{C.RESET}")
+        # Show brief output - dimmed
+        if output:
+            lines = str(output).strip().split('\n')
+            if len(lines) <= 3:
+                for l in lines:
+                    print(f"  {C.DIM}{l[:100]}{C.RESET}")
             else:
-                label = f"{tool}: {title}" if title else tool
-                print(f"\n🔧 {C.WHITE}{label}{C.RESET}")
+                print(f"  {C.DIM}({len(lines)} lines){C.RESET}")
+        sys.stdout.flush()
+    
+    try:
+        while True:
+            # Non-blocking read with 100ms timeout for animation
+            ready, _, _ = sel.select([fd], [], [], 0.1)
             
-            # Show brief output - dimmed
-            if output:
-                lines = str(output).strip().split('\n')
-                if len(lines) <= 3:
-                    for l in lines:
-                        print(f"  {C.DIM}{l[:100]}{C.RESET}")
-                else:
-                    print(f"  {C.DIM}({len(lines)} lines){C.RESET}")
-            sys.stdout.flush()
-        
-        elif event_type == "step_finish":
-            cost = part.get("cost", 0)
-            tokens = part.get("tokens", {})
-            input_tokens = tokens.get("input", 0)
-            output_tokens = tokens.get("output", 0)
-            cache = tokens.get("cache", {})
-            cache_read = cache.get("read", 0)
-            # Context window = new input tokens + cached tokens (both are "in" the context)
-            context_size = input_tokens + cache_read
-            # Soft divider
-            print(f"\n{C.BRIGHT_BLACK}· · ·{C.RESET}")
-            # Metrics line for parse_cost_line() - prefixed with \x00 to filter from display
-            print(f"\x00Cost: ${cost:.4f} | Tokens: {context_size}in/{output_tokens}out")
-            sys.stdout.flush()
+            if ready:
+                line = sys.stdin.readline()
+                if not line:  # EOF
+                    break
+                
+                line = line.strip()
+                if not line:
+                    continue
+                
+                try:
+                    event = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                
+                last_event_time = time.time()
+                event_type = event.get("type", "")
+                part = event.get("part", {})
+                
+                if event_type == "step_start":
+                    in_step = True
+                
+                elif event_type == "text":
+                    text = part.get("text", "")
+                    if text:
+                        print(f"\n{C.WHITE}{text}{C.RESET}")
+                        sys.stdout.flush()
+                
+                elif event_type == "tool_use":
+                    tool = part.get("tool", "?")
+                    state = part.get("state", {})
+                    args = state.get("input", {})
+                    title = state.get("title", "")
+                    output = state.get("output", "")
+                    format_tool_output(tool, args, title, output)
+                
+                elif event_type == "step_finish":
+                    in_step = False
+                    cost = part.get("cost", 0)
+                    tokens = part.get("tokens", {})
+                    input_tokens = tokens.get("input", 0)
+                    output_tokens = tokens.get("output", 0)
+                    cache = tokens.get("cache", {})
+                    cache_read = cache.get("read", 0)
+                    context_size = input_tokens + cache_read
+                    print(f"\n{C.BRIGHT_BLACK}· · ·{C.RESET}")
+                    print(f"\x00Cost: ${cost:.4f} | Tokens: {context_size}in/{output_tokens}out")
+                    sys.stdout.flush()
+            
+            else:
+                # No data available - emit heartbeat if we're waiting in a step
+                # Parent process can use this to show animation
+                if in_step and (time.time() - last_event_time) > skeleton_delay:
+                    # Emit heartbeat with frame number for parent to animate
+                    print(f"\x01HEARTBEAT:{frame_idx}")
+                    sys.stdout.flush()
+                    frame_idx += 1
+    
+    except KeyboardInterrupt:
+        pass
 
 
 @dataclass 
@@ -3748,6 +3807,37 @@ def _run_with_simple_ui(process, config: RalphConfig, iteration: int,
     dashboard.branch = branch
     dashboard.is_running = True
     last_line_count = 0
+    last_activity_time = time.time()
+    skeleton_frame = 0
+    skeleton_showing = False
+    
+    # Skeleton animation frames - shadow trails behind motion (░▒▓█ moving right)
+    skeleton_frames = [
+        "\033[90m░░░░░░░░░░░░░░░░░░░░\033[0m",
+        "\033[90m░░░░░░░░░░░░░░░░░░░▒\033[0m",
+        "\033[90m░░░░░░░░░░░░░░░░░░▒▓\033[0m",
+        "\033[90m░░░░░░░░░░░░░░░░░▒▓█\033[0m",
+        "\033[90m░░░░░░░░░░░░░░░░▒▓█░\033[0m",
+        "\033[90m░░░░░░░░░░░░░░░▒▓█░░\033[0m",
+        "\033[90m░░░░░░░░░░░░░░▒▓█░░░\033[0m",
+        "\033[90m░░░░░░░░░░░░░▒▓█░░░░\033[0m",
+        "\033[90m░░░░░░░░░░░░▒▓█░░░░░\033[0m",
+        "\033[90m░░░░░░░░░░░▒▓█░░░░░░\033[0m",
+        "\033[90m░░░░░░░░░░▒▓█░░░░░░░\033[0m",
+        "\033[90m░░░░░░░░░▒▓█░░░░░░░░\033[0m",
+        "\033[90m░░░░░░░░▒▓█░░░░░░░░░\033[0m",
+        "\033[90m░░░░░░░▒▓█░░░░░░░░░░\033[0m",
+        "\033[90m░░░░░░▒▓█░░░░░░░░░░░\033[0m",
+        "\033[90m░░░░░▒▓█░░░░░░░░░░░░\033[0m",
+        "\033[90m░░░░▒▓█░░░░░░░░░░░░░\033[0m",
+        "\033[90m░░░▒▓█░░░░░░░░░░░░░░\033[0m",
+        "\033[90m░░▒▓█░░░░░░░░░░░░░░░\033[0m",
+        "\033[90m░▒▓█░░░░░░░░░░░░░░░░\033[0m",
+        "\033[90m▒▓█░░░░░░░░░░░░░░░░░\033[0m",
+        "\033[90m▓█░░░░░░░░░░░░░░░░░░\033[0m",
+        "\033[90m█░░░░░░░░░░░░░░░░░░░\033[0m",
+        "\033[90m░░░░░░░░░░░░░░░░░░░░\033[0m",
+    ]
     
     dashboard.enter()
     
@@ -3755,9 +3845,30 @@ def _run_with_simple_ui(process, config: RalphConfig, iteration: int,
         while process.poll() is None:
             # Sync output from buffer to dashboard
             all_lines = output_buffer.get_lines()
-            for line in all_lines[last_line_count:]:
-                dashboard.add_line(line)
-            last_line_count = len(all_lines)
+            new_lines = all_lines[last_line_count:]
+            
+            if new_lines:
+                # Remove skeleton line if showing, then add new lines
+                if skeleton_showing:
+                    if dashboard.output_lines:
+                        dashboard.output_lines.pop()
+                    skeleton_showing = False
+                for line in new_lines:
+                    dashboard.add_line(line)
+                last_line_count = len(all_lines)
+                last_activity_time = time.time()
+            elif time.time() - last_activity_time > 0.5:
+                # No new content for 0.5s, show skeleton animation
+                frame = skeleton_frames[skeleton_frame % len(skeleton_frames)]
+                if skeleton_showing:
+                    # Update existing skeleton line in place
+                    if dashboard.output_lines:
+                        dashboard.output_lines[-1] = frame
+                else:
+                    # Add new skeleton line
+                    dashboard.add_line(frame)
+                    skeleton_showing = True
+                skeleton_frame += 1
             
             # Sync metrics
             dashboard.cost = metrics.total_cost
@@ -3854,6 +3965,72 @@ def _process_stream_line(decoded: str, output_buffer: OutputBuffer, metrics: Met
     # Filter out hidden metrics lines (prefixed with \x00) from display
     if decoded.startswith('\x00'):
         return
+    
+    # Handle heartbeat from ralph stream - show pulsing skeleton animation
+    if decoded.startswith('\x01HEARTBEAT:'):
+        if print_to_stdout:
+            try:
+                frame_idx = int(decoded.split(':')[1])
+            except (IndexError, ValueError):
+                frame_idx = 0
+            # Pulsing skeleton frames - shadow trails behind motion (░▒▓█ moving right)
+            skeleton_frames = [
+                "\033[90m░░░░░░░░░░░░░░░░░░░░\033[0m",
+                "\033[90m░░░░░░░░░░░░░░░░░░░▒\033[0m",
+                "\033[90m░░░░░░░░░░░░░░░░░░▒▓\033[0m",
+                "\033[90m░░░░░░░░░░░░░░░░░▒▓█\033[0m",
+                "\033[90m░░░░░░░░░░░░░░░░▒▓█░\033[0m",
+                "\033[90m░░░░░░░░░░░░░░░▒▓█░░\033[0m",
+                "\033[90m░░░░░░░░░░░░░░▒▓█░░░\033[0m",
+                "\033[90m░░░░░░░░░░░░░▒▓█░░░░\033[0m",
+                "\033[90m░░░░░░░░░░░░▒▓█░░░░░\033[0m",
+                "\033[90m░░░░░░░░░░░▒▓█░░░░░░\033[0m",
+                "\033[90m░░░░░░░░░░▒▓█░░░░░░░\033[0m",
+                "\033[90m░░░░░░░░░▒▓█░░░░░░░░\033[0m",
+                "\033[90m░░░░░░░░▒▓█░░░░░░░░░\033[0m",
+                "\033[90m░░░░░░░▒▓█░░░░░░░░░░\033[0m",
+                "\033[90m░░░░░░▒▓█░░░░░░░░░░░\033[0m",
+                "\033[90m░░░░░▒▓█░░░░░░░░░░░░\033[0m",
+                "\033[90m░░░░▒▓█░░░░░░░░░░░░░\033[0m",
+                "\033[90m░░░▒▓█░░░░░░░░░░░░░░\033[0m",
+                "\033[90m░░▒▓█░░░░░░░░░░░░░░░\033[0m",
+                "\033[90m░▒▓█░░░░░░░░░░░░░░░░\033[0m",
+                "\033[90m▒▓█░░░░░░░░░░░░░░░░░\033[0m",
+                "\033[90m▓█░░░░░░░░░░░░░░░░░░\033[0m",
+                "\033[90m█░░░░░░░░░░░░░░░░░░░\033[0m",
+                "\033[90m░░░░░░░░░░░░░░░░░░░░\033[0m",
+            ]
+            frame = skeleton_frames[frame_idx % len(skeleton_frames)]
+            # Use carriage return to overwrite the line in place
+            sys.stdout.write(f"\r{frame}")
+            sys.stdout.flush()
+            # Track that we're showing skeleton so we can clear it
+            _process_stream_line._showing_skeleton = True
+        # Still write heartbeat to FIFO so watchers can animate too
+        if fifo_path is not None:
+            fifo_fd = getattr(_process_stream_line, '_fifo_fd', None)
+            if fifo_fd is None:
+                try:
+                    fifo_fd = os.open(str(fifo_path), os.O_RDWR | os.O_NONBLOCK)
+                    _process_stream_line._fifo_fd = fifo_fd
+                except OSError:
+                    pass
+            if fifo_fd is not None:
+                try:
+                    os.write(fifo_fd, (decoded + '\n').encode('utf-8'))
+                except OSError:
+                    try:
+                        os.close(fifo_fd)
+                    except OSError:
+                        pass
+                    _process_stream_line._fifo_fd = None
+        return
+    
+    # Clear skeleton line if we were showing one
+    if getattr(_process_stream_line, '_showing_skeleton', False):
+        sys.stdout.write("\r\033[2K")  # Clear the skeleton line
+        sys.stdout.flush()
+        _process_stream_line._showing_skeleton = False
     
     output_buffer.add(decoded)
     
@@ -4010,8 +4187,9 @@ def run_single_stage(config: RalphConfig, stage: Stage, state: RalphState,
     )
     
     # Pipe through ralph stream for parsing
+    # Use -u for unbuffered output so we see progress in real-time
     ralph_stream_proc = subprocess.Popen(
-        [sys.executable, __file__, 'stream'],
+        [sys.executable, '-u', __file__, 'stream'],
         stdin=opencode_proc.stdout,
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
@@ -4129,19 +4307,14 @@ def run_single_stage(config: RalphConfig, stage: Stage, state: RalphState,
     
     monitor_thread.join(timeout=1.0)
     
+    # Always signal reader thread to stop and wait for it to finish
+    # This ensures output is flushed before we continue (fixes display freeze on timeout)
+    reader_stop.set()
+    reader_thread.join(timeout=2.0)
+    
     # Handle compaction (simplified - just mark as failure for now, let DECOMPOSE handle it)
     if kill_state["compact_requested"] and not kill_state["killed"]:
-        # Try compaction
-        reader_stop.set()
-        try:
-            ralph_stream_proc.kill()
-            opencode_proc.kill()
-        except:
-            pass
-        reader_thread.join(timeout=2.0)
-        
-        # For now, treat compaction request as a failure that needs decompose
-        # Full compaction logic can be added back later
+        # Processes already killed by monitor_limits, just update state
         kill_state["killed"] = True
         kill_state["reason"] = "compaction_failed"
     

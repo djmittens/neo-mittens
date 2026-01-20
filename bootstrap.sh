@@ -479,4 +479,16 @@ if [ -f "$SCRIPT_DIR/.opencode/package.json" ]; then
   fi
 fi
 
+# 18) Install global OpenCode skills (to ~/.config/opencode/skills/)
+OPENCODE_SKILLS_DIR="$OPENCODE_CONFIG_DIR/skills"
+ensure_dir "$OPENCODE_SKILLS_DIR"
+
+# Link skill directories from .opencode/skills/ to ~/.config/opencode/skills/
+for skill_dir in "$SCRIPT_DIR/.opencode/skills"/*/; do
+  if [ -d "$skill_dir" ]; then
+    skill_name="$(basename "$skill_dir")"
+    link_symlink "$skill_dir" "$OPENCODE_SKILLS_DIR/$skill_name"
+  fi
+done
+
 echo "Done. You may need to restart your shell (or source ~/.profile) and restart Neovim."
