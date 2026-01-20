@@ -14,7 +14,7 @@ Usage: ralph [command] [options]
 Options:
   --max-cost N             Stop when cumulative cost exceeds $N
   --max-failures N         Circuit breaker: stop after N consecutive failures (default: 3)
-  --timeout N              Kill iteration after N seconds (default: 900)
+  --timeout N              Kill iteration after N milliseconds (default: 900000)
   --context-limit N        Context window size in tokens (default: 200000)
   --completion-promise T   Stop when output contains TEXT
 
@@ -96,8 +96,8 @@ CONTEXT_COMPACT_LIMIT_PCT = 85
 # Hard limit: kill iteration when context usage exceeds this percentage  
 CONTEXT_HARD_LIMIT_PCT = 95
 
-# Default iteration timeout in seconds (15 minutes)
-DEFAULT_ITERATION_TIMEOUT = 900
+# Default iteration timeout in milliseconds (15 minutes)
+DEFAULT_ITERATION_TIMEOUT_MS = 900000
 
 
 # =============================================================================
@@ -3232,9 +3232,12 @@ def print_plan_report(state: RalphState, mode: str):
 
 def cmd_run(config: RalphConfig, mode: str, max_iterations: int, max_cost: float,
             max_failures: int, completion_promise: str, no_ui: bool = False,
-            spec_file: Optional[str] = None, iteration_timeout: int = DEFAULT_ITERATION_TIMEOUT,
+            spec_file: Optional[str] = None, iteration_timeout_ms: int = DEFAULT_ITERATION_TIMEOUT_MS,
             context_limit: int = DEFAULT_CONTEXT_WINDOW):
     """Run the main loop."""
+    # Convert timeout from milliseconds to seconds for internal use
+    iteration_timeout = iteration_timeout_ms / 1000.0
+    
     if not config.ralph_dir.exists():
         print(f"{Colors.RED}Ralph not initialized. Run 'ralph init' first.{Colors.NC}")
         return 1
@@ -3303,7 +3306,7 @@ def cmd_run(config: RalphConfig, mode: str, max_iterations: int, max_cost: float
     if max_cost > 0:
         print(f"Max cost:       ${max_cost}")
     print(f"Max failures:   {max_failures} (circuit breaker)")
-    print(f"Timeout:        {iteration_timeout}s per iteration")
+    print(f"Timeout:        {iteration_timeout_ms}ms per iteration")
     print(f"Context:        {context_limit:,} tokens (warn: {soft_limit:,}, compact: {compact_limit:,}, kill: {hard_limit:,})")
     if completion_promise:
         print(f"Completion:     \"{completion_promise}\"")
@@ -3576,7 +3579,7 @@ def cmd_run(config: RalphConfig, mode: str, max_iterations: int, max_cost: float
             if kill_state["killed"]:
                 print(f"\n{Colors.RED}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━{Colors.NC}")
                 if kill_state["reason"] == "timeout":
-                    print(f"{Colors.RED}TIMEOUT: Iteration killed after {iteration_timeout}s{Colors.NC}")
+                    print(f"{Colors.RED}TIMEOUT: Iteration killed after {iteration_timeout_ms}ms{Colors.NC}")
                 else:
                     pct = kill_state["info"].tokens_used / context_limit * 100
                     print(f"{Colors.RED}CONTEXT LIMIT: Iteration killed at {kill_state['info'].tokens_used:,} tokens ({pct:.0f}%){Colors.NC}")
@@ -4234,8 +4237,8 @@ Examples:
                        help='Circuit breaker: stop after N consecutive failures')
     parser.add_argument('--completion-promise', type=str, default='',
                        help='Stop when output contains this text')
-    parser.add_argument('--timeout', type=int, default=DEFAULT_ITERATION_TIMEOUT,
-                       help=f'Kill iteration after N seconds (default: {DEFAULT_ITERATION_TIMEOUT}s)')
+    parser.add_argument('--timeout', type=int, default=DEFAULT_ITERATION_TIMEOUT_MS,
+                       help=f'Kill iteration after N milliseconds (default: {DEFAULT_ITERATION_TIMEOUT_MS}ms)')
     parser.add_argument('--context-limit', type=int, default=DEFAULT_CONTEXT_WINDOW,
                        help=f'Context window size in tokens (default: {DEFAULT_CONTEXT_WINDOW})')
     parser.add_argument('--no-ui', action='store_true',
@@ -4350,7 +4353,7 @@ Examples:
         
         cmd_run(config, 'plan', 1, args.max_cost, args.max_failures, 
                 args.completion_promise, args.no_ui, spec_file=spec_path.name,
-                iteration_timeout=args.timeout, context_limit=args.context_limit)
+                iteration_timeout_ms=args.timeout, context_limit=args.context_limit)
     elif args.command in ('construct', 'build', ''):
         # Note: 'build' is supported as an alias for backward compatibility
         
@@ -4414,7 +4417,7 @@ Examples:
         
         cmd_run(config, 'build', iterations, args.max_cost, args.max_failures, 
                 args.completion_promise, args.no_ui,
-                iteration_timeout=args.timeout, context_limit=args.context_limit)
+                iteration_timeout_ms=args.timeout, context_limit=args.context_limit)
     elif args.command == 'help':
         parser.print_help()
     else:
