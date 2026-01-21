@@ -51,7 +51,16 @@ def run(state: RalphState, config: GlobalConfig) -> StageResult:
     # Capture and parse output
     output_text = ""
     new_tasks = []
-    for json_obj in parse_json_stream(opencode_proc.stdout):
+    if opencode_proc.stdout is None:
+        return StageResult(
+            stage=Stage.INVESTIGATE,
+            outcome=StageOutcome.FAILURE,
+            error="OpenCode process has no stdout",
+        )
+    stdout_content = opencode_proc.stdout.read()
+    if isinstance(stdout_content, bytes):
+        stdout_content = stdout_content.decode("utf-8")
+    for json_obj in parse_json_stream(stdout_content):
         # Validate task JSON
         if not all(k in json_obj for k in ["name", "notes"]):
             continue

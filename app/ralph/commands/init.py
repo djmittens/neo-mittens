@@ -641,9 +641,7 @@ def _handle_prompt_file(prompt_path: Path, new_content: str, repo_root: Path) ->
         )
     elif choice == "merge":
         print(f"  {Colors.CYAN}Merging {prompt_path.name} with LLM...{Colors.NC}")
-        merged = merge_prompts(
-            existing_content, new_content, prompt_path.name, repo_root
-        )
+        merged = merge_prompts(existing_content, new_content, "merge")
         if merged:
             prompt_path.write_text(merged)
             print(f"  {Colors.GREEN}Merged {prompt_path.name} successfully{Colors.NC}")

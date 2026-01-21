@@ -51,6 +51,25 @@ class RalphState:
         """Return set of all completed task IDs (done + accepted)."""
         return self.done_ids | self.accepted_ids
 
+    def get_stage(self) -> str:
+        """Determine the current stage based on state.
+
+        Returns:
+            Stage name: INVESTIGATE, BUILD, VERIFY, DECOMPOSE, or COMPLETE
+        """
+        if self.issues:
+            return "INVESTIGATE"
+        if not self.pending:
+            return "COMPLETE"
+        next_task = self.get_next_task()
+        if next_task:
+            if next_task.status == "d":
+                return "VERIFY"
+            if next_task.needs_decompose:
+                return "DECOMPOSE"
+            return "BUILD"
+        return "BUILD"
+
     def get_next_task(self) -> Optional[Task]:
         """Get next ready task by priority and dependency order."""
         sorted_pending = self.get_sorted_pending()

@@ -41,7 +41,17 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         return cmd_init()
 
     if args.command == "status":
-        return cmd_status()
+        global_config = get_global_config()
+        cwd = Path.cwd()
+        ralph_dir = cwd / "ralph"
+        plan_file = ralph_dir / "plan.jsonl"
+        config = {
+            "plan_file": plan_file,
+            "repo_root": cwd,
+            "ralph_dir": ralph_dir,
+            **global_config.__dict__,
+        }
+        return cmd_status(config)
 
     if args.command == "config":
         return _stub_command("config")
@@ -113,7 +123,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 
     if args.command == "compact":
         global_config = get_global_config()
-        return cmd_compact(global_config, args)
+        cmd_compact(global_config, args)
+        return 0
 
     if args.command == "log":
         return _stub_command("log")

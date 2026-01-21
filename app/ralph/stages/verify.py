@@ -20,7 +20,7 @@ def run(state: RalphState, config: GlobalConfig) -> StageResult:
     3. Returns SUCCESS if tests pass, FAILURE if task should be rejected
     """
     # Find the task to verify
-    current_task_id = state.config.current_task_id if state.config else None
+    current_task_id = state.current_task_id
     if not current_task_id:
         return StageResult(
             stage=Stage.VERIFY,

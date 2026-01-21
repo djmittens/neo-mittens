@@ -155,8 +155,9 @@ if TEXTUAL_AVAILABLE:
             self.write_line(styled_msg)
 
             # Maintain max lines
-            if len(self.lines) > self.max_lines:
-                self.lines = self.lines[-self.max_lines :]
+            lines = getattr(self, "lines", [])
+            if len(lines) > self.max_lines:
+                self.lines = lines[-self.max_lines :]  # type: ignore[attr-defined]
 
     class RalphDashboard(App):
         """
