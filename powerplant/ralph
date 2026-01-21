@@ -2572,48 +2572,50 @@ def push_with_retry(config: RalphConfig, branch: str, max_retries: int = 3) -> b
 
 
 def check_unfinished_tasks(config: RalphConfig, new_spec: str) -> bool:
-    """Check for unfinished tasks and prompt user. Returns True if OK to proceed."""
+    """Check for unfinished tasks/issues and prompt user. Returns True if OK to proceed."""
     state = load_state(config)
-    
-    if not state.tasks:
-        return True
     
     current_spec = state.spec or "unknown"
     pending_tasks = state.pending
     done_tasks = state.done
+    issues = state.issues
     
-    if not pending_tasks and not done_tasks:
+    if not pending_tasks and not done_tasks and not issues:
         return True
     
     # Different messaging for same spec vs different spec
     same_spec = (current_spec == new_spec)
     
     if same_spec:
-        print(f"{Colors.YELLOW}Found existing tasks for spec '{current_spec}':{Colors.NC}")
+        print(f"{Colors.YELLOW}Found existing items for spec '{current_spec}':{Colors.NC}")
     else:
-        print(f"{Colors.YELLOW}Found unfinished tasks from spec '{current_spec}':{Colors.NC}")
+        print(f"{Colors.YELLOW}Found unfinished items from spec '{current_spec}':{Colors.NC}")
     
     for t in pending_tasks:
         print(f"  - [pending] {t.id}: {t.name}")
     for t in done_tasks:
         print(f"  - [done] {t.id}: {t.name}")
+    for i in issues:
+        desc_preview = i.desc[:60] + "..." if len(i.desc) > 60 else i.desc
+        print(f"  - [issue] {i.id}: {desc_preview}")
     print()
     print("What would you like to do?")
-    print("  [c] Cancel existing tasks and start fresh")
+    print("  [c] Clear existing tasks/issues and start fresh")
     if same_spec:
-        print("  [k] Keep existing tasks (continue where you left off)")
+        print("  [k] Keep existing tasks/issues (plan will add to them)")
     print("  [a] Abort (keep current plan)")
     
     try:
         response = input(f"Choice [c/{'k/' if same_spec else ''}a]: ").strip().lower()
         if response == 'c':
-            # Clear tasks before proceeding
+            # Clear tasks and issues before proceeding
             state.tasks = []
+            state.issues = []
             save_state(config, state)
-            print(f"{Colors.GREEN}Cleared existing tasks.{Colors.NC}")
+            print(f"{Colors.GREEN}Cleared existing tasks and issues.{Colors.NC}")
             return True
         elif response == 'k' and same_spec:
-            print(f"{Colors.GREEN}Keeping existing tasks. Plan will add to them.{Colors.NC}")
+            print(f"{Colors.GREEN}Keeping existing tasks/issues. Plan will add to them.{Colors.NC}")
             return True
         else:
             print(f"{Colors.YELLOW}Aborted. Keeping current plan.{Colors.NC}")
@@ -6631,6 +6633,8 @@ def cmd_run(config: RalphConfig, mode: str, max_iterations: int, max_cost: float
         print(f"Completion:     \"{completion_promise}\"")
     print(f"{Colors.BLUE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━{Colors.NC}")
 
+
+
     iteration = 0
     try:
         while True:
@@ -7361,6 +7365,144 @@ def cmd_query(config: RalphConfig, subquery: Optional[str] = None, done_only: bo
         print(json.dumps(output, indent=2))
 
 
+def _add_single_task(config: RalphConfig, state: 'RalphState', task_input, batch_ids: list = None) -> int:
+    """Add a single task to state. Returns 0 on success, 1 on failure.
+    
+    Args:
+        config: Ralph configuration
+        state: Current state (will be modified in place)
+        task_input: Either a dict with task fields or a string (task name or JSON)
+        batch_ids: List of task IDs added in current batch (for intra-batch deps)
+    
+    Note: Does NOT save state - caller must call save_state after.
+    """
+    batch_ids = batch_ids or []
+    
+    # Parse input
+    if isinstance(task_input, dict):
+        d = task_input
+        name = d.get("name", "")
+        notes = d.get("notes")
+        accept = d.get("accept")
+        deps = d.get("deps")
+        priority = d.get("priority")
+        parent = d.get("parent")
+        created_from = d.get("created_from")
+        custom_id = d.get("id")
+        research_data = d.get("research")
+    elif isinstance(task_input, str):
+        try:
+            if task_input.startswith('{'):
+                d = json.loads(task_input)
+                name = d.get("name", "")
+                notes = d.get("notes")
+                accept = d.get("accept")
+                deps = d.get("deps")
+                priority = d.get("priority")
+                parent = d.get("parent")
+                created_from = d.get("created_from")
+                custom_id = d.get("id")
+                research_data = d.get("research")
+            else:
+                name = task_input
+                notes = None
+                accept = None
+                deps = None
+                priority = None
+                parent = None
+                created_from = None
+                custom_id = None
+                research_data = None
+        except json.JSONDecodeError:
+            name = task_input
+            notes = None
+            accept = None
+            deps = None
+            priority = None
+            parent = None
+            created_from = None
+            custom_id = None
+            research_data = None
+    else:
+        print(f"{Colors.RED}Invalid task input type: {type(task_input)}{Colors.NC}")
+        return 1
+    
+    if not name:
+        print(f"{Colors.RED}Task name is required{Colors.NC}")
+        return 1
+    
+    # Validate task notes
+    is_valid, error_msg = validate_task_notes(notes)
+    if not is_valid:
+        print(f"{Colors.RED}ERROR: {error_msg}{Colors.NC}")
+        return 1
+    
+    # Validate acceptance criteria
+    is_valid, error_msg = validate_acceptance_criteria(accept)
+    if not is_valid:
+        print(f"{Colors.RED}ERROR: {error_msg}{Colors.NC}")
+        return 1
+    
+    # Validate/generate task ID
+    if custom_id:
+        import re
+        if not re.match(r'^t-[a-z0-9]{4,10}$', custom_id):
+            print(f"{Colors.RED}ERROR: Invalid task ID format: {custom_id}{Colors.NC}")
+            return 1
+        existing_ids = {t.id for t in state.tasks}
+        if custom_id in existing_ids:
+            print(f"{Colors.RED}ERROR: Task ID already exists: {custom_id}{Colors.NC}")
+            return 1
+        task_id = custom_id
+    else:
+        task_id = _generate_id('t')
+    
+    # Validate dependencies (include batch_ids for intra-batch deps)
+    if deps:
+        valid_ids = get_all_valid_task_ids(config, state)
+        valid_ids.update(batch_ids)  # Add IDs from current batch
+        missing_deps = [d for d in deps if d not in valid_ids]
+        if missing_deps:
+            print(f"{Colors.RED}ERROR: Dependencies not found: {', '.join(missing_deps)}{Colors.NC}")
+            return 1
+    
+    # Calculate decompose_depth
+    decompose_depth = 0
+    if parent:
+        parent_task = next((t for t in state.tasks if t.id == parent), None)
+        if parent_task:
+            decompose_depth = parent_task.decompose_depth + 1
+            MAX_DECOMPOSE_DEPTH = 3
+            if decompose_depth > MAX_DECOMPOSE_DEPTH:
+                print(f"{Colors.RED}ERROR: Maximum decomposition depth exceeded{Colors.NC}")
+                return 1
+    
+    # Auto-inherit priority from issue
+    if created_from and not priority:
+        source_issue = next((i for i in state.issues if i.id == created_from), None)
+        if source_issue and source_issue.priority:
+            priority = source_issue.priority
+    
+    task = Task(
+        id=task_id,
+        name=name,
+        spec=state.spec,
+        notes=notes,
+        accept=accept,
+        deps=deps,
+        status="p",
+        priority=priority,
+        parent=parent,
+        created_from=created_from,
+        decompose_depth=decompose_depth
+    )
+    state.tasks.append(task)
+    print(f"{Colors.GREEN}Task added:{Colors.NC} {task.id} - {name}")
+    if deps:
+        print(f"  {Colors.DIM}Depends on: {', '.join(deps)}{Colors.NC}")
+    return 0
+
+
 def cmd_task(config: RalphConfig, action: str, desc: Optional[str] = None, arg3: Optional[str] = None):
     """Task mutations: done, add, accept, reject."""
     state = load_state(config)
@@ -7469,145 +7611,56 @@ def cmd_task(config: RalphConfig, action: str, desc: Optional[str] = None, arg3:
     elif action == 'add':
         if not desc:
             print(f"{Colors.RED}Usage: ralph task add \"name\" or ralph task add '{{\"name\": ..., \"notes\": ..., \"accept\": ...}}'{Colors.NC}")
+            print(f"{Colors.DIM}Batch: ralph task add '[{{...}}, {{...}}]'{Colors.NC}")
             return 1
         if not state.spec:
             print(f"{Colors.RED}No spec set. Run 'ralph set-spec <file>' first.{Colors.NC}")
             return 1
         
-        # Try parsing as JSON for structured task, otherwise treat as simple name
-        custom_id = None
-        research_data = None
-        try:
-            if desc.startswith('{'):
-                d = json.loads(desc)
-                name = d.get("name", "")
-                notes = d.get("notes")
-                accept = d.get("accept")
-                deps = d.get("deps")  # List of task IDs
-                priority = d.get("priority")  # Priority inherited from issue
-                parent = d.get("parent")  # Parent task ID for decomposition
-                created_from = d.get("created_from")  # Issue ID for investigate
-                custom_id = d.get("id")  # Optional custom task ID
-                research_data = d.get("research")  # Structured research findings
-            else:
-                name = desc
-                notes = None
-                accept = None
-                deps = None
-                priority = None
-                parent = None
-                created_from = None
-        except json.JSONDecodeError:
-            name = desc
-            notes = None
-            accept = None
-            deps = None
-            priority = None
-            parent = None
-            created_from = None
-        
-        if not name:
-            print(f"{Colors.RED}Task name is required{Colors.NC}")
-            return 1
-        
-        # Validate task notes are detailed with file paths and approach
-        is_valid, error_msg = validate_task_notes(notes)
-        if not is_valid:
-            print(f"{Colors.RED}ERROR: {error_msg}{Colors.NC}")
-            print(f"  {Colors.DIM}Good notes examples:{Colors.NC}")
-            print(f"  {Colors.DIM}  - 'Modify src/aio.c: Add valk_builtin_aio_within() that races handle with timeout'{Colors.NC}")
-            print(f"  {Colors.DIM}  - 'Create test/test_retry.valk: Test max-attempts, backoff patterns, success after failure'{Colors.NC}")
-            print(f"  {Colors.DIM}  - 'Update src/parser.c line 450: Register aio/within in builtin table after aio/race'{Colors.NC}")
-            return 1
-        
-        # Validate acceptance criteria is measurable and specific
-        is_valid, error_msg = validate_acceptance_criteria(accept)
-        if not is_valid:
-            print(f"{Colors.RED}ERROR: {error_msg}{Colors.NC}")
-            print(f"  {Colors.DIM}Good examples:{Colors.NC}")
-            print(f"  {Colors.DIM}  - 'pytest tests/test_parser.py passes'{Colors.NC}")
-            print(f"  {Colors.DIM}  - '`make build` exits with code 0'{Colors.NC}")
-            print(f"  {Colors.DIM}  - 'grep -c \"ERROR\" log.txt returns 0'{Colors.NC}")
-            print(f"  {Colors.DIM}  - 'output contains \"Success\" and no \"Error\"'{Colors.NC}")
-            return 1
-        
-        # Validate custom task ID if provided
-        if custom_id:
-            import re
-            if not re.match(r'^t-[a-z0-9]{4,10}$', custom_id):
-                print(f"{Colors.RED}ERROR: Invalid task ID format: {custom_id}{Colors.NC}")
-                print(f"  {Colors.DIM}Expected format: t-[a-z0-9]{{4,10}} (e.g., t-abc123){Colors.NC}")
-                return 1
-            # Check for duplicate ID
-            existing_ids = {t.id for t in state.tasks}
-            if custom_id in existing_ids:
-                print(f"{Colors.RED}ERROR: Task ID already exists: {custom_id}{Colors.NC}")
-                return 1
-            task_id = custom_id
-        else:
-            task_id = _generate_id('t')
-        
-        # Validate dependencies exist (checks current state + tombstones + git history)
-        # This handles plan compaction where old tasks are removed
-        if deps:
-            valid_ids = get_all_valid_task_ids(config, state)
-            missing_deps = [d for d in deps if d not in valid_ids]
-            if missing_deps:
-                print(f"{Colors.RED}ERROR: Dependencies not found: {', '.join(missing_deps)}{Colors.NC}")
-                print(f"  {Colors.DIM}Not found in current tasks, tombstones, or git history.{Colors.NC}")
-                print(f"  {Colors.DIM}Create the dependency tasks first, or remove the invalid deps.{Colors.NC}")
-                return 1
-        
-        # Calculate decompose_depth from parent task
-        decompose_depth = 0
-        if parent:
-            parent_task = next((t for t in state.tasks if t.id == parent), None)
-            if parent_task:
-                decompose_depth = parent_task.decompose_depth + 1
-                # Check for maximum decomposition depth
-                MAX_DECOMPOSE_DEPTH = 3
-                if decompose_depth > MAX_DECOMPOSE_DEPTH:
-                    print(f"{Colors.RED}ERROR: Maximum decomposition depth ({MAX_DECOMPOSE_DEPTH}) exceeded!{Colors.NC}")
-                    print(f"  Parent task: {parent_task.name} (depth {parent_task.decompose_depth})")
-                    print(f"  {Colors.YELLOW}This task has been decomposed too many times.{Colors.NC}")
-                    print(f"  {Colors.YELLOW}Create an issue for human review instead:{Colors.NC}")
-                    print(f"  {Colors.DIM}ralph issue add \"Task too complex for auto-decomposition: {name[:50]}\"{Colors.NC}")
+        # Check for batch add (JSON array)
+        if desc.strip().startswith('['):
+            try:
+                tasks_data = json.loads(desc)
+                if not isinstance(tasks_data, list):
+                    print(f"{Colors.RED}Expected JSON array for batch add{Colors.NC}")
                     return 1
+                
+                added_count = 0
+                failed_count = 0
+                added_ids = []  # Track IDs for dependency resolution within batch
+                
+                for i, task_dict in enumerate(tasks_data):
+                    if not isinstance(task_dict, dict):
+                        print(f"{Colors.RED}Item {i}: Expected object, got {type(task_dict).__name__}{Colors.NC}")
+                        failed_count += 1
+                        continue
+                    
+                    # Add previously added IDs to valid deps for intra-batch dependencies
+                    result = _add_single_task(config, state, task_dict, batch_ids=added_ids)
+                    if result == 0:
+                        added_count += 1
+                        # Extract the ID that was just added (last task in state)
+                        if state.tasks:
+                            added_ids.append(state.tasks[-1].id)
+                    else:
+                        failed_count += 1
+                
+                # Save once after all tasks added
+                if added_count > 0:
+                    save_state(config, state)
+                
+                print(f"{Colors.GREEN}Batch complete:{Colors.NC} {added_count} added, {failed_count} failed")
+                return 0 if failed_count == 0 else 1
+                
+            except json.JSONDecodeError as e:
+                print(f"{Colors.RED}Invalid JSON array: {e}{Colors.NC}")
+                return 1
         
-        # Auto-inherit priority from issue if created_from is specified but no priority
-        if created_from and not priority:
-            source_issue = next((i for i in state.issues if i.id == created_from), None)
-            if source_issue and source_issue.priority:
-                priority = source_issue.priority
-            
-        # Parse research data if provided
-        task_research = None
-        if research_data and isinstance(research_data, dict):
-            from ralph.models import TaskResearch
-            task_research = TaskResearch.from_dict(research_data)
-        
-        task = Task(
-            id=task_id, 
-            name=name, 
-            spec=state.spec, 
-            notes=notes, 
-            accept=accept, 
-            deps=deps, 
-            status="p", 
-            priority=priority,
-            parent=parent,
-            created_from=created_from,
-            decompose_depth=decompose_depth
-        )
-        state.tasks.append(task)
-        save_state(config, state)  # No auto-commit, let caller batch
-        print(f"{Colors.GREEN}Task added:{Colors.NC} {task.id} - {name}")
-        if deps:
-            print(f"  {Colors.DIM}Depends on: {', '.join(deps)}{Colors.NC}")
-        if parent:
-            print(f"  {Colors.DIM}Parent: {parent} (depth {decompose_depth}){Colors.NC}")
-        if created_from:
-            print(f"  {Colors.DIM}From issue: {created_from}{Colors.NC}")
+        # Single task add
+        result = _add_single_task(config, state, desc)
+        if result == 0:
+            save_state(config, state)
+        return result
         
     elif action == 'accept':
         done = state.done
@@ -7892,14 +7945,20 @@ def cmd_set_spec(config: RalphConfig, spec_file: str):
                 return 1
     
     state = load_state(config)
-    state.spec = spec_path.name
-    # Clear tasks when switching specs
-    state.tasks = []
-    # Clear tombstones - they served their audit purpose for the previous spec
-    state.tombstones = []
-    # Keep issues - they may be relevant across specs
-    save_state(config, state, f"ralph: set spec {spec_path.name}")
-    print(f"{Colors.GREEN}Spec set:{Colors.NC} {spec_path.name}")
+    
+    # Only clear tasks/tombstones when actually switching to a different spec
+    if state.spec != spec_path.name:
+        state.spec = spec_path.name
+        # Clear tasks when switching specs
+        state.tasks = []
+        # Clear tombstones - they served their audit purpose for the previous spec
+        state.tombstones = []
+        # Keep issues - they may be relevant across specs
+        save_state(config, state, f"ralph: set spec {spec_path.name}")
+        print(f"{Colors.GREEN}Spec set:{Colors.NC} {spec_path.name}")
+    else:
+        # Same spec - nothing to do
+        pass
 
 
 def cmd_log(config: RalphConfig, show_all: bool = False, spec_filter: Optional[str] = None, 
@@ -8192,9 +8251,13 @@ Examples:
         
         ensure_profile_selected(args.profile)
         
-        cmd_run(config, 'plan', 1, args.max_cost, args.max_failures, 
+        # Plan mode needs more time to analyze spec and create tasks - minimum 15 min
+        # Also allow multiple iterations for complex specs (default 5, can be overridden with --max-iter)
+        plan_timeout = max(args.timeout, 900000)
+        plan_max_iter = args.max_iterations if args.max_iterations and args.max_iterations > 0 else 5
+        cmd_run(config, 'plan', plan_max_iter, args.max_cost, args.max_failures, 
                 args.completion_promise, args.no_ui, spec_file=spec_path.name,
-                stage_timeout_ms=args.timeout, context_limit=args.context_limit)
+                stage_timeout_ms=plan_timeout, context_limit=args.context_limit)
     elif args.command in ('construct', 'build', ''):
         # Note: 'build' is supported as an alias for backward compatibility
         
