@@ -1244,17 +1244,42 @@ class Tombstone:
     reason: str  # Why the task was rejected, or accept criteria for accepted
     tombstone_type: str = "reject"  # "accept" or "reject"
     name: str = ""  # Task name (preserved for display)
+    timestamp: Optional[str] = None  # ISO timestamp when tombstone was created
+    changed_files: Optional[list] = None  # List of files changed in the commit
+    log_file: Optional[str] = None  # Path to log file (for rejected tasks)
+    iteration: Optional[int] = None  # Which iteration number (for debugging)
+    notes: Optional[str] = None  # Original task notes (preserved for context)
     
     def to_jsonl(self) -> str:
         d = {"t": self.tombstone_type, "id": self.id, "done_at": self.done_at, "reason": self.reason}
         if self.name:
             d["name"] = self.name
+        if self.timestamp:
+            d["timestamp"] = self.timestamp
+        if self.changed_files:
+            d["changed_files"] = self.changed_files
+        if self.log_file:
+            d["log_file"] = self.log_file
+        if self.iteration is not None:
+            d["iteration"] = self.iteration
+        if self.notes:
+            d["notes"] = self.notes
         return json.dumps(d)
     
     @classmethod
     def from_jsonl(cls, d: dict, tombstone_type: str = "reject") -> 'Tombstone':
-        return cls(id=d["id"], done_at=d["done_at"], reason=d.get("reason", ""), 
-                   tombstone_type=tombstone_type, name=d.get("name", ""))
+        return cls(
+            id=d["id"], 
+            done_at=d["done_at"], 
+            reason=d.get("reason", ""), 
+            tombstone_type=tombstone_type, 
+            name=d.get("name", ""),
+            timestamp=d.get("timestamp"),
+            changed_files=d.get("changed_files"),
+            log_file=d.get("log_file"),
+            iteration=d.get("iteration"),
+            notes=d.get("notes")
+        )
 
 
 @dataclass
@@ -1367,6 +1392,26 @@ class RalphState:
                 d["priority"] = t.priority
             return d
         
+        def tombstone_to_dict(tomb: Tombstone) -> dict:
+            d = {
+                "id": tomb.id,
+                "name": tomb.name,
+                "type": tomb.tombstone_type,
+                "done_at": tomb.done_at,
+                "reason": tomb.reason
+            }
+            if tomb.timestamp:
+                d["timestamp"] = tomb.timestamp
+            if tomb.changed_files:
+                d["changed_files"] = tomb.changed_files
+            if tomb.log_file:
+                d["log_file"] = tomb.log_file
+            if tomb.iteration is not None:
+                d["iteration"] = tomb.iteration
+            if tomb.notes:
+                d["notes"] = tomb.notes
+            return d
+        
         return {
             "spec": self.spec,
             "tasks": {
@@ -1374,6 +1419,10 @@ class RalphState:
                 "done": [task_to_dict(t) for t in self.done],
             },
             "issues": [{"id": i.id, "desc": i.desc} for i in self.issues],
+            "tombstones": {
+                "accepted": [tombstone_to_dict(t) for t in self.tombstones if t.tombstone_type == "accept"],
+                "rejected": [tombstone_to_dict(t) for t in self.tombstones if t.tombstone_type == "reject"],
+            },
         }
     
     def get_stage(self) -> str:
@@ -1867,6 +1916,81 @@ def get_current_commit(config: RalphConfig) -> str:
     return result.stdout.strip() if result.returncode == 0 else "unknown"
 
 
+def get_commit_files(config: RalphConfig, commit_hash: str) -> list:
+    """Get list of files changed in a commit."""
+    try:
+        result = subprocess.run(
+            ['git', 'diff-tree', '--no-commit-id', '--name-only', '-r', commit_hash],
+            capture_output=True, text=True, cwd=config.repo_root, timeout=5
+        )
+        if result.returncode == 0:
+            return [f.strip() for f in result.stdout.strip().split('\n') if f.strip()]
+        return []
+    except (subprocess.TimeoutExpired, Exception):
+        return []
+
+
+def get_commit_timestamp(config: RalphConfig, commit_hash: str) -> Optional[str]:
+    """Get ISO timestamp of a commit."""
+    try:
+        result = subprocess.run(
+            ['git', 'show', '-s', '--format=%cI', commit_hash],
+            capture_output=True, text=True, cwd=config.repo_root, timeout=5
+        )
+        if result.returncode == 0:
+            return result.stdout.strip()
+        return None
+    except (subprocess.TimeoutExpired, Exception):
+        return None
+
+
+def create_tombstone(
+    config: RalphConfig,
+    task: 'Task',
+    tombstone_type: str,
+    reason: str = "",
+    log_file: Optional[str] = None,
+    iteration: Optional[int] = None
+) -> 'Tombstone':
+    """Create a tombstone with full context information.
+    
+    Args:
+        config: Ralph configuration
+        task: Task being tombstoned
+        tombstone_type: "accept" or "reject"
+        reason: Acceptance criteria or rejection reason
+        log_file: Path to log file (for rejected tasks)
+        iteration: Iteration number when tombstone was created
+    
+    Returns:
+        Tombstone with full metadata
+    """
+    from datetime import datetime
+    
+    commit_hash = task.done_at or get_current_commit(config)
+    
+    # Get timestamp - try from commit first, fallback to current time
+    timestamp = get_commit_timestamp(config, commit_hash)
+    if not timestamp:
+        timestamp = datetime.utcnow().isoformat() + 'Z'
+    
+    # Get changed files from the commit
+    changed_files = get_commit_files(config, commit_hash) if commit_hash != "unknown" else []
+    
+    return Tombstone(
+        id=task.id,
+        done_at=commit_hash,
+        reason=reason,
+        tombstone_type=tombstone_type,
+        name=task.name,
+        timestamp=timestamp,
+        changed_files=changed_files,
+        log_file=log_file,
+        iteration=iteration,
+        notes=task.notes
+    )
+
+
 def get_current_task_file(config: RalphConfig) -> Path:
     """Get path to the current task lock file."""
     return config.ralph_dir / ".current_task"
@@ -1980,6 +2104,101 @@ def validate_state(state: RalphState, config: RalphConfig = None) -> dict:
         'errors': errors,
         'warnings': warnings
     }
+
+
+def validate_task_notes(notes: str) -> tuple[bool, Optional[str]]:
+    """Validate that task notes are detailed with file paths and implementation guidance.
+    
+    Returns:
+        Tuple of (is_valid, error_message)
+        - is_valid: True if notes pass validation
+        - error_message: Description of why validation failed, or None if valid
+    
+    Notes must:
+    - Be specific (not vague like "implement X")
+    - Include file paths or references
+    - Describe the approach or what to modify
+    - Be long enough to be useful (minimum 50 chars)
+    
+    Good examples:
+    - "Modify src/aio/aio_combinators.c: Add valk_builtin_aio_within() that races handle with timeout"
+    - "Create test/test_retry.valk: Test max-attempts, backoff patterns, and success after failure"
+    - "Update src/parser.c line 450: Register aio/within in builtin table after aio/race"
+    
+    Bad examples:
+    - "Implement the feature"
+    - "Add tests"
+    - "Fix the bug"
+    - "Update code as needed"
+    """
+    if not notes:
+        return False, "Task notes are required. Specify which files to modify and what approach to take."
+    
+    notes_stripped = notes.strip()
+    
+    # Check minimum length
+    MIN_LENGTH = 50
+    if len(notes_stripped) < MIN_LENGTH:
+        return False, f"Task notes too short ({len(notes_stripped)} chars). Provide detailed implementation guidance with file paths (minimum {MIN_LENGTH} chars)."
+    
+    # Check for vague phrases
+    VAGUE_PHRASES = [
+        'implement the feature',
+        'add the feature',
+        'implement x',
+        'add x',
+        'fix the bug',
+        'fix the issue',
+        'fix the problem',
+        'update code',
+        'update as needed',
+        'modify as needed',
+        'change as needed',
+        'add tests',
+        'write tests',
+        'implement',  # standalone
+        'as needed',
+        'tbd',
+        'todo',
+        'to be determined',
+    ]
+    
+    notes_lower = notes_stripped.lower()
+    for phrase in VAGUE_PHRASES:
+        if phrase in notes_lower:
+            return False, f"Task notes are too vague: '{phrase}'. Specify WHICH files to modify and WHAT approach to use."
+    
+    # Check for file path indicators
+    FILE_PATH_INDICATORS = [
+        '/',  # Path separator (src/foo.c, test/bar.valk)
+        '.c', '.h', '.valk', '.py', '.js', '.ts',  # File extensions
+        'src/', 'test/', 'include/', 'lib/',  # Common directories
+        'line ', 'lines ',  # Line number references
+        'function ', 'method ',  # Function references
+        'file ',  # Explicit file reference
+    ]
+    
+    has_file_reference = any(indicator in notes_lower for indicator in FILE_PATH_INDICATORS)
+    
+    if not has_file_reference:
+        return False, "Task notes lack specific file paths. Include which files to modify (e.g., 'src/parser.c', 'test/test_foo.valk')."
+    
+    # Check for implementation guidance indicators
+    IMPLEMENTATION_INDICATORS = [
+        'add ', 'create ', 'modify ', 'update ', 'change ', 'remove ', 'delete ',
+        'extract ', 'refactor ', 'move ', 'rename ', 'replace ',
+        'register ', 'implement ', 'define ', 'declare ',
+        'call ', 'invoke ', 'use ', 'pattern:',
+        'approach:', 'strategy:',
+        ':', '-',  # Colons and dashes often indicate structured guidance
+    ]
+    
+    has_guidance = any(indicator in notes_lower for indicator in IMPLEMENTATION_INDICATORS)
+    
+    if not has_guidance:
+        return False, "Task notes lack implementation guidance. Describe WHAT to do (add, modify, create, etc.) and HOW."
+    
+    return True, None
 
 
 def validate_acceptance_criteria(accept: str) -> tuple[bool, Optional[str]]:
@@ -2661,9 +2880,22 @@ ralph task add '{"name": "Short task name", "notes": "Implementation details", "
 
 Task fields:
 - `name` (required): Short description of what to do (e.g., "Add unit tests for parser")
-- `notes` (required): Implementation details - what files to modify, what approach to take, relevant context
+- `notes` (required): **DETAILED** implementation guidance - MUST include specific file paths and approach
 - `accept` (required): **MEASURABLE** acceptance criteria - MUST specify concrete verification steps
 - `deps` (optional): List of task IDs this task depends on
+
+**CRITICAL: Notes MUST be detailed to minimize BUILD stage research.**
+
+Good `notes` examples:
+- "Modify src/aio/aio_combinators.c: Add valk_builtin_aio_within() that creates race between handle and sleep+timeout. Register in valk_lenv_put_builtins(). Pattern: race(handle, then(sleep(sys, ms), fail(timeout)))."
+- "Create test/test_aio_within.valk: Test cases for timeout before completion, completion before timeout, and handle failure. Use aio/sleep for timing control."
+- "Update src/parser.c line 450: Add 'aio/within' to builtin registration table after aio/race entry."
+
+Bad `notes` examples (WILL BE REJECTED):
+- "Add the feature" - no file paths, no approach
+- "Implement aio/within" - vague, no details
+- "Write tests" - which files? what to test?
+- "Update code as needed" - no specific files
 
 **CRITICAL: Acceptance criteria MUST be measurable and specific.**
 
@@ -2680,7 +2912,11 @@ Bad `accept` examples (WILL BE REJECTED):
 - "is implemented" - not measurable
 - "feature works" - how do you verify?
 
-**IMPORTANT**: Every task MUST have `notes` with implementation guidance. Tasks without `notes` will fail during BUILD.
+**IMPORTANT**: Every task MUST have:
+1. `notes` with SPECIFIC file paths and implementation approach (minimum 50 chars)
+2. `accept` with MEASURABLE verification steps (minimum 15 chars)
+
+Tasks without detailed `notes` will be REJECTED during validation.
 
 The command returns the new task ID (e.g., "Task added: t-1a2b - ..."). Use this ID when other tasks depend on it.
 
@@ -2689,6 +2925,7 @@ Rules:
 - Add tasks in dependency order - add prerequisite tasks first so you have their IDs
 - Be specific - "Add X to Y" not "Improve Z"
 - Tasks are for {{SPEC_FILE}} only
+- `notes` MUST include specific file paths (e.g., src/foo.c, test/test_bar.valk)
 - `accept` MUST be measurable (command to run, expected output, exit code)
 - Use `deps` when a task requires another task to be done first
 
@@ -2893,13 +3130,14 @@ Read the spec\'s **Acceptance Criteria section only** (not entire spec):
 
 For any unchecked criteria (`- [ ]`) not covered by existing tasks, research what's needed and create a well-defined task:
 ```
-ralph task add \'{"name": "<specific action>", "notes": "<implementation approach and relevant files>", "accept": "<measurable verification>"}\\'
+ralph task add \'{"name": "<specific action>", "notes": "<DETAILED: file paths + approach>", "accept": "<measurable verification>"}\\'
 ```
 
 **IMPORTANT**: 
-- Tasks must include `notes` with implementation guidance
+- `notes` MUST include SPECIFIC file paths and implementation approach (minimum 50 chars)
+- `notes` should answer: Which files? What functions/lines? What pattern to use?
 - `accept` MUST be measurable: command to run, expected exit code, or specific output to check
-- Vague acceptance like "works correctly" or "tests pass" will be REJECTED
+- Vague notes like "implement X" or acceptance like "works correctly" will be REJECTED
 
 ## Step 5: Final Decision
 
@@ -2948,7 +3186,7 @@ Return a JSON object:
   \\"resolution\\": \\"task\\" | \\"trivial\\" | \\"out_of_scope\\",
   \\"task\\": {  // only if resolution is \\"task\\"
     \\"name\\": \\"<fix description>\\",
-    \\"notes\\": \\"<root cause and approach>\\",
+    \\"notes\\": \\"<DETAILED: specific file paths, functions, and implementation approach - min 50 chars>\\",
     \\"accept\\": \\"<MEASURABLE: command + expected result, e.g. 'make test passes' or 'grep X file returns 1'>\\",
     \\"priority\\": \\"<inherit from issue priority above>\\"
   },
@@ -3093,10 +3331,13 @@ Break the original task into 2-5 smaller tasks that:
 
 For each subtask, **include `parent` to link back to the original task**:
 ```
-ralph task add \'{"name": "Specific subtask", "notes": "What to do", "accept": "<measurable: command + expected result>", "parent": "<original-task-id>"}\'
+ralph task add \'{"name": "Specific subtask", "notes": "<DETAILED: file paths + approach, min 50 chars>", "accept": "<measurable: command + expected result>", "parent": "<original-task-id>"}\'
 ```
 
-**IMPORTANT**: `accept` MUST be measurable - specify command to run and expected result (e.g., "make test passes", "file X exists", "grep Y returns Z").
+**IMPORTANT**: 
+- `notes` MUST include specific file paths and implementation details (minimum 50 chars)
+- `accept` MUST be measurable - specify command to run and expected result
+- Example notes: "Modify src/foo.c lines 100-150: Extract bar() function to new file src/bar.c. Update includes."
 
 Use `deps` to specify order if needed.
 
@@ -3315,8 +3556,46 @@ def cmd_status(config: RalphConfig):
         for tombstone in rejected:
             name_str = f" {tombstone.name}" if tombstone.name else ""
             print(f"  {Colors.RED}✗{Colors.NC} {tombstone.id}{name_str}")
+            
+            # Show timestamp and commit
+            time_info = []
+            if tombstone.timestamp:
+                # Show just the date and time, not full ISO format
+                from datetime import datetime
+                try:
+                    dt = datetime.fromisoformat(tombstone.timestamp.replace('Z', '+00:00'))
+                    time_info.append(dt.strftime('%Y-%m-%d %H:%M'))
+                except:
+                    time_info.append(tombstone.timestamp[:19])  # Fallback: first 19 chars
+            if tombstone.done_at:
+                time_info.append(f"commit {tombstone.done_at}")
+            if time_info:
+                print(f"    {Colors.DIM}{' | '.join(time_info)}{Colors.NC}")
+            
+            # Show full rejection reason (not truncated)
             if tombstone.reason:
-                print(f"    {Colors.DIM}{tombstone.reason[:70]}{'...' if len(tombstone.reason) > 70 else ''}{Colors.NC}")
+                # Indent multi-line reasons
+                reason_lines = tombstone.reason.split('\n')
+                for i, line in enumerate(reason_lines):
+                    prefix = "Reason: " if i == 0 else "        "
+                    print(f"    {Colors.DIM}{prefix}{line}{Colors.NC}")
+            
+            # Show changed files
+            if tombstone.changed_files:
+                files_str = ', '.join(tombstone.changed_files[:5])
+                if len(tombstone.changed_files) > 5:
+                    files_str += f" (+{len(tombstone.changed_files) - 5} more)"
+                print(f"    {Colors.DIM}Files: {files_str}{Colors.NC}")
+            
+            # Show log file link
+            if tombstone.log_file:
+                print(f"    {Colors.DIM}Log: {tombstone.log_file}{Colors.NC}")
+            
+            # Show iteration number
+            if tombstone.iteration is not None:
+                print(f"    {Colors.DIM}Iteration: {tombstone.iteration}{Colors.NC}")
+            
+            print()  # Blank line between tombstones
         print()
     
     # Tombstones section - accepted tasks
@@ -3326,9 +3605,37 @@ def cmd_status(config: RalphConfig):
         print(f"{Colors.DIM}{'-'*60}{Colors.NC}")
         for tombstone in accepted:
             name_str = f" {tombstone.name}" if tombstone.name else ""
-            print(f"  {Colors.DIM}✓ {tombstone.id}{name_str}{Colors.NC}")
+            print(f"  {Colors.GREEN}✓{Colors.NC} {tombstone.id}{name_str}")
+            
+            # Show timestamp and commit
+            time_info = []
+            if tombstone.timestamp:
+                from datetime import datetime
+                try:
+                    dt = datetime.fromisoformat(tombstone.timestamp.replace('Z', '+00:00'))
+                    time_info.append(dt.strftime('%Y-%m-%d %H:%M'))
+                except:
+                    time_info.append(tombstone.timestamp[:19])
+            if tombstone.done_at:
+                time_info.append(f"commit {tombstone.done_at}")
+            if time_info:
+                print(f"    {Colors.DIM}{' | '.join(time_info)}{Colors.NC}")
+            
+            # Show full acceptance criteria (not truncated)
             if tombstone.reason:
-                print(f"    {Colors.DIM}accept: {tombstone.reason[:70]}{'...' if len(tombstone.reason) > 70 else ''}{Colors.NC}")
+                reason_lines = tombstone.reason.split('\n')
+                for i, line in enumerate(reason_lines):
+                    prefix = "Accept: " if i == 0 else "        "
+                    print(f"    {Colors.DIM}{prefix}{line}{Colors.NC}")
+            
+            # Show changed files
+            if tombstone.changed_files:
+                files_str = ', '.join(tombstone.changed_files[:5])
+                if len(tombstone.changed_files) > 5:
+                    files_str += f" (+{len(tombstone.changed_files) - 5} more)"
+                print(f"    {Colors.DIM}Files: {files_str}{Colors.NC}")
+            
+            print()  # Blank line between tombstones
         print()
     
     # Next action
@@ -3427,15 +3734,9 @@ def cmd_compact(config: RalphConfig):
     print(f"{Colors.CYAN}Compacting plan.jsonl...{Colors.NC}")
     print(f"  Found {len(legacy_accepted)} legacy accepted tasks")
     
-    # Convert each to a tombstone
+    # Convert each to a tombstone with full context
     for task in legacy_accepted:
-        tombstone = Tombstone(
-            id=task.id, 
-            done_at=task.done_at or get_current_commit(config),
-            reason=task.accept or "",
-            tombstone_type="accept",
-            name=task.name
-        )
+        tombstone = create_tombstone(config, task, "accept", reason=task.accept or "")
         state.tombstones.append(tombstone)
         print(f"  {Colors.GREEN}✓{Colors.NC} {task.id} - {task.name}")
     
@@ -7094,6 +7395,16 @@ def cmd_task(config: RalphConfig, action: str, desc: Optional[str] = None, arg3:
             print(f"{Colors.RED}Task name is required{Colors.NC}")
             return 1
         
+        # Validate task notes are detailed with file paths and approach
+        is_valid, error_msg = validate_task_notes(notes)
+        if not is_valid:
+            print(f"{Colors.RED}ERROR: {error_msg}{Colors.NC}")
+            print(f"  {Colors.DIM}Good notes examples:{Colors.NC}")
+            print(f"  {Colors.DIM}  - 'Modify src/aio.c: Add valk_builtin_aio_within() that races handle with timeout'{Colors.NC}")
+            print(f"  {Colors.DIM}  - 'Create test/test_retry.valk: Test max-attempts, backoff patterns, success after failure'{Colors.NC}")
+            print(f"  {Colors.DIM}  - 'Update src/parser.c line 450: Register aio/within in builtin table after aio/race'{Colors.NC}")
+            return 1
+        
         # Validate acceptance criteria is measurable and specific
         is_valid, error_msg = validate_acceptance_criteria(accept)
         if not is_valid:
@@ -7192,8 +7503,7 @@ def cmd_task(config: RalphConfig, action: str, desc: Optional[str] = None, arg3:
                 return 1
             # Create accept tombstone and remove task
             # Tombstone preserves task ID in history for dependency validation
-            tombstone = Tombstone(id=task.id, done_at=task.done_at or get_current_commit(config), 
-                                  reason=task.accept or "", tombstone_type="accept", name=task.name)
+            tombstone = create_tombstone(config, task, "accept", reason=task.accept or "")
             state.tombstones.append(tombstone)
             state.tasks = [t for t in state.tasks if t.id != task_id]
             save_state(config, state)
@@ -7202,8 +7512,7 @@ def cmd_task(config: RalphConfig, action: str, desc: Optional[str] = None, arg3:
             count = len(done)
             # Create accept tombstones for all done tasks
             for task in done:
-                tombstone = Tombstone(id=task.id, done_at=task.done_at or get_current_commit(config),
-                                      reason=task.accept or "", tombstone_type="accept", name=task.name)
+                tombstone = create_tombstone(config, task, "accept", reason=task.accept or "")
                 state.tombstones.append(tombstone)
             done_ids = {t.id for t in done}
             state.tasks = [t for t in state.tasks if t.id not in done_ids]
@@ -7225,7 +7534,7 @@ def cmd_task(config: RalphConfig, action: str, desc: Optional[str] = None, arg3:
             print(f"{Colors.RED}Task not found in done tasks: {task_id}{Colors.NC}")
             print(f"  {Colors.DIM}Done tasks: {', '.join(t.id for t in done)}{Colors.NC}")
             return 1
-        tombstone = Tombstone(id=task.id, done_at=task.done_at or "unknown", reason=reason, name=task.name)
+        tombstone = create_tombstone(config, task, "reject", reason=reason)
         state.tombstones.append(tombstone)
         task.status = "p"
         task.done_at = None

@@ -66,8 +66,13 @@ Break the original task into 2-5 smaller tasks that:
 
 For each subtask, **include `parent` to link back to the original task**:
 ```
-ralph task add '{"name": "Specific subtask", "notes": "What to do", "accept": "How to verify", "parent": "<original-task-id>"}'
+ralph task add '{"name": "Specific subtask", "notes": "<DETAILED: file paths + approach, min 50 chars>", "accept": "<measurable: command + expected result>", "parent": "<original-task-id>"}'
 ```
+
+**IMPORTANT**: 
+- `notes` MUST include specific file paths and implementation details (minimum 50 chars)
+- `accept` MUST be measurable - specify command to run and expected result
+- Example notes: "Modify src/foo.c lines 100-150: Extract bar() function to new file src/bar.c. Update includes."
 
 Use `deps` to specify order if needed.
 
@@ -94,5 +99,6 @@ Then EXIT to let the build loop process the new subtasks.
 - ALWAYS read the log file first to understand what happened
 - Each subtask should be completable in ONE iteration (< 100k tokens)
 - Be specific: "Add X to file Y" not "Implement feature Z"
+- `accept` MUST be measurable (vague criteria like "works correctly" will be REJECTED)
 - If a subtask is still too big, it will be killed and decomposed again
 - DO NOT try to implement anything - just create the task breakdown
