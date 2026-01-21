@@ -2,8 +2,10 @@
 # Source this file from ~/.zshrc
 
 _ralph_get_specs() {
-  if [[ -d "ralph/specs" ]]; then
-    ls ralph/specs/*.md 2>/dev/null | xargs -n1 basename 2>/dev/null
+  local repo_root
+  repo_root=$(git rev-parse --show-toplevel 2>/dev/null)
+  if [[ -n "$repo_root" && -d "$repo_root/ralph/specs" ]]; then
+    ls "$repo_root/ralph/specs/"*.md 2>/dev/null | xargs -n1 basename 2>/dev/null
   fi
 }
 
@@ -12,15 +14,15 @@ _ralph() {
   subcommands=(
     'init:Initialize ralph in current repo'
     'plan:Run planning mode for a spec file'
-    'build:Run build mode (implement from plan)'
+    'construct:Run construct mode (implement from plan)'
+    'config:Show or modify configuration'
     'status:Show current status'
     'watch:Live dashboard with metrics'
     'stream:Pretty-print opencode JSON stream'
-    'query:Query current state (stage, next, tasks, issues)'
-    'task:Task mutations (done, add, accept)'
-    'issue:Issue mutations (done, add)'
+    'query:Query current state (stage, tasks, issues, iteration)'
+    'task:Task mutations (done, add, accept, reject, delete, prioritize)'
+    'issue:Issue mutations (done, done-all, done-ids, add)'
     'set-spec:Set current spec file'
-    'log:Query git history for state changes'
     'help:Show help'
   )
 
@@ -33,14 +35,17 @@ _ralph() {
   local -a failure_values
   failure_values=(1 3 5 10)
 
+  local -a profile_values
+  profile_values=(budget balanced hybrid cost_smart)
+
   local -a query_subcommands
-  query_subcommands=(stage next tasks issues)
+  query_subcommands=(stage tasks issues iteration)
 
   local -a task_subcommands
-  task_subcommands=(done add accept)
+  task_subcommands=(done add accept reject delete prioritize)
 
   local -a issue_subcommands
-  issue_subcommands=(done add)
+  issue_subcommands=(done done-all done-ids add)
 
   _arguments -C \
     '1: :->cmd' \
@@ -48,7 +53,12 @@ _ralph() {
     '--max-cost[Stop when cost exceeds N dollars]:cost:($cost_values)' \
     '--max-failures[Circuit breaker - stop after N consecutive failures]:failures:($failure_values)' \
     '--completion-promise[Stop when output contains this text]:promise:(DONE COMPLETE FINISHED SPEC_COMPLETE)' \
+    '--timeout[Kill stage after N milliseconds]:timeout:' \
+    '--context-limit[Context window size in tokens]:limit:' \
     '--no-ui[Disable interactive dashboard]' \
+    '--profile[Cost profile]:profile:($profile_values)' \
+    '-p[Cost profile]:profile:($profile_values)' \
+    '--version[Show version]' \
     && return
 
   case $state in
@@ -63,13 +73,16 @@ _ralph() {
           specs=(${(f)"$(_ralph_get_specs)"})
           _describe -t specs 'spec file' specs
           ;;
-        build|"")
+        construct|"")
           _describe -t iterations 'iterations' iterations
           _arguments \
             '--max-cost[Stop when cost exceeds N dollars]:cost:($cost_values)' \
             '--max-failures[Circuit breaker]:failures:($failure_values)' \
             '--completion-promise[Stop on text]:promise:(DONE COMPLETE FINISHED SPEC_COMPLETE)' \
-            '--no-ui[Disable interactive dashboard]'
+            '--timeout[Kill stage after N milliseconds]:timeout:' \
+            '--context-limit[Context window size in tokens]:limit:' \
+            '--no-ui[Disable interactive dashboard]' \
+            '--profile[Cost profile]:profile:($profile_values)'
           ;;
         query)
           _describe -t query_subcommands 'query type' query_subcommands
@@ -79,13 +92,6 @@ _ralph() {
           ;;
         issue)
           _describe -t issue_subcommands 'issue action' issue_subcommands
-          ;;
-        log)
-          _arguments \
-            '--all[Show all tasks from git history]' \
-            '--spec[Filter by spec file]:spec:($(_ralph_get_specs))' \
-            '--branch[Filter by branch]:branch:' \
-            '--since[Changes since date/commit]:date:'
           ;;
       esac
       ;;
