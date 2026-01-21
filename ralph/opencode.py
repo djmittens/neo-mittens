@@ -7,7 +7,7 @@ from the output.
 
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Generator, Optional
+from typing import Any, Generator, Optional, Union, Iterator
 import json
 import os
 import re
@@ -236,7 +236,7 @@ def parse_json_stream(
 
 
 def parse_json_stream_iter(
-    lines_iter,
+    lines_iter: Iterator[Union[str, bytes]],
 ) -> Generator[OpenCodeEvent, None, None]:
     """Parse opencode JSON stream from an iterator of lines.
 
@@ -244,7 +244,7 @@ def parse_json_stream_iter(
     from a subprocess pipe.
 
     Args:
-        lines_iter: An iterator that yields lines of JSON output.
+        lines_iter: An iterator that yields lines of JSON output as str or bytes.
 
     Yields:
         OpenCodeEvent objects for each successfully parsed event.

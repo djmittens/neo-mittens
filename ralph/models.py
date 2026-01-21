@@ -2,7 +2,7 @@
 
 import json
 from dataclasses import dataclass
-from typing import List, Optional
+from typing import List, Optional, Dict, Union, Any
 
 
 @dataclass
@@ -53,13 +53,13 @@ class Task:
     decompose_depth: int = 0
     timeout_ms: Optional[int] = None
 
-    def to_dict(self) -> dict:
+    def to_dict(self) -> Dict[str, Union[str, List[str], bool, int, None]]:
         """Convert task to a dictionary for JSONL serialization.
 
         Returns:
             Dictionary with task data, omitting None/empty optional fields.
         """
-        d = {
+        d: Dict[str, Union[str, List[str], bool, int, None]] = {
             "t": "task",
             "id": self.id,
             "spec": self.spec,
@@ -105,7 +105,7 @@ class Task:
         return json.dumps(self.to_dict())
 
     @classmethod
-    def from_dict(cls, d: dict) -> "Task":
+    def from_dict(cls, d: Dict[str, Any]) -> "Task":
         """Create a Task from a dictionary.
 
         Args:
@@ -137,7 +137,7 @@ class Task:
         )
 
     @classmethod
-    def from_jsonl(cls, d: dict) -> "Task":
+    def from_jsonl(cls, d: Dict[str, Any]) -> "Task":
         """Create a Task from a JSONL dictionary.
 
         Args:
@@ -168,13 +168,18 @@ class Issue:
     spec: str
     priority: Optional[str] = None
 
-    def to_dict(self) -> dict:
+    def to_dict(self) -> Dict[str, Union[str, None]]:
         """Convert issue to a dictionary for JSONL serialization.
 
         Returns:
             Dictionary with issue data, omitting None optional fields.
         """
-        d = {"t": "issue", "id": self.id, "spec": self.spec, "desc": self.desc}
+        d: Dict[str, Union[str, None]] = {
+            "t": "issue",
+            "id": self.id,
+            "spec": self.spec,
+            "desc": self.desc,
+        }
         if self.priority:
             d["priority"] = self.priority
         return d
@@ -188,7 +193,7 @@ class Issue:
         return json.dumps(self.to_dict())
 
     @classmethod
-    def from_dict(cls, d: dict) -> "Issue":
+    def from_dict(cls, d: Dict[str, Any]) -> "Issue":
         """Create an Issue from a dictionary.
 
         Args:
@@ -205,7 +210,7 @@ class Issue:
         )
 
     @classmethod
-    def from_jsonl(cls, d: dict) -> "Issue":
+    def from_jsonl(cls, d: Dict[str, Any]) -> "Issue":
         """Create an Issue from a JSONL dictionary.
 
         Args:
@@ -236,7 +241,7 @@ class Tombstone:
     reason: str
     tombstone_type: str = "reject"
 
-    def to_dict(self) -> dict:
+    def to_dict(self) -> Dict[str, str]:
         """Convert tombstone to a dictionary for JSONL serialization.
 
         Returns:
@@ -258,7 +263,9 @@ class Tombstone:
         return json.dumps(self.to_dict())
 
     @classmethod
-    def from_dict(cls, d: dict, tombstone_type: str = "reject") -> "Tombstone":
+    def from_dict(
+        cls, d: Dict[str, Any], tombstone_type: str = "reject"
+    ) -> "Tombstone":
         """Create a Tombstone from a dictionary.
 
         Args:
@@ -276,7 +283,9 @@ class Tombstone:
         )
 
     @classmethod
-    def from_jsonl(cls, d: dict, tombstone_type: str = "reject") -> "Tombstone":
+    def from_jsonl(
+        cls, d: Dict[str, Any], tombstone_type: str = "reject"
+    ) -> "Tombstone":
         """Create a Tombstone from a JSONL dictionary.
 
         Args:
@@ -309,7 +318,7 @@ class RalphPlanConfig:
     context_compact: float = 0.85
     context_kill: float = 0.95
 
-    def to_dict(self) -> dict:
+    def to_dict(self) -> Dict[str, Union[str, int, float]]:
         """Convert config to a dictionary for JSONL serialization.
 
         Returns:
@@ -333,7 +342,7 @@ class RalphPlanConfig:
         return json.dumps(self.to_dict())
 
     @classmethod
-    def from_dict(cls, d: dict) -> "RalphPlanConfig":
+    def from_dict(cls, d: Dict[str, Any]) -> "RalphPlanConfig":
         """Create a RalphPlanConfig from a dictionary.
 
         Args:
@@ -351,7 +360,7 @@ class RalphPlanConfig:
         )
 
     @classmethod
-    def from_jsonl(cls, d: dict) -> "RalphPlanConfig":
+    def from_jsonl(cls, d: Dict[str, Any]) -> "RalphPlanConfig":
         """Create a RalphPlanConfig from a JSONL dictionary.
 
         Args:
