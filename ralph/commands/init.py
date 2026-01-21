@@ -8,6 +8,7 @@ import sys
 from pathlib import Path
 from typing import Optional
 
+from ralph.config import get_global_config
 from ralph.prompts import merge_prompts
 from ralph.state import RalphState, save_state
 from ralph.utils import Colors
@@ -601,8 +602,10 @@ def cmd_init(repo_root: Optional[Path] = None) -> int:
     if repo_root is None:
         repo_root = Path.cwd()
 
-    ralph_dir = repo_root / "ralph"
+    config = get_global_config()
+    ralph_dir = repo_root / config.ralph_dir
     specs_dir = ralph_dir / "specs"
+    log_dir = repo_root / config.log_dir
     plan_file = ralph_dir / "plan.jsonl"
 
     is_update = ralph_dir.exists()
@@ -614,6 +617,7 @@ def cmd_init(repo_root: Optional[Path] = None) -> int:
 
     ralph_dir.mkdir(parents=True, exist_ok=True)
     specs_dir.mkdir(parents=True, exist_ok=True)
+    log_dir.mkdir(parents=True, exist_ok=True)
 
     for filename, content in PROMPT_TEMPLATES.items():
         prompt_path = ralph_dir / filename
