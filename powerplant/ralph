@@ -960,9 +960,44 @@ class RalphConfig:
     runtime_file: Path
 
     @classmethod
-    def from_repo(cls, repo_root: Path) -> 'RalphConfig':
+    def from_repo(cls, repo_root: Path, spec_name: str = None) -> 'RalphConfig':
         ralph_dir = repo_root / 'ralph'
-        log_dir = Path('/tmp/ralph-logs')
+        
+        # Organize logs by repo/branch/spec
+        # e.g., /tmp/ralph-logs/neo-mittens/main/ralph-refactor/
+        repo_name = repo_root.name
+        
+        # Get current branch
+        try:
+            result = subprocess.run(
+                ['git', 'branch', '--show-current'],
+                cwd=repo_root, capture_output=True, text=True
+            )
+            branch = result.stdout.strip() or 'detached'
+        except Exception:
+            branch = 'unknown'
+        
+        # Auto-detect spec from plan.jsonl if not provided
+        if not spec_name:
+            plan_file = ralph_dir / 'plan.jsonl'
+            if plan_file.exists():
+                try:
+                    for line in plan_file.read_text().splitlines():
+                        if line.strip():
+                            d = json.loads(line)
+                            if d.get("t") == "spec" and d.get("spec"):
+                                spec_name = d["spec"]
+                                break
+                except (json.JSONDecodeError, IOError):
+                    pass
+        
+        if spec_name:
+            # Strip .md extension if present
+            spec_name = spec_name.replace('.md', '')
+            log_dir = Path('/tmp/ralph-logs') / repo_name / branch / spec_name
+        else:
+            log_dir = Path('/tmp/ralph-logs') / repo_name / branch
+        
         return cls(
             repo_root=repo_root,
             ralph_dir=ralph_dir,
