@@ -33,8 +33,8 @@ ralph init
 # Write specs describing what you want to build
 vim ralph/specs/my-feature.md
 
-# Generate implementation plan
-ralph plan
+# Generate implementation plan from a spec
+ralph plan my-feature.md
 
 # Let ralph build it
 ralph 10  # Run 10 iterations
@@ -55,11 +55,11 @@ ralph --completion-promise "ALL TESTS PASSING"  # Stop when done
                       ▼
 ┌─────────────────────────────────────────────────────────────┐
 │                   PLANNING MODE                              │
-│              ralph plan                                      │
+│              ralph plan <spec.md>                            │
 │                                                              │
-│  • Reads specs                                               │
+│  • Reads the specified spec                                  │
 │  • Analyzes existing code                                    │
-│  • Creates IMPLEMENTATION_PLAN.md                            │
+│  • Creates tasks in plan.jsonl                               │
 └─────────────────────┬───────────────────────────────────────┘
                       │
                       ▼
@@ -70,7 +70,7 @@ ralph --completion-promise "ALL TESTS PASSING"  # Stop when done
 │  ┌─────────────────────────────────────────────────────┐    │
 │  │  ITERATION LOOP (runs N times or until Ctrl+C)      │    │
 │  │                                                      │    │
-│  │  1. Read IMPLEMENTATION_PLAN.md                      │    │
+│  │  1. Read plan.jsonl                                  │    │
 │  │  2. Pick highest priority task                       │    │
 │  │  3. Implement it                                     │    │
 │  │  4. Run tests                                        │    │
@@ -88,25 +88,45 @@ ralph --completion-promise "ALL TESTS PASSING"  # Stop when done
 ## Commands
 
 ```bash
-ralph init          # Initialize ralph in current repo
-ralph plan          # Generate implementation plan from specs (runs once)
-ralph status        # Show current status
-ralph watch         # Live dashboard with costs (run in separate terminal)
-ralph log           # Tail the current log
-ralph help          # Show help
+# Core commands
+ralph init               # Initialize ralph in current repo
+ralph plan <spec.md>     # Generate tasks from a spec file
+ralph construct          # Construct mode, unlimited iterations
+ralph construct 10       # Construct mode, max 10 iterations
+ralph 10                 # Same as above (shorthand)
 
-# Build mode (implement from plan)
-ralph               # Run forever (until Ctrl+C or no tasks left)
-ralph 10            # Run max 10 iterations then stop
-ralph build 10      # Same as above (explicit)
+# State management
+ralph config             # Show global config (model, timeouts, etc.)
+ralph status             # Show current status
+ralph query              # Show current state as JSON
+ralph query stage        # Show current stage (PLAN/BUILD/VERIFY/etc)
+ralph task done          # Mark first pending task as done
+ralph task add "desc"    # Add a new task
+ralph task accept        # Accept all done tasks
+ralph issue add "desc"   # Add a discovered issue
+ralph issue done         # Resolve first issue
+ralph set-spec <spec.md> # Set current spec file
+
+# Monitoring
+ralph watch              # Live dashboard with cost tracking
+ralph log                # Show state change history
+ralph stream             # Pipe opencode JSON for pretty output
+
+# Maintenance
+ralph validate           # Check plan.jsonl for issues
+ralph compact            # Convert legacy tasks to tombstones
 ```
 
 ## Options
 
 ```bash
+--profile, -p PROFILE   # Cost profile: budget, balanced, hybrid, cost_smart
 --max-cost N            # Stop when cumulative cost exceeds $N
 --max-failures N        # Circuit breaker: stop after N consecutive failures (default: 3)
+--timeout N             # Kill stage after N milliseconds (default: 900000)
+--context-limit N       # Context window size in tokens (default: 200000)
 --completion-promise T  # Stop when output contains text T
+--no-ui                 # Disable interactive dashboard
 ```
 
 **Examples:**
@@ -116,15 +136,16 @@ ralph 50 --max-cost 25              # Max 50 iterations or $25, whichever first
 ralph --max-cost 10                 # Unlimited iterations, stop at $10
 ralph --completion-promise "DONE"   # Stop when DONE appears in output
 ralph 100 --max-failures 5          # Allow up to 5 consecutive failures
+ralph -p budget 50                  # Use budget profile, 50 iterations
 ```
 
-**Iteration limits:** The number after `ralph` or `ralph build` sets how many
+**Iteration limits:** The number after `ralph` or `ralph construct` sets how many
 iterations to run before stopping. Default is **unlimited** (runs until Ctrl+C
 or no tasks remain). Use limits for unattended runs (e.g., `ralph 50` overnight).
 
-**Planning vs Building:**
-- `ralph plan` - Analyzes specs and code, creates a task list. Runs once. Does NOT write code.
-- `ralph` / `ralph build` - Implements tasks from the plan, one per iteration.
+**Planning vs Construct:**
+- `ralph plan <spec.md>` - Analyzes spec and code, creates tasks in plan.jsonl. Does NOT write code.
+- `ralph` / `ralph construct` - Implements tasks from the plan, one per iteration.
 
 ## Directory Structure
 
@@ -134,13 +155,16 @@ After `ralph init`, your repo will have:
 your-project/
 ├── ralph/
 │   ├── PROMPT_plan.md          # Planning mode instructions
-│   ├── PROMPT_build.md         # Build mode instructions  
-│   ├── IMPLEMENTATION_PLAN.md  # Auto-managed task list
+│   ├── PROMPT_build.md         # Build mode instructions
+│   ├── PROMPT_verify.md        # Verify stage instructions
+│   ├── PROMPT_investigate.md   # Investigate stage instructions
+│   ├── PROMPT_decompose.md     # Decompose stage instructions
+│   ├── plan.jsonl              # Auto-managed task list (JSONL format)
 │   └── specs/
 │       └── *.md                # Your requirement specs
-├── build/
-│   └── ralph-logs/             # Iteration logs (gitignored)
 └── ... your code ...
+
+# Logs are stored in /tmp/ralph-logs/<repo>/<branch>/<spec>/
 ```
 
 ## Writing Specs
@@ -199,20 +223,21 @@ Example additions:
 ## Monitoring
 
 ```bash
-# Watch live output
-ralph log
+# Live dashboard with cost tracking
+ralph watch
 
-# Or manually
-tail -f build/ralph-logs/ralph-*.log
+# Show state change history  
+ralph log
+ralph log --all              # Show full history
+ralph log --spec my-feature  # Filter by spec
+
+# Check current state
+ralph status
+ralph query stage            # Current stage (PLAN/BUILD/VERIFY/etc)
+ralph query tasks            # List all tasks
 
 # Check commits
 git log --oneline -10
-
-# See status
-ralph status
-
-# Live dashboard with cost tracking
-ralph watch
 ```
 
 ## Cost Tracking
@@ -230,6 +255,8 @@ Ralph uses `--dangerously-skip-permissions` to run autonomously.
 2. **Circuit breaker** - Stops after N consecutive failures (default: 3)
 3. **Iteration limits** - Use `ralph N` to cap iterations
 4. **Completion detection** - Use `--completion-promise` to stop on success
+5. **Context limits** - Stages are killed at 95% context usage, compacted at 85%
+6. **Timeouts** - Stages are killed after timeout (default: 15 minutes)
 
 **Recommendations:**
 - Run in a sandboxed environment for untrusted code
@@ -241,7 +268,7 @@ Ralph uses `--dangerously-skip-permissions` to run autonomously.
 **Recovery:**
 - `Ctrl+C` stops the loop
 - `git reset --hard HEAD~N` undoes N commits
-- Delete and regenerate `IMPLEMENTATION_PLAN.md` if stuck
+- Re-run `ralph plan <spec.md>` to regenerate tasks if stuck
 
 ## Integration with AGENTS.md
 
@@ -258,12 +285,12 @@ will use it automatically. You can add Ralph-specific guidance there:
 
 ## Re-planning
 
-Run `ralph plan` again whenever:
-- You update specs
+Run `ralph plan <spec.md>` again whenever:
+- You update the spec
 - The plan feels stale or wrong
 - Ralph seems stuck
 
-**The plan is disposable.** Planning does a fresh gap analysis of specs vs current
+**The plan is disposable.** Planning does a fresh gap analysis of spec vs current
 code. It ignores old pending tasks and regenerates from scratch. Completed tasks
 and discovered issues are preserved as history.
 

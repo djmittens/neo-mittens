@@ -4,38 +4,50 @@ Ralph Wiggum - Autonomous AI Development Loop
 https://ghuntley.com/ralph/
 
 Usage: ralph [command] [options]
-  ralph              - Construct mode, unlimited iterations
-  ralph 10           - Construct mode, max 10 iterations
-  ralph plan         - Plan mode, generate implementation plan
-  ralph init         - Initialize ralph in current repo
-  ralph status       - Show current status
-  ralph validate     - Check plan.jsonl for dangling deps and other issues
-  ralph compact      - Convert legacy accepted tasks to tombstones
-  ralph watch        - Live dashboard with cost tracking
+  ralph                    - Construct mode, unlimited iterations
+  ralph 10                 - Construct mode, max 10 iterations
+  ralph plan <spec.md>     - Plan mode, generate tasks from spec
+  ralph init               - Initialize ralph in current repo
+  ralph config             - Show global config (model, timeouts, etc.)
+  ralph status             - Show current status
+  ralph query              - Show current state as JSON
+  ralph query stage        - Show current stage (PLAN/BUILD/VERIFY/etc)
+  ralph task done          - Mark first pending task as done
+  ralph task add "desc"    - Add a new task
+  ralph issue add "desc"   - Add a discovered issue
+  ralph set-spec <spec.md> - Set current spec file
+  ralph log                - Show state change history
+  ralph watch              - Live dashboard with cost tracking
+  ralph stream             - Pipe opencode JSON for pretty output
+  ralph validate           - Check plan.jsonl for dangling deps
+  ralph compact            - Convert legacy accepted tasks to tombstones
 
 Options:
-  --profile, -p PROFILE    Cost profile: budget, balanced, hybrid, cost_smart, quality
+  --profile, -p PROFILE    Cost profile: budget, balanced, hybrid, cost_smart
   --max-cost N             Stop when cumulative cost exceeds $N
   --max-failures N         Circuit breaker: stop after N consecutive failures (default: 3)
-  --timeout N              Kill iteration after N milliseconds (default: 900000)
+  --timeout N              Kill stage after N milliseconds (default: 900000)
   --context-limit N        Context window size in tokens (default: 200000)
   --completion-promise T   Stop when output contains TEXT
+  --no-ui                  Disable interactive dashboard
 
 Cost Profiles (use --profile or RALPH_PROFILE env var):
-  opus   - Full power, best results (use when you have quota)
-  sonnet - Balanced fallback (when Opus quota exhausted)
-  haiku  - Budget mode (Haiku for BUILD, Sonnet for reasoning stages)
+  budget     - Cheapest option, Haiku for BUILD
+  balanced   - Default, Sonnet for all stages
+  hybrid     - Sonnet for reasoning, Haiku for BUILD
+  cost_smart - Dynamic selection based on task complexity
   
   If no profile is specified, you will be prompted to select one.
   Skip the prompt by setting --profile <name> or RALPH_PROFILE=<name>.
   
-  Example: ralph -p haiku 50
-           RALPH_PROFILE=sonnet ralph
+  Example: ralph -p budget 50
+           RALPH_PROFILE=balanced ralph
 
 Safety Features:
-  - Iterations are killed if they exceed the timeout (prevents stuck agents)
-  - Iterations are killed if context usage exceeds 80% (prevents context overflow)
-  - A warning is shown when context usage exceeds 50%
+  - Stages are killed if they exceed the timeout (prevents stuck agents)
+  - Stages are killed if context usage exceeds 95% (prevents context overflow)
+  - Context is compacted when usage exceeds 85%
+  - A warning is shown when context usage exceeds 70%
   - After a kill, the next iteration receives guidance to break down the problem
 """
 
