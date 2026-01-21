@@ -49,8 +49,6 @@ import stat
 import subprocess
 import sys
 import threading
-
-from ralph import __version__
 import time
 from collections import deque
 from contextlib import redirect_stdout
@@ -8088,7 +8086,6 @@ Examples:
                          help='For construct: max iterations (0 = unlimited)')
     parser.add_argument('--profile', '-p', type=str, default=None,
                          help='Cost profile: budget, balanced, hybrid, cost_smart, quality (or set RALPH_PROFILE)')
-    parser.add_argument('--version', action='version', version=f'ralph {__version__}')
 
     args = parser.parse_args()
 
