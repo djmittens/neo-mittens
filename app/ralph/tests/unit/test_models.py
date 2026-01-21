@@ -101,6 +101,8 @@ class TestTask:
 
     def test_task_roundtrip(self):
         """Test Task serialization roundtrip."""
+        # Note: status="d" with kill_reason is invalid - __post_init__ will fix it
+        # So we use status="p" here for a valid roundtrip test
         original = Task(
             id="t-round",
             name="Roundtrip task",
@@ -108,8 +110,8 @@ class TestTask:
             notes="Detailed notes",
             accept="all tests pass",
             deps=["t-x"],
-            status="d",
-            done_at="abc",
+            status="p",
+            done_at=None,
             needs_decompose=True,
             kill_reason="timeout",
             priority="high",
@@ -139,6 +141,25 @@ class TestTask:
         assert restored.supersedes == original.supersedes
         assert restored.decompose_depth == original.decompose_depth
         assert restored.timeout_ms == original.timeout_ms
+
+    def test_task_kill_reason_clears_done_status(self):
+        """Test that kill_reason and status=d are mutually exclusive.
+
+        A killed task should not be marked as done - it needs decomposition.
+        The __post_init__ validation should reset status to 'p' if both are set.
+        """
+        task = Task(
+            id="t-killed",
+            name="Killed task",
+            spec="spec.md",
+            status="d",
+            done_at="abc123",
+            kill_reason="timeout",
+        )
+        # __post_init__ should have fixed the contradictory state
+        assert task.status == "p"
+        assert task.done_at is None
+        assert task.kill_reason == "timeout"
 
 
 class TestIssue:

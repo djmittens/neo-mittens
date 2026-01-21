@@ -1,7 +1,18 @@
 """Rejection pattern analysis for detecting recurring failure patterns."""
 
 from collections import defaultdict
-from typing import TYPE_CHECKING, Dict, List, Optional, Tuple, Union, Set, Mapping
+from typing import (
+    TYPE_CHECKING,
+    Any,
+    Dict,
+    List,
+    Optional,
+    Tuple,
+    Union,
+    Set,
+    Mapping,
+    cast,
+)
 
 from ralph.models import Issue, Tombstone
 from ralph.utils import gen_id
@@ -28,7 +39,7 @@ PATTERN_THRESHOLD = 2
 
 def analyze_rejection_patterns(
     tombstones: List[Tombstone],
-) -> Dict[str, Union[Dict[str, List[str]], List[str]]]:
+) -> Dict[str, Any]:
     """Detect recurring failure patterns in rejected tasks.
 
     Args:
@@ -77,9 +88,7 @@ def analyze_rejection_patterns(
 
 
 def suggest_issues(
-    patterns: Dict[
-        str, Union[List[str], Mapping[str, List[Union[str, Tuple[str, str]]]]]
-    ],
+    patterns: Dict[str, Any],
     tasks: Optional[List] = None,
     existing_issues: Optional[List[Issue]] = None,
     spec: str = "",
@@ -98,11 +107,11 @@ def suggest_issues(
     new_issues: List[Issue] = []
     existing_descs: Set[str] = {i.desc.lower() for i in (existing_issues or [])}
 
-    rejections_by_task: Dict[str, List[str]] = (
-        patterns.get("rejections_by_task", {}) or {}
+    rejections_by_task: Dict[str, List[str]] = cast(
+        Dict[str, List[str]], patterns.get("rejections_by_task", {}) or {}
     )
-    error_patterns: Dict[str, List[Tuple[str, str]]] = (
-        patterns.get("error_patterns", {}) or {}
+    error_patterns: Dict[str, List[Tuple[str, str]]] = cast(
+        Dict[str, List[Tuple[str, str]]], patterns.get("error_patterns", {}) or {}
     )
 
     for task_id in patterns.get("repeated_tasks", []) or []:

@@ -1173,6 +1173,15 @@ class Task:
     decompose_depth: int = 0  # How many times this task's lineage has been decomposed (max 3)
     timeout_ms: Optional[int] = None  # Per-task timeout override (None = use stage default)
     
+    def __post_init__(self):
+        """Validate task state consistency after initialization."""
+        # A killed task cannot be marked as done - these states are mutually exclusive
+        # If both are set, prioritize kill_reason (task needs decomposition, not acceptance)
+        # This prevents the DECOMPOSE loop bug where a task has status="d" + kill_reason
+        if self.kill_reason and self.status == "d":
+            self.status = "p"
+            self.done_at = None
+    
     def to_jsonl(self) -> str:
         d = {"t": "task", "id": self.id, "spec": self.spec, "name": self.name, "s": self.status}
         if self.notes:
@@ -1880,6 +1889,11 @@ class ConstructStateMachine:
             if task:
                 task.kill_reason = result.kill_reason
                 task.kill_log = result.kill_log
+                # IMPORTANT: Reset status to pending - a killed task is NOT done
+                # This prevents the contradictory state of status="d" + kill_reason
+                # which causes DECOMPOSE to loop indefinitely
+                task.status = "p"
+                task.done_at = None
                 save_state(self.config, state)
                 print(f"{Colors.YELLOW}Task {task.id} marked for decomposition{Colors.NC}")
 

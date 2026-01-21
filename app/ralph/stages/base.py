@@ -185,6 +185,10 @@ class ConstructStateMachine:
             if task:
                 task.kill_reason = result.kill_reason
                 task.kill_log = result.kill_log
+                # IMPORTANT: Reset status to pending - a killed task is NOT done
+                # This prevents the contradictory state of status="d" + kill_reason
+                task.status = "p"
+                task.done_at = None
                 self.save_state(state)
 
     def _clear_decompose_state(self) -> None:

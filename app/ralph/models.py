@@ -1,7 +1,7 @@
 """Ralph data models for tasks, issues, tombstones, and plan configuration."""
 
 from dataclasses import dataclass, field
-from typing import Optional
+from typing import Any, Optional
 import json
 
 
@@ -28,9 +28,22 @@ class Task:
     decompose_depth: int = 0
     timeout_ms: Optional[int] = None
 
-    def to_dict(self) -> dict:
+    def __post_init__(self):
+        """Validate task state consistency after initialization."""
+        # A killed task cannot be marked as done - these states are mutually exclusive
+        # If both are set, prioritize kill_reason (task needs decomposition, not acceptance)
+        if self.kill_reason and self.status == "d":
+            self.status = "p"
+            self.done_at = None
+
+    def to_dict(self) -> dict[str, Any]:
         """Serialize task to dict for JSONL storage."""
-        d = {"t": "task", "id": self.id, "name": self.name, "spec": self.spec}
+        d: dict[str, Any] = {
+            "t": "task",
+            "id": self.id,
+            "name": self.name,
+            "spec": self.spec,
+        }
         if self.notes:
             d["notes"] = self.notes
         if self.accept:
@@ -101,9 +114,14 @@ class Issue:
     spec: str
     priority: Optional[str] = None
 
-    def to_dict(self) -> dict:
+    def to_dict(self) -> dict[str, Any]:
         """Serialize issue to dict for JSONL storage."""
-        d = {"t": "issue", "id": self.id, "desc": self.desc, "spec": self.spec}
+        d: dict[str, Any] = {
+            "t": "issue",
+            "id": self.id,
+            "desc": self.desc,
+            "spec": self.spec,
+        }
         if self.priority:
             d["priority"] = self.priority
         return d
@@ -138,9 +156,9 @@ class Tombstone:
     iteration: Optional[int] = None
     notes: Optional[str] = None
 
-    def to_dict(self) -> dict:
+    def to_dict(self) -> dict[str, Any]:
         """Serialize tombstone to dict for JSONL storage."""
-        d = {
+        d: dict[str, Any] = {
             "t": self.tombstone_type,
             "id": self.id,
             "done_at": self.done_at,
@@ -191,7 +209,7 @@ class RalphPlanConfig:
     context_compact: float = 0.85
     context_kill: float = 0.95
 
-    def to_dict(self) -> dict:
+    def to_dict(self) -> dict[str, Any]:
         """Serialize config to dict for JSONL storage."""
         return {
             "t": "config",
