@@ -1,6 +1,5 @@
 {"t": "config", "timeout_ms": 300000, "max_iterations": 10, "context_warn": 0.7, "context_compact": 0.85, "context_kill": 0.95}
 {"t": "spec", "spec": "ralph-refactor.md"}
-{"t": "task", "id": "t-rw8z73", "spec": "ralph-refactor.md", "name": "Create stages/__init__.py package", "s": "d", "notes": "Create stages package with __init__.py that exports Stage, StageOutcome, StageResult.", "accept": "from ralph.stages import Stage, StageOutcome, StageResult works", "deps": ["t-qhrbem"], "done_at": "408a19c"}
 {"t": "task", "id": "t-r1rd5a", "spec": "ralph-refactor.md", "name": "Extract stages/base.py enums and state machine", "s": "p", "notes": "Extract Stage enum (INVESTIGATE, BUILD, VERIFY, DECOMPOSE, COMPLETE), StageOutcome enum (SUCCESS, FAILURE, SKIP), StageResult dataclass, ConstructStateMachine class.", "accept": "from ralph.stages.base import Stage, StageOutcome, StageResult, ConstructStateMachine works", "deps": ["t-rw8z73", "t-q46v22", "t-qzr2sy"]}
 {"t": "task", "id": "t-r5dzxs", "spec": "ralph-refactor.md", "name": "Extract stages/investigate.py", "s": "p", "notes": "Extract INVESTIGATE stage logic with run(state, config) -> StageResult function. Single responsibility for investigation phase.", "accept": "from ralph.stages.investigate import run works; run returns StageResult", "deps": ["t-r1rd5a"]}
 {"t": "task", "id": "t-r9yj8k", "spec": "ralph-refactor.md", "name": "Extract stages/build.py", "s": "p", "notes": "Extract BUILD stage logic with run(state, config) -> StageResult function. Single responsibility for build phase.", "accept": "from ralph.stages.build import run works; run returns StageResult", "deps": ["t-r1rd5a"]}
@@ -67,3 +66,4 @@
 {"t": "accept", "id": "t-rj3lls", "done_at": "b8c8506", "reason": ""}
 {"t": "accept", "id": "t-rnvviw", "done_at": "24384c2", "reason": ""}
 {"t": "accept", "id": "t-rs0vlm", "done_at": "117e8b2", "reason": ""}
+{"t": "accept", "id": "t-rw8z73", "done_at": "408a19c", "reason": ""}
