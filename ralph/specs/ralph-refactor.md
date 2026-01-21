@@ -2,7 +2,7 @@
 
 ## Overview
 
-Refactor ralph from a monolithic 6,949-line Python script (`powerplant/ralph`) into a well-structured modular package at `ralph/` with clear separation of concerns, comprehensive test coverage, and self-maintaining SDLC. The refactored ralph remains in this repository, is built/installed via `bootstrap.sh`, and operates locally with immediate testability of changes.
+Refactor ralph from a monolithic 6,949-line Python script (`powerplant/ralph`) into a well-structured modular package at `app/ralph/` with clear separation of concerns, comprehensive test coverage, and self-maintaining SDLC. The refactored ralph remains in this repository, is built/installed via `bootstrap.sh`, and operates locally with immediate testability of changes.
 
 ## Critical Guardrails
 
@@ -21,9 +21,9 @@ powerplant/ralph    # The original monolithic Python script - DO NOT TOUCH
 - Modifying `powerplant/ralph` during development could break the production tool
 
 **What you CAN do:**
-- Create and modify files in the `ralph/` package directory
-- Create tests in `ralph/tests/`
-- Modify `ralph/AGENTS.md`, `ralph/specs/*.md`, `ralph/PROMPT_*.md`
+- Create and modify files in the `app/ralph/` package directory
+- Create tests in `app/ralph/tests/`
+- Modify `app/ralph/AGENTS.md`, `ralph/specs/*.md`, `ralph/PROMPT_*.md`
 
 **What you MUST NOT do:**
 - Edit, delete, or replace `powerplant/ralph`
@@ -43,7 +43,7 @@ The wrapper script replacement (Phase 7) happens ONLY after:
 Relocate ralph from `powerplant/ralph` to a proper Python package:
 
 ```
-ralph/
+app/ralph/
 ├── __init__.py              # Package init, version
 ├── __main__.py              # Entry point: python -m ralph
 ├── cli.py                   # Argparse setup, command dispatch
@@ -81,8 +81,6 @@ ralph/
 ├── opencode.py              # OpenCode integration (spawn, parse output)
 ├── utils.py                 # ANSI colors, id generation, misc utilities
 ├── AGENTS.md                # Ralph's own SDLC and development rules
-├── specs/                   # Specifications (existing, relocated)
-│   └── *.md
 ├── tests/
 │   ├── __init__.py
 │   ├── conftest.py          # Pytest fixtures
@@ -112,8 +110,8 @@ Update `bootstrap.sh` to support the refactored ralph **in parallel** with the o
 1. **DO NOT modify `powerplant/ralph`** - it remains the production implementation
 
 2. **Add ralph package to PYTHONPATH** in bootstrap:
-   - Add `export PYTHONPATH="$REPO_ROOT:$PYTHONPATH"` to shell configs
-   - The `ralph/` directory at repo root becomes an importable package
+   - Add `export PYTHONPATH="$REPO_ROOT/app:$PYTHONPATH"` to shell configs
+   - The `app/ralph/` directory becomes an importable package
    - This enables `python -m ralph` to run the new implementation for testing
 
 3. **Preserve existing PATH setup** for `powerplant/` directory
@@ -136,14 +134,14 @@ The new `python -m ralph` package operates with this repository as source of tru
 
 1. **No pip install required** - direct execution via PYTHONPATH
 2. **Changes take effect immediately** - no rebuild/reinstall step
-3. **Editable development** - modify any module in `ralph/`, run `python -m ralph`, see changes
+3. **Editable development** - modify any module in `app/ralph/`, run `python -m ralph`, see changes
 
 Verification command:
 ```bash
-# After making a change to ralph/cli.py, this reflects the change immediately:
+# After making a change to app/ralph/cli.py, this reflects the change immediately:
 python -m ralph --help
 
-# The production ralph command is UNAFFECTED by changes to ralph/:
+# The production ralph command is UNAFFECTED by changes to app/ralph/:
 ralph --help  # Still runs powerplant/ralph
 ```
 
@@ -151,7 +149,7 @@ ralph --help  # Still runs powerplant/ralph
 
 #### Unit Tests
 
-Each module has corresponding unit tests in `ralph/tests/unit/`:
+Each module has corresponding unit tests in `app/ralph/tests/unit/`:
 
 | Module | Test File | Key Tests |
 |--------|-----------|-----------|
@@ -172,7 +170,7 @@ Unit tests must:
 
 #### E2E Tests
 
-End-to-end tests in `ralph/tests/e2e/` validate complete workflows:
+End-to-end tests in `app/ralph/tests/e2e/` validate complete workflows:
 
 | Test File | Scenarios |
 |-----------|-----------|
@@ -191,16 +189,16 @@ E2E tests must:
 
 ```bash
 # Run all tests
-pytest ralph/tests/
+pytest app/ralph/tests/
 
 # Run only unit tests (fast)
-pytest ralph/tests/unit/
+pytest app/ralph/tests/unit/
 
 # Run only e2e tests
-pytest ralph/tests/e2e/
+pytest app/ralph/tests/e2e/
 
 # Run with coverage
-pytest ralph/tests/ --cov=ralph --cov-report=term-missing
+pytest app/ralph/tests/ --cov=ralph --cov-report=term-missing
 ```
 
 ### Module Responsibilities
@@ -295,13 +293,13 @@ Each function must have cyclomatic complexity ≤ 10:
 
 Use `radon` for measurement:
 ```bash
-radon cc ralph/ -a -s  # Show complexity with average
-radon cc ralph/ --min C  # Show only functions with complexity ≥ C
+radon cc app/ralph/ -a -s  # Show complexity with average
+radon cc app/ralph/ --min C  # Show only functions with complexity ≥ C
 ```
 
 ### AGENTS.md (Ralph's SDLC)
 
-Create `ralph/AGENTS.md` with ralph's own development rules:
+Create `app/ralph/AGENTS.md` with ralph's own development rules:
 
 ```markdown
 # Ralph Development Rules
@@ -335,10 +333,10 @@ Ralph runs `ralph construct` on its own specs.
 The refactor must be incremental to maintain functionality:
 
 **Phase 1: Structure**
-1. Create `ralph/` directory structure
+1. Create `app/ralph/` directory structure
 2. Create `__init__.py` and `__main__.py`
-3. Update `bootstrap.sh` with wrapper script
-4. Verify `ralph --help` works
+3. Update `bootstrap.sh` with PYTHONPATH setup
+4. Verify `python -m ralph --help` works
 
 **Phase 2: Extract Modules**
 1. Extract `models.py` (dataclasses)
@@ -385,35 +383,35 @@ Until Phase 7 is explicitly approved, `powerplant/ralph` remains the production 
 ## Acceptance Criteria
 
 ### Structure
-- [ ] `ralph/` directory exists at repository root
-- [ ] `ralph/__init__.py` defines `__version__`
-- [ ] `ralph/__main__.py` provides entry point
-- [ ] `ralph/cli.py` contains argparse setup
+- [ ] `app/ralph/` directory exists
+- [ ] `app/ralph/__init__.py` defines `__version__`
+- [ ] `app/ralph/__main__.py` provides entry point
+- [ ] `app/ralph/cli.py` contains argparse setup
 - [ ] All modules listed in Directory Structure exist
 
 ### Bootstrap
 - [ ] `powerplant/ralph` remains unchanged (original monolithic script intact)
-- [ ] `bootstrap.sh` adds repository root to PYTHONPATH
+- [ ] `bootstrap.sh` adds `app/` to PYTHONPATH
 - [ ] `python -m ralph --version` works after running bootstrap
 - [ ] `ralph --version` continues to work (runs original `powerplant/ralph`)
 - [ ] Shell completions continue to work
 
 ### Local Development
-- [ ] Editing `ralph/cli.py` and running `python -m ralph` reflects changes immediately
+- [ ] Editing `app/ralph/cli.py` and running `python -m ralph` reflects changes immediately
 - [ ] No pip install or build step required for `python -m ralph`
 - [ ] `python -m ralph` works from repository root
-- [ ] `ralph` command continues to run `powerplant/ralph` (unaffected by changes to `ralph/`)
+- [ ] `ralph` command continues to run `powerplant/ralph` (unaffected by changes to `app/ralph/`)
 
 ### Tests
-- [ ] `pytest ralph/tests/unit/` runs without errors
-- [ ] `pytest ralph/tests/e2e/` runs without errors
+- [ ] `pytest app/ralph/tests/unit/` runs without errors
+- [ ] `pytest app/ralph/tests/e2e/` runs without errors
 - [ ] Unit tests complete in < 30 seconds
 - [ ] E2E tests complete in < 60 seconds
 - [ ] E2E tests do not consume API tokens (opencode is mocked)
-- [ ] `ralph/tests/conftest.py` provides common fixtures
+- [ ] `app/ralph/tests/conftest.py` provides common fixtures
 
 ### Complexity
-- [ ] `radon cc ralph/ --min C` returns no results (no function with complexity ≥ C)
+- [ ] `radon cc app/ralph/ --min C` returns no results (no function with complexity ≥ C)
 - [ ] No function exceeds 50 lines
 - [ ] No module exceeds 500 lines
 
@@ -428,11 +426,28 @@ Until Phase 7 is explicitly approved, `powerplant/ralph` remains the production 
 - [ ] `tui/fallback.py` contains ANSI fallback
 
 ### SDLC
-- [ ] `ralph/AGENTS.md` exists with development rules
+- [ ] `app/ralph/AGENTS.md` exists with development rules
 - [ ] `python -m ralph construct` can run on specs in `ralph/specs/` (testing new implementation)
 - [ ] All public functions have type hints
 - [ ] All public functions have docstrings
 - [ ] `powerplant/ralph` has NOT been modified (guardrail respected)
+
+### Plan Mode Issue Handling
+
+When `ralph plan` completes successfully:
+- All issues for the same spec should be automatically closed
+- Rationale: Plan mode does comprehensive gap analysis; any issues from prior failures are now superseded by the new plan
+- This prevents stale issues from accumulating and cluttering status output
+
+Implementation:
+```python
+# After PLAN_COMPLETE signal and task commit:
+issues_for_spec = [i for i in state.issues if i.spec == spec_file]
+if issues_for_spec:
+    state.issues = [i for i in state.issues if i.spec != spec_file]
+    save_state(state, config)
+    print(f"Cleared {len(issues_for_spec)} issues (superseded by new plan)")
+```
 
 ### Command Parity (python -m ralph vs powerplant/ralph)
 
@@ -452,7 +467,7 @@ The new `python -m ralph` must produce identical behavior to `powerplant/ralph`:
 - [ ] `python -m ralph compact` works identically to `ralph compact`
 
 ### Backwards Compatibility
-- [ ] Existing `ralph/specs/*.md` files are preserved
+- [ ] Existing `ralph/specs/*.md` files are preserved (note: specs stay in `ralph/specs/`, not `app/ralph/specs/`)
 - [ ] Existing `ralph/plan.jsonl` files are readable by `python -m ralph`
 - [ ] Existing `ralph/PROMPT_*.md` files work with `python -m ralph`
 - [ ] Global config at `~/.config/ralph/config.toml` works with `python -m ralph`
