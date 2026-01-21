@@ -130,16 +130,7 @@ class IssuesPanel(Static):
         issues_list.remove_children()
 
 
-def _create_textual_app() -> typing.Tuple[typing.Type[App], Log]:
-    """
-    Create a Textual app for Ralph workflow dashboard.
-    Lazy-loaded to avoid import overhead.
-
-    Returns:
-        A tuple of RalphDashboard class and OutputLog widget.
-    """
-    if not TEXTUAL_AVAILABLE:
-        raise ImportError("Textual library not available. Dashboard cannot be created.")
+if TEXTUAL_AVAILABLE:
 
     class OutputLog(Log):
         """Custom log widget with enhanced output tracking."""
@@ -226,8 +217,36 @@ def _create_textual_app() -> typing.Tuple[typing.Type[App], Log]:
                 yield IssuesPanel(id="issues-panel")
             yield Footer()
 
+else:
+
+    class OutputLog:  # type: ignore
+        """Stub OutputLog when textual not available."""
+
+        def __init__(self, *args: Any, **kwargs: Any) -> None:
+            pass
+
+    class RalphDashboard:  # type: ignore
+        """Stub RalphDashboard when textual not available."""
+
+        def __init__(self, *args: Any, **kwargs: Any) -> None:
+            raise ImportError(
+                "Textual library not available. Install with: pip install textual"
+            )
+
+
+def _create_textual_app() -> typing.Tuple[typing.Type[App], typing.Type]:
+    """
+    Create a Textual app for Ralph workflow dashboard.
+    Kept for backwards compatibility.
+
+    Returns:
+        A tuple of RalphDashboard class and OutputLog class.
+    """
+    if not TEXTUAL_AVAILABLE:
+        raise ImportError("Textual library not available. Dashboard cannot be created.")
+
     return RalphDashboard, OutputLog
 
 
-# Export the function for lazy loading
-__all__ = ["_create_textual_app"]
+# Export classes at module level
+__all__ = ["RalphDashboard", "OutputLog", "_create_textual_app", "TEXTUAL_AVAILABLE"]
