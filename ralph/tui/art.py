@@ -130,7 +130,17 @@ def _colorize_art(
     color_map_list: List[List[Tuple[int, int, str]]],
     color_codes: Dict[str, str],
 ) -> List[str]:
-    """Build colored art lines from raw art and color map."""
+    """Build colored art lines from raw art and color map.
+
+    Args:
+        raw_lines: List of raw art strings (uncolored).
+        color_map_list: List of color mappings per line. Each mapping is a
+            list of (start, end, color_name) tuples.
+        color_codes: Dictionary mapping color names to ANSI codes.
+
+    Returns:
+        List of strings with ANSI color codes applied.
+    """
     result = []
     for line_idx, line in enumerate(raw_lines):
         if line_idx >= len(color_map_list):
