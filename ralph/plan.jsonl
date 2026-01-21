@@ -1,6 +1,5 @@
 {"t": "config", "timeout_ms": 300000, "max_iterations": 10, "context_warn": 0.7, "context_compact": 0.85, "context_kill": 0.95}
 {"t": "spec", "spec": "ralph-refactor.md"}
-{"t": "task", "id": "t-reayd6", "spec": "ralph-refactor.md", "name": "Extract context.py metrics and pressure", "s": "d", "notes": "Extract Metrics dataclass, IterationKillInfo, ToolSummaries, CompactedContext. Include threshold constants: WARNING_PCT=70, COMPACT_PCT=85, KILL_PCT=95.", "accept": "from ralph.context import Metrics, WARNING_PCT, COMPACT_PCT, KILL_PCT works", "deps": ["t-qhrbem"], "done_at": "9824c02"}
 {"t": "task", "id": "t-rj3lls", "spec": "ralph-refactor.md", "name": "Extract prompts.py prompt building", "s": "p", "notes": "Extract load_prompt(stage) to load PROMPT_*.md files, build_prompt_with_rules for combining with project rules, merge_prompts for update handling. Prompts are in ralph/ dir.", "accept": "from ralph.prompts import load_prompt, build_prompt_with_rules works", "deps": ["t-qhrbem"]}
 {"t": "task", "id": "t-rnvviw", "spec": "ralph-refactor.md", "name": "Extract analysis.py rejection patterns", "s": "p", "notes": "Extract analyze_rejection_patterns(tombstones) and suggest_issues(patterns) functions for detecting recurring task failures.", "accept": "from ralph.analysis import analyze_rejection_patterns, suggest_issues works", "deps": ["t-qvm02k"]}
 {"t": "task", "id": "t-rs0vlm", "spec": "ralph-refactor.md", "name": "Extract opencode.py integration", "s": "p", "notes": "Extract spawn_opencode(prompt, cwd, timeout), parse_json_stream(output), extract_metrics(output). Handle XDG_STATE_HOME and environment setup.", "accept": "from ralph.opencode import spawn_opencode, parse_json_stream, extract_metrics works", "deps": ["t-qhrbem"]}
@@ -67,3 +66,4 @@
 {"t": "accept", "id": "t-qqgd1z", "done_at": "6a8b498", "reason": ""}
 {"t": "accept", "id": "t-qvm02k", "done_at": "6a8b498", "reason": ""}
 {"t": "accept", "id": "t-qzr2sy", "done_at": "6a8b498", "reason": ""}
+{"t": "accept", "id": "t-reayd6", "done_at": "9824c02", "reason": ""}
