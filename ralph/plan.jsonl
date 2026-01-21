@@ -1,2 +1,2 @@
 {"t": "config", "timeout_ms": 300000, "max_iterations": 10, "context_warn": 0.7, "context_compact": 0.85, "context_kill": 0.95}
-{"t": "spec", "spec": "construct-mode.md"}
+{"t": "spec", "spec": "ralph-refactor.md"}
