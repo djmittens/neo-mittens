@@ -3,3 +3,6 @@ __pycache__/
 
 # Ralph logs
 build/ralph-logs/
+
+# Ralph runtime state (not tracked)
+ralph/.current_task

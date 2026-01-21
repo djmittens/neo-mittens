@@ -96,22 +96,15 @@ class GlobalConfig:
     
     Model Selection
     ===============
-    - model: Main model for reasoning stages (INVESTIGATE, VERIFY, DECOMPOSE)
-    - model_build: Fast model for BUILD stage (Haiku), upgrades to main model
-                   when task is complex (high priority, previously rejected, etc.)
+    - model: Main model for reasoning stages (INVESTIGATE, VERIFY, DECOMPOSE, PLAN)
+             Also used as fallback when BUILD struggles
+    - model_build: Fast/cheap model for BUILD stage
     
-    Profiles
-    ========
-    - opus:   Opus for reasoning, Haiku->Opus for BUILD
-    - sonnet: Sonnet for reasoning, Haiku->Sonnet for BUILD (when Opus quota exhausted)
+    No hardcoded defaults - config.toml is required.
     """
-    # Model settings
-    model: str = 'anthropic/claude-sonnet-4'  # Main model for reasoning stages
-    model_build: str = 'anthropic/claude-haiku-4'  # Fast model for BUILD stage
-    
-    # Complexity thresholds - BUILD upgrades to main model when task is complex
-    complexity_simple_tokens: int = 1000  # Notes shorter than this = simple
-    complexity_high_priority: bool = True  # High priority tasks get main model
+    # Models - must be set via config.toml
+    model: str = ''  # Main model for reasoning + fallback
+    model_build: str = ''  # Fast model for BUILD
     
     # Context limits
     context_window: int = 200_000
@@ -120,8 +113,8 @@ class GlobalConfig:
     context_kill_pct: int = 95
     
     # Timeouts (milliseconds)
-    stage_timeout_ms: int = 300_000
-    iteration_timeout_ms: int = 300_000
+    stage_timeout_ms: int = 900_000  # 15 minutes
+    iteration_timeout_ms: int = 900_000  # 15 minutes
     
     # Circuit breaker
     max_failures: int = 3
@@ -143,60 +136,6 @@ class GlobalConfig:
     
     # Profile name (for display/debugging)
     _profile_name: str = 'default'
-    
-    def get_model_for_stage(self, stage: str, task: 'Task' = None) -> str:
-        """Get the appropriate model for a stage.
-        
-        - Reasoning stages (INVESTIGATE, VERIFY, DECOMPOSE): Use main model
-        - Execution stage (BUILD): Use model_build, upgrade to main model if task is complex
-        
-        Args:
-            stage: Stage name (INVESTIGATE, BUILD, VERIFY, DECOMPOSE)
-            task: Optional task for complexity-based routing on BUILD
-            
-        Returns:
-            Model identifier string (e.g., "anthropic/claude-sonnet-4")
-        """
-        if stage == 'BUILD':
-            # BUILD uses fast model, but upgrades to main model for complex tasks
-            if task and self._is_complex_task(task):
-                return self.model
-            return self.model_build
-        
-        # Reasoning stages use the main model
-        return self.model
-    
-    def _is_complex_task(self, task: 'Task') -> bool:
-        """Check if task is complex enough to need the main model instead of Haiku.
-        
-        Returns True if task should use main model, False for Haiku.
-        """
-        if task is None:
-            return False
-        
-        # High priority tasks get the main model
-        if self.complexity_high_priority and task.priority == 'high':
-            return True
-        
-        # Previously rejected tasks need more capability
-        if task.reject_reason:
-            return True
-        
-        # Long/complex notes suggest a harder task
-        notes_len = len(task.notes or '')
-        if notes_len > self.complexity_simple_tokens * 3:
-            return True
-        
-        # Large acceptance criteria = more to verify
-        accept_len = len(task.accept or '')
-        if accept_len > 500:
-            return True
-        
-        # Large undivided task (not yet decomposed)
-        if task.decompose_depth == 0 and notes_len > 2000:
-            return True
-        
-        return False
 
     @classmethod
     def load(cls) -> 'GlobalConfig':
@@ -222,8 +161,18 @@ class GlobalConfig:
         except Exception:
             return cls()
         
-        # Start with defaults from [default] section
+        # Config priority:
+        # 1. Top-level keys (not in [default] or [profiles])
+        # 2. [default] section (deprecated, for backward compat)
+        # 3. RALPH_PROFILE overlay (if set)
         config_dict = {}
+        
+        # First, load top-level keys (excluding 'profiles' and 'default' sections)
+        for key, value in data.items():
+            if key not in ('profiles', 'default') and not isinstance(value, dict):
+                config_dict[key] = value
+        
+        # Then overlay [default] section if it exists (backward compat)
         if 'default' in data:
             config_dict.update(data['default'])
         
@@ -313,8 +262,36 @@ DEFAULT_CONTEXT_WINDOW = 200_000
 CONTEXT_SOFT_LIMIT_PCT = 70
 CONTEXT_COMPACT_LIMIT_PCT = 85
 CONTEXT_HARD_LIMIT_PCT = 95
-DEFAULT_STAGE_TIMEOUT_MS = 300000
-DEFAULT_ITERATION_TIMEOUT_MS = 300000
+DEFAULT_STAGE_TIMEOUT_MS = 900000  # 15 minutes
+DEFAULT_ITERATION_TIMEOUT_MS = 900000  # 15 minutes
+
+# Skeleton animation frames - pulsing bar for waiting indicator
+SKELETON_FRAMES = [
+    "\033[90m░░░░░░░░░░░░░░░░░░░░\033[0m",
+    "\033[90m░░░░░░░░░░░░░░░░░░░▒\033[0m",
+    "\033[90m░░░░░░░░░░░░░░░░░░▒▓\033[0m",
+    "\033[90m░░░░░░░░░░░░░░░░░▒▓█\033[0m",
+    "\033[90m░░░░░░░░░░░░░░░░▒▓█░\033[0m",
+    "\033[90m░░░░░░░░░░░░░░░▒▓█░░\033[0m",
+    "\033[90m░░░░░░░░░░░░░░▒▓█░░░\033[0m",
+    "\033[90m░░░░░░░░░░░░░▒▓█░░░░\033[0m",
+    "\033[90m░░░░░░░░░░░░▒▓█░░░░░\033[0m",
+    "\033[90m░░░░░░░░░░░▒▓█░░░░░░\033[0m",
+    "\033[90m░░░░░░░░░░▒▓█░░░░░░░\033[0m",
+    "\033[90m░░░░░░░░░▒▓█░░░░░░░░\033[0m",
+    "\033[90m░░░░░░░░▒▓█░░░░░░░░░\033[0m",
+    "\033[90m░░░░░░░▒▓█░░░░░░░░░░\033[0m",
+    "\033[90m░░░░░░▒▓█░░░░░░░░░░░\033[0m",
+    "\033[90m░░░░░▒▓█░░░░░░░░░░░░\033[0m",
+    "\033[90m░░░░▒▓█░░░░░░░░░░░░░\033[0m",
+    "\033[90m░░░▒▓█░░░░░░░░░░░░░░\033[0m",
+    "\033[90m░░▒▓█░░░░░░░░░░░░░░░\033[0m",
+    "\033[90m░▒▓█░░░░░░░░░░░░░░░░\033[0m",
+    "\033[90m▒▓█░░░░░░░░░░░░░░░░░\033[0m",
+    "\033[90m▓█░░░░░░░░░░░░░░░░░░\033[0m",
+    "\033[90m█░░░░░░░░░░░░░░░░░░░\033[0m",
+    "\033[90m░░░░░░░░░░░░░░░░░░░░\033[0m",
+]
 
 
 # =============================================================================
@@ -1264,21 +1241,26 @@ class Issue:
 class Tombstone:
     id: str  # Task ID that was accepted/rejected
     done_at: str  # Commit hash where task was marked done
-    reason: str  # Why the task was rejected (empty for accept)
+    reason: str  # Why the task was rejected, or accept criteria for accepted
     tombstone_type: str = "reject"  # "accept" or "reject"
+    name: str = ""  # Task name (preserved for display)
     
     def to_jsonl(self) -> str:
-        return json.dumps({"t": self.tombstone_type, "id": self.id, "done_at": self.done_at, "reason": self.reason})
+        d = {"t": self.tombstone_type, "id": self.id, "done_at": self.done_at, "reason": self.reason}
+        if self.name:
+            d["name"] = self.name
+        return json.dumps(d)
     
     @classmethod
     def from_jsonl(cls, d: dict, tombstone_type: str = "reject") -> 'Tombstone':
-        return cls(id=d["id"], done_at=d["done_at"], reason=d.get("reason", ""), tombstone_type=tombstone_type)
+        return cls(id=d["id"], done_at=d["done_at"], reason=d.get("reason", ""), 
+                   tombstone_type=tombstone_type, name=d.get("name", ""))
 
 
 @dataclass
 class RalphPlanConfig:
     """Configuration from plan.jsonl config record."""
-    timeout_ms: int = 300000  # 5 min default
+    timeout_ms: int = 900000  # 15 min default
     max_iterations: int = 10
     context_warn: float = 0.70
     context_compact: float = 0.85
@@ -1297,7 +1279,7 @@ class RalphPlanConfig:
     @classmethod
     def from_jsonl(cls, d: dict) -> 'RalphPlanConfig':
         return cls(
-            timeout_ms=d.get("timeout_ms", 300000),
+            timeout_ms=d.get("timeout_ms", 900000),
             max_iterations=d.get("max_iterations", 10),
             context_warn=d.get("context_warn", 0.70),
             context_compact=d.get("context_compact", 0.85),
@@ -1312,6 +1294,8 @@ class RalphState:
     issues: list = field(default_factory=list)  # List of Issue
     tombstones: list = field(default_factory=list)  # List of Tombstone
     config: Optional[RalphPlanConfig] = None  # Optional config record from plan.jsonl
+    # Runtime state (not persisted to plan.jsonl)
+    current_task_id: Optional[str] = None  # Task ID currently assigned to BUILD stage
     
     @property
     def pending(self) -> list:
@@ -1883,6 +1867,41 @@ def get_current_commit(config: RalphConfig) -> str:
     return result.stdout.strip() if result.returncode == 0 else "unknown"
 
 
+def get_current_task_file(config: RalphConfig) -> Path:
+    """Get path to the current task lock file."""
+    return config.ralph_dir / ".current_task"
+
+
+def save_current_task(config: RalphConfig, task_id: str) -> None:
+    """Save the currently assigned task ID to a runtime lock file.
+    
+    This file is NOT tracked by git - it's runtime state that tracks
+    which task BUILD is currently working on, so `ralph task done`
+    knows which task to mark as complete.
+    """
+    lock_file = get_current_task_file(config)
+    lock_file.write_text(task_id)
+
+
+def load_current_task(config: RalphConfig) -> Optional[str]:
+    """Load the currently assigned task ID from the runtime lock file.
+    
+    Returns None if no task is currently assigned.
+    """
+    lock_file = get_current_task_file(config)
+    if lock_file.exists():
+        task_id = lock_file.read_text().strip()
+        return task_id if task_id else None
+    return None
+
+
+def clear_current_task(config: RalphConfig) -> None:
+    """Clear the current task lock file."""
+    lock_file = get_current_task_file(config)
+    if lock_file.exists():
+        lock_file.unlink()
+
+
 def validate_state(state: RalphState, config: RalphConfig = None) -> dict:
     """Validate state for common issues like dangling dependencies.
     
@@ -2341,11 +2360,16 @@ def prompt_merge_choice(filename: str) -> str:
             return 'keep'
 
 
-def llm_merge_prompts(existing_content: str, new_template: str, filename: str, repo_root: Path) -> Optional[str]:
+def llm_merge_prompts(existing_content: str, new_template: str, filename: str, repo_root: Path, profile_arg: Optional[str] = None) -> Optional[str]:
     """Use opencode to intelligently merge existing prompt customizations with new template.
     
     Returns merged content, or None if merge failed.
     """
+    # Ensure profile is selected before using agent
+    ensure_profile_selected(profile_arg)
+    gcfg = get_global_config()
+    model = gcfg.model_build
+    
     merge_prompt = f'''You are merging two versions of a Ralph prompt file: {filename}
 
 EXISTING (user's customized version):
@@ -2377,7 +2401,7 @@ Merged content:'''
         })
         
         result = subprocess.run(
-            ['opencode', 'run', '--print', merge_prompt],
+            ['opencode', 'run', '--model', model, '--print', merge_prompt],
             capture_output=True,
             text=True,
             cwd=repo_root,
@@ -3119,12 +3143,28 @@ def cmd_status(config: RalphConfig):
         print(f"  {Colors.DIM}No issues{Colors.NC}")
     print()
     
-    # Tombstones section (rejected tasks history)
-    if state.tombstones:
-        print(f"{Colors.CYAN}Rejection History ({len(state.tombstones)}){Colors.NC}")
+    # Tombstones section - rejected tasks
+    rejected = [t for t in state.tombstones if t.tombstone_type == "reject"]
+    if rejected:
+        print(f"{Colors.CYAN}Rejected ({len(rejected)}){Colors.NC}")
         print(f"{Colors.DIM}{'-'*60}{Colors.NC}")
-        for tombstone in state.tombstones:
-            print(f"  {Colors.RED}✗{Colors.NC} {tombstone.id}: {tombstone.reason}")
+        for tombstone in rejected:
+            name_str = f" {tombstone.name}" if tombstone.name else ""
+            print(f"  {Colors.RED}✗{Colors.NC} {tombstone.id}{name_str}")
+            if tombstone.reason:
+                print(f"    {Colors.DIM}{tombstone.reason[:70]}{'...' if len(tombstone.reason) > 70 else ''}{Colors.NC}")
+        print()
+    
+    # Tombstones section - accepted tasks
+    accepted = [t for t in state.tombstones if t.tombstone_type == "accept"]
+    if accepted:
+        print(f"{Colors.CYAN}Accepted ({len(accepted)}){Colors.NC}")
+        print(f"{Colors.DIM}{'-'*60}{Colors.NC}")
+        for tombstone in accepted:
+            name_str = f" {tombstone.name}" if tombstone.name else ""
+            print(f"  {Colors.DIM}✓ {tombstone.id}{name_str}{Colors.NC}")
+            if tombstone.reason:
+                print(f"    {Colors.DIM}accept: {tombstone.reason[:70]}{'...' if len(tombstone.reason) > 70 else ''}{Colors.NC}")
         print()
     
     # Next action
@@ -3228,8 +3268,9 @@ def cmd_compact(config: RalphConfig):
         tombstone = Tombstone(
             id=task.id, 
             done_at=task.done_at or get_current_commit(config),
-            reason="",
-            tombstone_type="accept"
+            reason=task.accept or "",
+            tombstone_type="accept",
+            name=task.name
         )
         state.tombstones.append(tombstone)
         print(f"  {Colors.GREEN}✓{Colors.NC} {task.id} - {task.name}")
@@ -3277,43 +3318,22 @@ def describe_profile(name: str, profile: dict) -> tuple[str, str]:
     
     Returns (description, model_info) tuple.
     """
-    model = profile.get('model', 'default')
-    routing = profile.get('model_routing', 'none')
+    model_build = profile.get('model_build', profile.get('model', 'default'))
     
     # Extract just the model name without provider prefix
-    model_short = model.split('/')[-1] if '/' in model else model
+    model_short = model_build.split('/')[-1] if '/' in model_build else model_build
     
-    # Build description based on configuration
-    if routing == 'smart':
-        model_info = f"{model_short} (smart routing)"
-    elif routing == 'cost':
-        model_info = f"{model_short} (cost routing)"
-    else:
-        # Check if there are per-stage overrides
-        stages = ['investigate', 'build', 'verify', 'decompose']
-        overrides = [s for s in stages if profile.get(f'model_{s}')]
-        if overrides:
-            model_info = f"{model_short} (per-stage)"
-        else:
-            model_info = model_short
-    
-    # Generate description based on model and routing
-    if 'haiku' in model.lower():
-        if routing == 'smart':
-            desc = "Cheap default, upgrades for complex tasks"
-        else:
-            desc = "All Haiku - cheapest option"
-    elif 'opus' in model.lower():
-        desc = "All Opus - maximum capability"
-    elif 'sonnet' in model.lower():
-        if routing == 'smart':
-            desc = "Balanced with smart routing"
-        else:
-            desc = "All Sonnet - good balance"
+    # Generate description based on model
+    if 'haiku' in model_build.lower():
+        desc = "Haiku - cheapest option"
+    elif 'opus' in model_build.lower():
+        desc = "Opus - maximum capability"
+    elif 'sonnet' in model_build.lower():
+        desc = "Sonnet - good balance"
     else:
         desc = f"Custom ({model_short})"
     
-    return desc, model_info
+    return desc, model_short
 
 
 def select_profile_interactive() -> Optional[str]:
@@ -3410,6 +3430,40 @@ def apply_profile(profile_name: str) -> None:
     """
     os.environ['RALPH_PROFILE'] = profile_name
     reload_global_config()
+
+
+def ensure_profile_selected(profile_arg: Optional[str]) -> None:
+    """Ensure a profile is selected before running an agent.
+    
+    Priority: --profile flag > RALPH_PROFILE env > interactive selection
+    
+    Args:
+        profile_arg: Value of --profile flag, or None if not provided
+    """
+    if profile_arg:
+        apply_profile(profile_arg)
+        print(f"{Colors.GREEN}Using profile: {profile_arg}{Colors.NC}")
+    elif not os.environ.get('RALPH_PROFILE'):
+        selected_profile = select_profile_interactive()
+        if selected_profile:
+            apply_profile(selected_profile)
+    
+    # Validate models are configured
+    gcfg = get_global_config()
+    missing = []
+    if not gcfg.model:
+        missing.append('model')
+    if not gcfg.model_build:
+        missing.append('model_build')
+    
+    if missing:
+        print(f"{Colors.RED}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━{Colors.NC}")
+        print(f"{Colors.RED}ERROR: Missing model config: {', '.join(missing)}{Colors.NC}")
+        print(f"Set in ~/.config/ralph/config.toml:")
+        print(f"  model = \"anthropic/claude-sonnet-4-20250514\"  # reasoning stages")
+        print(f"  model_build = \"anthropic/claude-haiku-4-5-20251001\"  # BUILD stage")
+        print(f"{Colors.RED}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━{Colors.NC}")
+        sys.exit(1)
 
 
 def cmd_config():
@@ -3522,6 +3576,7 @@ class DashboardState:
     kills_context: int = 0
     last_kill_reason: str = ""
     last_kill_activity: str = ""
+    skeleton_frame: Optional[int] = None  # Current skeleton animation frame (None = not showing)
 
 
 # =============================================================================
@@ -4145,6 +4200,7 @@ class FallbackDashboard:
         self.kills_context = 0
         self.last_kill_reason = ""
         self.last_kill_activity = ""
+        self.skeleton_frame: Optional[int] = None  # Current skeleton animation frame
     
     def get_input(self) -> Optional[str | tuple[str, int]]:
         """Non-blocking keyboard input with coalescing for scroll keys.
@@ -4279,7 +4335,8 @@ class FallbackDashboard:
             kills_timeout=self.kills_timeout,
             kills_context=self.kills_context,
             last_kill_reason=self.last_kill_reason,
-            last_kill_activity=self.last_kill_activity
+            last_kill_activity=self.last_kill_activity,
+            skeleton_frame=self.skeleton_frame
         )
         
         # Move cursor to top and render
@@ -4312,6 +4369,18 @@ class FallbackDashboard:
     
     def add_line(self, line: str):
         """Add an output line."""
+        # Handle heartbeat messages - update skeleton animation frame
+        if line.startswith('\x01HEARTBEAT:'):
+            try:
+                self.skeleton_frame = int(line.split(':')[1])
+            except (IndexError, ValueError):
+                self.skeleton_frame = 0
+            return
+        # Filter out hidden metrics lines
+        if line.startswith('\x00'):
+            return
+        # Clear skeleton when real content arrives
+        self.skeleton_frame = None
         self.output_lines.append(line)
         # Parse cost info
         cost_info = parse_cost_line(line)
@@ -4320,6 +4389,87 @@ class FallbackDashboard:
             self.tokens_in = cost_info[1]
             self.tokens_out = cost_info[2]
             self.context_tokens = cost_info[1]  # input tokens = context size
+    
+    def run_loop(self, poll_data, on_quit=None, update_state=None):
+        """Unified main loop for dashboard rendering.
+        
+        Args:
+            poll_data: Callable that returns list of new lines (or None to continue).
+                       Return empty list if no new data. Raise StopIteration to exit.
+            on_quit: Optional callable when user presses quit. Return value is loop return value.
+            update_state: Optional callable to update dashboard state each iteration.
+        
+        Returns:
+            Return value from on_quit, or None if loop exits normally.
+        """
+        ANIMATION_FPS = 30
+        FRAME_DURATION = 1.0 / ANIMATION_FPS
+        SKELETON_DELAY = 0.5
+        
+        last_activity_time = time.time()
+        animation_start_time = 0.0
+        last_output_count = len(self.output_lines)
+        
+        self.enter()
+        
+        try:
+            while True:
+                now = time.time()
+                
+                # Poll for new data
+                try:
+                    new_lines = poll_data()
+                except StopIteration:
+                    break
+                
+                # Process new lines
+                if new_lines:
+                    for line in new_lines:
+                        self.add_line(line)
+                    last_activity_time = now
+                
+                # Handle skeleton animation
+                if len(self.output_lines) != last_output_count:
+                    # New content arrived, clear skeleton
+                    self.skeleton_frame = None
+                    last_output_count = len(self.output_lines)
+                    last_activity_time = now
+                elif now - last_activity_time > SKELETON_DELAY and self.is_running:
+                    # No new content, show skeleton
+                    if self.skeleton_frame is None:
+                        animation_start_time = now
+                    elapsed = now - animation_start_time
+                    self.skeleton_frame = int(elapsed * ANIMATION_FPS) % len(SKELETON_FRAMES)
+                
+                # Update external state (metrics, etc.)
+                if update_state:
+                    update_state(self)
+                
+                # Handle keyboard input
+                action = self.get_input()
+                if action:
+                    if action == 'quit':
+                        if on_quit:
+                            return on_quit()
+                        break
+                    self.handle_action(action)
+                
+                self.render()
+                
+                # Sleep less when animating
+                if self.skeleton_frame is not None:
+                    time.sleep(FRAME_DURATION)
+                else:
+                    time.sleep(0.05)
+        
+        except KeyboardInterrupt:
+            if on_quit:
+                return on_quit()
+            raise
+        finally:
+            self.exit()
+        
+        return None
 
 
 def render_dashboard(state: DashboardState, term_width: int, term_height: int) -> list[str]:
@@ -4460,8 +4610,16 @@ def render_dashboard(state: DashboardState, term_width: int, term_height: int) -
         display_lines = state.output_lines[-available_lines:] if state.output_lines else []
         for line in display_lines:
             add(f"  {truncate(line, term_width, 2)}")
-        for _ in range(available_lines - len(display_lines)):
-            add()
+        # Show skeleton animation if active (waiting for response)
+        if state.skeleton_frame is not None:
+            frame = SKELETON_FRAMES[state.skeleton_frame % len(SKELETON_FRAMES)]
+            add(f"  {frame}")
+            # One less empty line since we added skeleton
+            for _ in range(available_lines - len(display_lines) - 1):
+                add()
+        else:
+            for _ in range(available_lines - len(display_lines)):
+                add()
     
     add(f"{Colors.BLUE}{footer_bar}{Colors.NC}")
     # Footer text without newline (handled by caller)
@@ -4486,88 +4644,70 @@ def cmd_watch(config: RalphConfig):
 
 def _cmd_watch_fallback(config: RalphConfig):
     """Fallback watch mode without Textual - uses shared FallbackDashboard."""
-    fifo_fd = None
     dashboard = FallbackDashboard(config)
-    last_expensive_update = 0
-    EXPENSIVE_UPDATE_INTERVAL = 1.0
-    needs_redraw = True
-    last_output_count = 0
-    
     dashboard.branch = get_current_branch()
     dashboard.running_count = count_running_opencode(config.repo_root)
     dashboard.is_running = dashboard.running_count > 0
     
-    dashboard.enter()
+    # State for FIFO reading
+    fifo_state = {'fd': None, 'buffer': ''}
+    last_expensive_update = [0.0]
+    EXPENSIVE_UPDATE_INTERVAL = 1.0
+    
+    def poll_fifo():
+        """Poll FIFO for new lines."""
+        lines = []
+        
+        # Try to open FIFO if not open
+        if fifo_state['fd'] is None and config.output_fifo.exists():
+            try:
+                fifo_state['fd'] = os.open(str(config.output_fifo), os.O_RDWR | os.O_NONBLOCK)
+            except OSError:
+                pass
+        
+        # Read any available data from FIFO
+        if fifo_state['fd'] is not None:
+            try:
+                while True:
+                    ready, _, _ = select.select([fifo_state['fd']], [], [], 0)
+                    if not ready:
+                        break
+                    data = os.read(fifo_state['fd'], 4096)
+                    if not data:
+                        break
+                    # Buffer data and only process complete lines
+                    fifo_state['buffer'] += data.decode('utf-8', errors='replace')
+                    while '\n' in fifo_state['buffer']:
+                        line, fifo_state['buffer'] = fifo_state['buffer'].split('\n', 1)
+                        if line:
+                            lines.append(line)
+            except OSError:
+                if fifo_state['fd'] is not None:
+                    try:
+                        os.close(fifo_state['fd'])
+                    except OSError:
+                        pass
+                fifo_state['fd'] = None
+        
+        return lines
+    
+    def update_state(db):
+        """Update expensive state periodically."""
+        now = time.time()
+        if now - last_expensive_update[0] >= EXPENSIVE_UPDATE_INTERVAL:
+            db.running_count = count_running_opencode(config.repo_root)
+            db.is_running = db.running_count > 0
+            db.iteration = read_runtime_iteration(config)
+            if int(now) % 5 == 0:
+                db.branch = get_current_branch()
+            last_expensive_update[0] = now
     
     try:
-        while True:
-            now = time.time()
-            
-            # Try to open FIFO if not open
-            if fifo_fd is None and config.output_fifo.exists():
-                try:
-                    fifo_fd = os.open(str(config.output_fifo), os.O_RDWR | os.O_NONBLOCK)
-                except OSError:
-                    pass
-            
-            # Read any available data from FIFO
-            if fifo_fd is not None:
-                try:
-                    while True:
-                        ready, _, _ = select.select([fifo_fd], [], [], 0)
-                        if not ready:
-                            break
-                        data = os.read(fifo_fd, 4096)
-                        if not data:
-                            break
-                        for line in data.decode('utf-8', errors='replace').splitlines():
-                            if line:
-                                dashboard.add_line(line)
-                except OSError:
-                    if fifo_fd is not None:
-                        try:
-                            os.close(fifo_fd)
-                        except OSError:
-                            pass
-                    fifo_fd = None
-            
-            # Check if output changed
-            if len(dashboard.output_lines) != last_output_count:
-                last_output_count = len(dashboard.output_lines)
-                needs_redraw = True
-            
-            # Handle keyboard input
-            action = dashboard.get_input()
-            if action:
-                if dashboard.handle_action(action):
-                    break
-                dashboard.render()
-                continue
-            
-            # Refresh expensive data periodically
-            if now - last_expensive_update >= EXPENSIVE_UPDATE_INTERVAL:
-                dashboard.running_count = count_running_opencode(config.repo_root)
-                dashboard.is_running = dashboard.running_count > 0
-                dashboard.iteration = read_runtime_iteration(config)
-                if int(now) % 5 == 0:
-                    dashboard.branch = get_current_branch()
-                last_expensive_update = now
-                needs_redraw = True
-            
-            # Render if needed
-            if needs_redraw:
-                dashboard.render()
-                needs_redraw = False
-            
-            time.sleep(0.016)
-                
-    except KeyboardInterrupt:
-        pass
+        dashboard.run_loop(poll_fifo, update_state=update_state)
     finally:
-        dashboard.exit()
-        if fifo_fd is not None:
+        if fifo_state['fd'] is not None:
             try:
-                os.close(fifo_fd)
+                os.close(fifo_state['fd'])
             except OSError:
                 pass
         print("Stopped watching.")
@@ -4681,6 +4821,9 @@ def cmd_stream():
                 try:
                     event = json.loads(line)
                 except json.JSONDecodeError:
+                    # Non-JSON output - likely an error message from opencode
+                    print(f"{C.RED}{line}{C.RESET}", file=sys.stderr)
+                    sys.stderr.flush()
                     continue
                 
                 last_event_time = time.time()
@@ -4855,102 +4998,46 @@ def _run_with_simple_ui(process, config: RalphConfig, iteration: int,
     dashboard = FallbackDashboard(config, iteration=iteration)
     dashboard.branch = branch
     dashboard.is_running = True
-    last_line_count = 0
-    last_activity_time = time.time()
-    skeleton_frame = 0
-    skeleton_showing = False
     
-    # Skeleton animation frames - shadow trails behind motion (░▒▓█ moving right)
-    skeleton_frames = [
-        "\033[90m░░░░░░░░░░░░░░░░░░░░\033[0m",
-        "\033[90m░░░░░░░░░░░░░░░░░░░▒\033[0m",
-        "\033[90m░░░░░░░░░░░░░░░░░░▒▓\033[0m",
-        "\033[90m░░░░░░░░░░░░░░░░░▒▓█\033[0m",
-        "\033[90m░░░░░░░░░░░░░░░░▒▓█░\033[0m",
-        "\033[90m░░░░░░░░░░░░░░░▒▓█░░\033[0m",
-        "\033[90m░░░░░░░░░░░░░░▒▓█░░░\033[0m",
-        "\033[90m░░░░░░░░░░░░░▒▓█░░░░\033[0m",
-        "\033[90m░░░░░░░░░░░░▒▓█░░░░░\033[0m",
-        "\033[90m░░░░░░░░░░░▒▓█░░░░░░\033[0m",
-        "\033[90m░░░░░░░░░░▒▓█░░░░░░░\033[0m",
-        "\033[90m░░░░░░░░░▒▓█░░░░░░░░\033[0m",
-        "\033[90m░░░░░░░░▒▓█░░░░░░░░░\033[0m",
-        "\033[90m░░░░░░░▒▓█░░░░░░░░░░\033[0m",
-        "\033[90m░░░░░░▒▓█░░░░░░░░░░░\033[0m",
-        "\033[90m░░░░░▒▓█░░░░░░░░░░░░\033[0m",
-        "\033[90m░░░░▒▓█░░░░░░░░░░░░░\033[0m",
-        "\033[90m░░░▒▓█░░░░░░░░░░░░░░\033[0m",
-        "\033[90m░░▒▓█░░░░░░░░░░░░░░░\033[0m",
-        "\033[90m░▒▓█░░░░░░░░░░░░░░░░\033[0m",
-        "\033[90m▒▓█░░░░░░░░░░░░░░░░░\033[0m",
-        "\033[90m▓█░░░░░░░░░░░░░░░░░░\033[0m",
-        "\033[90m█░░░░░░░░░░░░░░░░░░░\033[0m",
-        "\033[90m░░░░░░░░░░░░░░░░░░░░\033[0m",
-    ]
+    last_line_count = [0]
     
-    dashboard.enter()
+    def poll_buffer():
+        """Poll output buffer for new lines. Raises StopIteration when process exits."""
+        if process.poll() is not None:
+            raise StopIteration
+        all_lines = output_buffer.get_lines()
+        new_lines = all_lines[last_line_count[0]:]
+        last_line_count[0] = len(all_lines)
+        return new_lines
+    
+    def update_state(db):
+        """Sync metrics to dashboard."""
+        db.cost = metrics.total_cost
+        db.tokens_in = metrics.total_tokens_in
+        db.tokens_out = metrics.total_tokens_out
+        db.kills_timeout = metrics.kills_timeout
+        db.kills_context = metrics.kills_context
+        ctx = output_buffer.get_iteration_tokens()
+        if ctx > 0:
+            db.context_tokens = ctx
+        db.last_kill_reason = metrics.last_kill_reason
+        db.last_kill_activity = metrics.last_kill_activity
+    
+    def on_quit():
+        """Handle quit action."""
+        process.terminate()
+        process.wait()
+        return process.returncode
     
     try:
-        while process.poll() is None:
-            # Sync output from buffer to dashboard
-            all_lines = output_buffer.get_lines()
-            new_lines = all_lines[last_line_count:]
-            
-            if new_lines:
-                # Remove skeleton line if showing, then add new lines
-                if skeleton_showing:
-                    if dashboard.output_lines:
-                        dashboard.output_lines.pop()
-                    skeleton_showing = False
-                for line in new_lines:
-                    dashboard.add_line(line)
-                last_line_count = len(all_lines)
-                last_activity_time = time.time()
-            elif time.time() - last_activity_time > 0.5:
-                # No new content for 0.5s, show skeleton animation
-                frame = skeleton_frames[skeleton_frame % len(skeleton_frames)]
-                if skeleton_showing:
-                    # Update existing skeleton line in place
-                    if dashboard.output_lines:
-                        dashboard.output_lines[-1] = frame
-                else:
-                    # Add new skeleton line
-                    dashboard.add_line(frame)
-                    skeleton_showing = True
-                skeleton_frame += 1
-            
-            # Sync metrics
-            dashboard.cost = metrics.total_cost
-            dashboard.tokens_in = metrics.total_tokens_in
-            dashboard.tokens_out = metrics.total_tokens_out
-            dashboard.kills_timeout = metrics.kills_timeout
-            dashboard.kills_context = metrics.kills_context
-            ctx = output_buffer.get_iteration_tokens()
-            if ctx > 0:
-                dashboard.context_tokens = ctx  # Only update if we have a value
-            dashboard.last_kill_reason = metrics.last_kill_reason
-            dashboard.last_kill_activity = metrics.last_kill_activity
-            
-            # Handle keyboard input
-            action = dashboard.get_input()
-            if action:
-                if action == 'quit':
-                    process.terminate()
-                    process.wait()
-                    return process.returncode
-                dashboard.handle_action(action)
-            
-            dashboard.render()
-            time.sleep(0.05)
-        
+        result = dashboard.run_loop(poll_buffer, on_quit=on_quit, update_state=update_state)
+        if result is not None:
+            return result
         return process.returncode
-        
     except KeyboardInterrupt:
         process.terminate()
         process.wait()
         raise
-    finally:
-        dashboard.exit()
 
 
 def stream_output(pipe, output_buffer: OutputBuffer, metrics: Metrics, 
@@ -5015,47 +5102,9 @@ def _process_stream_line(decoded: str, output_buffer: OutputBuffer, metrics: Met
     if decoded.startswith('\x00'):
         return
     
-    # Handle heartbeat from ralph stream - show pulsing skeleton animation
+    # Filter out heartbeat messages - they're only for dashboard animation
     if decoded.startswith('\x01HEARTBEAT:'):
-        if print_to_stdout:
-            try:
-                frame_idx = int(decoded.split(':')[1])
-            except (IndexError, ValueError):
-                frame_idx = 0
-            # Pulsing skeleton frames - shadow trails behind motion (░▒▓█ moving right)
-            skeleton_frames = [
-                "\033[90m░░░░░░░░░░░░░░░░░░░░\033[0m",
-                "\033[90m░░░░░░░░░░░░░░░░░░░▒\033[0m",
-                "\033[90m░░░░░░░░░░░░░░░░░░▒▓\033[0m",
-                "\033[90m░░░░░░░░░░░░░░░░░▒▓█\033[0m",
-                "\033[90m░░░░░░░░░░░░░░░░▒▓█░\033[0m",
-                "\033[90m░░░░░░░░░░░░░░░▒▓█░░\033[0m",
-                "\033[90m░░░░░░░░░░░░░░▒▓█░░░\033[0m",
-                "\033[90m░░░░░░░░░░░░░▒▓█░░░░\033[0m",
-                "\033[90m░░░░░░░░░░░░▒▓█░░░░░\033[0m",
-                "\033[90m░░░░░░░░░░░▒▓█░░░░░░\033[0m",
-                "\033[90m░░░░░░░░░░▒▓█░░░░░░░\033[0m",
-                "\033[90m░░░░░░░░░▒▓█░░░░░░░░\033[0m",
-                "\033[90m░░░░░░░░▒▓█░░░░░░░░░\033[0m",
-                "\033[90m░░░░░░░▒▓█░░░░░░░░░░\033[0m",
-                "\033[90m░░░░░░▒▓█░░░░░░░░░░░\033[0m",
-                "\033[90m░░░░░▒▓█░░░░░░░░░░░░\033[0m",
-                "\033[90m░░░░▒▓█░░░░░░░░░░░░░\033[0m",
-                "\033[90m░░░▒▓█░░░░░░░░░░░░░░\033[0m",
-                "\033[90m░░▒▓█░░░░░░░░░░░░░░░\033[0m",
-                "\033[90m░▒▓█░░░░░░░░░░░░░░░░\033[0m",
-                "\033[90m▒▓█░░░░░░░░░░░░░░░░░\033[0m",
-                "\033[90m▓█░░░░░░░░░░░░░░░░░░\033[0m",
-                "\033[90m█░░░░░░░░░░░░░░░░░░░\033[0m",
-                "\033[90m░░░░░░░░░░░░░░░░░░░░\033[0m",
-            ]
-            frame = skeleton_frames[frame_idx % len(skeleton_frames)]
-            # Use carriage return to overwrite the line in place
-            sys.stdout.write(f"\r{frame}")
-            sys.stdout.flush()
-            # Track that we're showing skeleton so we can clear it
-            _process_stream_line._showing_skeleton = True
-        # Still write heartbeat to FIFO so watchers can animate too
+        # Write heartbeat to FIFO so watchers can animate
         if fifo_path is not None:
             fifo_fd = getattr(_process_stream_line, '_fifo_fd', None)
             if fifo_fd is None:
@@ -5074,12 +5123,6 @@ def _process_stream_line(decoded: str, output_buffer: OutputBuffer, metrics: Met
                         pass
                     _process_stream_line._fifo_fd = None
         return
-    
-    # Clear skeleton line if we were showing one
-    if getattr(_process_stream_line, '_showing_skeleton', False):
-        sys.stdout.write("\r\033[2K")  # Clear the skeleton line
-        sys.stdout.flush()
-        _process_stream_line._showing_skeleton = False
     
     output_buffer.add(decoded)
     
@@ -5190,6 +5233,11 @@ def run_single_stage(config: RalphConfig, stage: Stage, state: RalphState,
         current_task_id = current_task.id
         current_task_name = current_task.name
     
+    # For BUILD stage, save the assigned task ID so `ralph task done` knows which task to mark
+    # This prevents the "wrong task marked done" bug when task ordering changes mid-iteration
+    if stage == Stage.BUILD and current_task_id:
+        save_current_task(config, current_task_id)
+    
     output_buffer = OutputBuffer()
     
     # Use per-task timeout if available, otherwise fall back to stage timeout
@@ -5227,16 +5275,25 @@ def run_single_stage(config: RalphConfig, stage: Stage, state: RalphState,
         permission_config["external_directory"] = {"*": "deny"}
     opencode_env['OPENCODE_PERMISSION'] = json.dumps(permission_config)
     
-    # Build command - select model based on stage and task complexity
     gcfg = get_global_config()
-    model = gcfg.get_model_for_stage(stage_str, current_task)
-    
-    # Log model selection for visibility
-    if gcfg.model_routing != 'none':
-        routing_info = f" (routing={gcfg.model_routing})"
+    # BUILD uses fast model, but upgrades to main model if task is complex
+    # All other stages always use main model
+    if stage == Stage.BUILD:
+        model = gcfg.model_build
+        current_task = state.get_next_task()
+        # Upgrade to main model if task is struggling
+        if current_task:
+            if current_task.reject_reason:
+                # Previously rejected - needs more capability
+                model = gcfg.model
+            elif current_task.priority == 'high':
+                # High priority tasks get main model
+                model = gcfg.model
+            elif current_task.decompose_depth > 0:
+                # Already been decomposed - subtasks are tricky
+                model = gcfg.model
     else:
-        routing_info = ""
-    print(f"{Colors.DIM}[MODEL] {stage_str}: {model}{routing_info}{Colors.NC}")
+        model = gcfg.model
     
     cmd = ['opencode', 'run', '--model', model,
            '--format', 'json', prompt_content]
@@ -6082,18 +6139,31 @@ def cmd_run(config: RalphConfig, mode: str, max_iterations: int, max_cost: float
                 current_task_id = current_task.id
                 current_task_name = current_task.name
             
+            # For BUILD stage, save the assigned task ID so `ralph task done` knows which task to mark
+            # This prevents the "wrong task marked done" bug when task ordering changes mid-iteration
+            if stage == 'BUILD' and current_task_id:
+                save_current_task(config, current_task_id)
+            
             output_buffer = OutputBuffer()
 
-            # Select model based on stage and task complexity
             gcfg = get_global_config()
-            model = gcfg.get_model_for_stage(stage, current_task)
-            
-            # Log model selection for visibility
-            if gcfg.model_routing != 'none':
-                routing_info = f" (routing={gcfg.model_routing})"
+            # BUILD uses fast model, but upgrades to main model if task is complex
+            # All other stages always use main model
+            if stage == 'BUILD':
+                model = gcfg.model_build
+                # Upgrade to main model if task is struggling
+                if current_task:
+                    if current_task.reject_reason:
+                        # Previously rejected - needs more capability
+                        model = gcfg.model
+                    elif current_task.priority == 'high':
+                        # High priority tasks get main model
+                        model = gcfg.model
+                    elif current_task.decompose_depth > 0:
+                        # Already been decomposed - subtasks are tricky
+                        model = gcfg.model
             else:
-                routing_info = ""
-            print(f"{Colors.DIM}[MODEL] {stage}: {model}{routing_info}{Colors.NC}")
+                model = gcfg.model
             
             cmd = ['opencode', 'run', '--model', model, 
                    '--format', 'json', prompt_content]
@@ -6462,6 +6532,15 @@ def cmd_run(config: RalphConfig, mode: str, max_iterations: int, max_cost: float
 
             duration = int(time.time() - start_time)
 
+            # Check for immediate failure (e.g., bad model name, missing API key)
+            if exit_code != 0 and duration < 5 and not output_buffer.get_all().strip():
+                print(f"{Colors.RED}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━{Colors.NC}")
+                print(f"{Colors.RED}OPENCODE FAILED TO START{Colors.NC}")
+                print(f"Exit code: {exit_code}")
+                print(f"Check model name, API keys, and opencode configuration.")
+                print(f"Run with --no-ui to see error output.")
+                print(f"{Colors.RED}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━{Colors.NC}")
+
             # Track success/failure
             # Context/timeout kills are NOT failures - they're expected behavior that triggers retry
             if exit_code == 0:
@@ -6684,6 +6763,10 @@ def cmd_query(config: RalphConfig, subquery: Optional[str] = None, done_only: bo
         output = state.to_dict()
         output["stage"] = state.get_stage()
         output["next"] = state.get_next()
+        # Include currently assigned task if BUILD is in progress
+        assigned_task_id = load_current_task(config)
+        if assigned_task_id:
+            output["current_task"] = assigned_task_id
         print(json.dumps(output, indent=2))
 
 
@@ -6693,16 +6776,34 @@ def cmd_task(config: RalphConfig, action: str, desc: Optional[str] = None, arg3:
     
     if action == 'done':
         # Support explicit task ID: ralph task done <task-id>
+        task_source = None  # Track how we found the task for output clarity
         if desc:
             task = next((t for t in state.pending if t.id == desc), None)
             if not task:
                 print(f"{Colors.RED}Task not found in pending tasks: {desc}{Colors.NC}")
                 print(f"  {Colors.DIM}Pending tasks: {', '.join(t.id for t in state.pending)}{Colors.NC}")
                 return 1
+            task_source = "explicit"
         else:
-            # Use get_next_task() to find the task BUILD would be working on
-            # This respects priority and dependency ordering
-            task = state.get_next_task()
+            # First, check if there's a current task assigned by BUILD stage
+            # This prevents the "wrong task marked done" bug when task ordering changes
+            assigned_task_id = load_current_task(config)
+            if assigned_task_id:
+                task = next((t for t in state.pending if t.id == assigned_task_id), None)
+                if task:
+                    # Found the assigned task - use it
+                    task_source = "assigned"
+                else:
+                    # Assigned task no longer pending (weird state) - fall back to get_next_task
+                    print(f"{Colors.YELLOW}Warning: Assigned task {assigned_task_id} not in pending, using next task{Colors.NC}")
+                    task = state.get_next_task()
+                    task_source = "fallback"
+            else:
+                # No assigned task - fall back to get_next_task()
+                # This respects priority and dependency ordering
+                task = state.get_next_task()
+                task_source = "next"
+            
             if not task:
                 print(f"{Colors.YELLOW}No pending tasks{Colors.NC}")
                 return 1
@@ -6757,7 +6858,18 @@ def cmd_task(config: RalphConfig, action: str, desc: Optional[str] = None, arg3:
         commit_msg = f"ralph: task done - {task.name[:50]}"
         subprocess.run(['git', 'commit', '-m', commit_msg], cwd=config.repo_root, capture_output=True)
         
+        # Clear the current task lock file since task is now done
+        clear_current_task(config)
+        
         print(f"{Colors.GREEN}Task done:{Colors.NC} {task.id} - {task.name}")
+        # Show how the task was selected for transparency
+        if task_source == "assigned":
+            print(f"  {Colors.DIM}(from BUILD stage assignment){Colors.NC}")
+        elif task_source == "explicit":
+            print(f"  {Colors.DIM}(explicit task ID){Colors.NC}")
+        elif task_source == "fallback":
+            print(f"  {Colors.DIM}(fallback - assigned task not found){Colors.NC}")
+        # Don't print anything for "next" - it's the default behavior
         print(f"  {Colors.DIM}Changed files: {', '.join(sorted(all_changed)[:5])}{Colors.NC}")
         if len(all_changed) > 5:
             print(f"  {Colors.DIM}  ... and {len(all_changed) - 5} more{Colors.NC}")
@@ -6893,7 +7005,7 @@ def cmd_task(config: RalphConfig, action: str, desc: Optional[str] = None, arg3:
             # Create accept tombstone and remove task
             # Tombstone preserves task ID in history for dependency validation
             tombstone = Tombstone(id=task.id, done_at=task.done_at or get_current_commit(config), 
-                                  reason="", tombstone_type="accept")
+                                  reason=task.accept or "", tombstone_type="accept", name=task.name)
             state.tombstones.append(tombstone)
             state.tasks = [t for t in state.tasks if t.id != task_id]
             save_state(config, state)
@@ -6903,7 +7015,7 @@ def cmd_task(config: RalphConfig, action: str, desc: Optional[str] = None, arg3:
             # Create accept tombstones for all done tasks
             for task in done:
                 tombstone = Tombstone(id=task.id, done_at=task.done_at or get_current_commit(config),
-                                      reason="", tombstone_type="accept")
+                                      reason=task.accept or "", tombstone_type="accept", name=task.name)
                 state.tombstones.append(tombstone)
             done_ids = {t.id for t in done}
             state.tasks = [t for t in state.tasks if t.id not in done_ids]
@@ -6925,7 +7037,7 @@ def cmd_task(config: RalphConfig, action: str, desc: Optional[str] = None, arg3:
             print(f"{Colors.RED}Task not found in done tasks: {task_id}{Colors.NC}")
             print(f"  {Colors.DIM}Done tasks: {', '.join(t.id for t in done)}{Colors.NC}")
             return 1
-        tombstone = Tombstone(id=task.id, done_at=task.done_at or "unknown", reason=reason)
+        tombstone = Tombstone(id=task.id, done_at=task.done_at or "unknown", reason=reason, name=task.name)
         state.tombstones.append(tombstone)
         task.status = "p"
         task.done_at = None
@@ -7460,11 +7572,16 @@ Examples:
         # Set the spec in state before running plan
         cmd_set_spec(config, spec_path.name)
         
+        ensure_profile_selected(args.profile)
+        
         cmd_run(config, 'plan', 1, args.max_cost, args.max_failures, 
                 args.completion_promise, args.no_ui, spec_file=spec_path.name,
                 stage_timeout_ms=args.timeout, context_limit=args.context_limit)
     elif args.command in ('construct', 'build', ''):
         # Note: 'build' is supported as an alias for backward compatibility
+        
+        # Profile selection first - before any agent work
+        ensure_profile_selected(args.profile)
         
         # Check if a spec file was provided as argument
         spec_arg = args.arg
@@ -7540,18 +7657,6 @@ Examples:
             except KeyboardInterrupt:
                 print(f"\n{Colors.RED}Aborted.{Colors.NC}")
                 sys.exit(1)
-        
-        # Handle profile selection for cost optimization
-        # Priority: --profile flag > RALPH_PROFILE env > interactive selection
-        if args.profile:
-            # Profile explicitly provided via --profile flag
-            apply_profile(args.profile)
-            print(f"{Colors.GREEN}Using profile: {args.profile}{Colors.NC}")
-        elif not os.environ.get('RALPH_PROFILE'):
-            # No profile set - prompt user to select one
-            selected_profile = select_profile_interactive()
-            if selected_profile:
-                apply_profile(selected_profile)
         
         # Use the new state machine for construct mode
         cmd_construct(config, iterations, args.max_cost, args.max_failures, 
