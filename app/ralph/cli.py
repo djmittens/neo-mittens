@@ -155,6 +155,16 @@ def _create_parser() -> argparse.ArgumentParser:
     # config
     subparsers.add_parser("config", help="Configure Ralph settings")
 
+    # watch
+    subparsers.add_parser("watch", help="Watch for plan changes and sync")
+
+    # stream
+    subparsers.add_parser("stream", help="Stream construct output")
+
+    # plan
+    plan_parser = subparsers.add_parser("plan", help="Generate plan from spec")
+    plan_parser.add_argument("spec", help="Spec file to plan from")
+
     # construct
     construct_parser = subparsers.add_parser(
         "construct", help="Run autonomous construction"

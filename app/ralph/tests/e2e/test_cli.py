@@ -37,9 +37,9 @@ def test_version_output():
 
 def test_subcommand_parsing():
     """Test that subcommands are parsed correctly."""
+    # Commands that should succeed even without initialization
     subcommands = [
         "init",
-        "status",
         "config",
         "watch",
         "stream",
@@ -55,6 +55,14 @@ def test_subcommand_parsing():
         assert len(result.stdout) > 0 or len(result.stderr) >= 0, (
             f"Command '{cmd}' produced no output"
         )
+
+
+def test_status_not_initialized():
+    """Test that status returns 1 when ralph is not initialized."""
+    result = run_ralph("status")
+    # status returns 1 when not initialized, which is expected behavior
+    assert result.returncode == 1
+    assert "not initialized" in result.stdout.lower() or "init" in result.stdout.lower()
 
 
 def test_subcommand_help():
