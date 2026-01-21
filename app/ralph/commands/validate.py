@@ -50,6 +50,21 @@ def _validate_acceptance_criteria(accept: str) -> list[str]:
     return errors
 
 
+def _validate_priority(priority: Optional[str]) -> list[str]:
+    """Validate task priority."""
+    errors = []
+    valid_priorities = ["high", "medium", "low"]
+
+    if not priority:
+        errors.append("Priority is missing. Recommended to set priority.")
+    elif priority not in valid_priorities:
+        errors.append(
+            f"Invalid priority '{priority}'. Must be one of: {', '.join(valid_priorities)}"
+        )
+
+    return errors
+
+
 def _validate_task_fields(task: Dict[str, Any]) -> list[str]:
     """Validate required task fields."""
     errors = []
@@ -61,11 +76,17 @@ def _validate_task_fields(task: Dict[str, Any]) -> list[str]:
             errors.append(f"Missing required field: {field}")
 
     # Optional but recommended validation if fields exist
-    if "notes" in task:
+    if "notes" in task and task["notes"]:
         errors.extend(_validate_task_notes(task["notes"]))
 
-    if "accept" in task:
+    if "accept" in task and task["accept"]:
         errors.extend(_validate_acceptance_criteria(task["accept"]))
+
+    # Validate priority
+    if "priority" in task:
+        errors.extend(_validate_priority(task.get("priority")))
+    else:
+        errors.append("Recommended: Set task priority")
 
     return errors
 
