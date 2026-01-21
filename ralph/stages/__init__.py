@@ -10,7 +10,7 @@ from ralph.stages.base import (
     StageResult,
     StageRunnerFn,
 )
-from ralph.stages import build, investigate, verify
+from ralph.stages import build, decompose, investigate, verify
 
 __all__ = [
     "Stage",
@@ -19,6 +19,7 @@ __all__ = [
     "ConstructStateMachine",
     "StageRunnerFn",
     "build",
+    "decompose",
     "investigate",
     "verify",
 ]

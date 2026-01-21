@@ -898,3 +898,379 @@ export const insert_heading = tool({
     return `Inserted H${level} heading "${text}" at index ${insertIndex}`
   },
 })
+
+export const clear_document = tool({
+  description: `Clear all content from a Google Doc, leaving it empty for fresh content.`,
+  args: {
+    document_id: tool.schema.string().describe("The Google Doc ID"),
+  },
+  async execute(args) {
+    const { document_id } = args
+
+    const doc = await docsApi(`/v1/documents/${document_id}`)
+    const content = doc.body?.content || []
+    
+    // Find the range of all content (skip first structural element)
+    let endIndex = 1
+    for (const element of content) {
+      if (element.endIndex && element.endIndex > endIndex) {
+        endIndex = element.endIndex
+      }
+    }
+    
+    if (endIndex <= 2) {
+      return "Document is already empty."
+    }
+
+    await docsApi(`/v1/documents/${document_id}:batchUpdate`, {
+      method: "POST",
+      body: JSON.stringify({
+        requests: [
+          {
+            deleteContentRange: {
+              range: {
+                startIndex: 1,
+                endIndex: endIndex - 1,
+              },
+            },
+          },
+        ],
+      }),
+    })
+
+    return `Cleared document "${doc.title}"`
+  },
+})
+
+export const write_formatted_section = tool({
+  description: `Write a formatted section to a Google Doc. This tool writes content and applies formatting in one operation. Perfect for building professionally formatted documents section by section.`,
+  args: {
+    document_id: tool.schema.string().describe("The Google Doc ID"),
+    content: tool.schema.string().describe(`JSON array of content blocks. Each block has:
+- type: "title" | "h1" | "h2" | "h3" | "h4" | "text" | "bullet" | "code"
+- text: The content text
+- bold: (optional) Make text bold (for type: "text")
+
+Example:
+[
+  {"type": "h1", "text": "Section Title"},
+  {"type": "text", "text": "Some paragraph text here."},
+  {"type": "bullet", "text": "First bullet point"},
+  {"type": "bullet", "text": "Second bullet point"},
+  {"type": "h2", "text": "Subsection"},
+  {"type": "code", "text": "code example here"}
+]`),
+  },
+  async execute(args) {
+    const { document_id, content } = args
+    
+    const blocks = JSON.parse(content) as Array<{
+      type: "title" | "h1" | "h2" | "h3" | "h4" | "text" | "bullet" | "code"
+      text: string
+      bold?: boolean
+    }>
+    
+    // Get current document end
+    const doc = await docsApi(`/v1/documents/${document_id}`)
+    let insertIndex = (doc.body?.content?.slice(-1)[0]?.endIndex || 2) - 1
+    
+    // Build all text first, then apply formatting
+    const insertRequests: any[] = []
+    const formatRequests: any[] = []
+    
+    // Track positions for formatting (we insert in reverse order so positions are stable)
+    const positions: Array<{
+      start: number
+      end: number
+      type: string
+      bold?: boolean
+    }> = []
+    
+    // Calculate positions
+    let currentPos = insertIndex
+    for (const block of blocks) {
+      const text = block.text + "\n"
+      positions.push({
+        start: currentPos,
+        end: currentPos + text.length,
+        type: block.type,
+        bold: block.bold,
+      })
+      currentPos += text.length
+    }
+    
+    // Build full text to insert
+    const fullText = blocks.map(b => b.text + "\n").join("")
+    
+    // Insert all text at once
+    insertRequests.push({
+      insertText: {
+        location: { index: insertIndex },
+        text: fullText,
+      },
+    })
+    
+    // Build formatting requests
+    for (const pos of positions) {
+      const namedStyle = 
+        pos.type === "title" ? "TITLE" :
+        pos.type === "h1" ? "HEADING_1" :
+        pos.type === "h2" ? "HEADING_2" :
+        pos.type === "h3" ? "HEADING_3" :
+        pos.type === "h4" ? "HEADING_4" :
+        "NORMAL_TEXT"
+      
+      // Apply paragraph style
+      formatRequests.push({
+        updateParagraphStyle: {
+          range: { startIndex: pos.start, endIndex: pos.end },
+          paragraphStyle: { namedStyleType: namedStyle },
+          fields: "namedStyleType",
+        },
+      })
+      
+      // Apply heading colors
+      if (pos.type === "h1" || pos.type === "h2") {
+        formatRequests.push({
+          updateTextStyle: {
+            range: { startIndex: pos.start, endIndex: pos.end - 1 },
+            textStyle: {
+              foregroundColor: { color: { rgbColor: hexToRgb(COLORS.HEADING_RED) } },
+              bold: true,
+            },
+            fields: "foregroundColor,bold",
+          },
+        })
+      } else if (pos.type === "h3" || pos.type === "h4") {
+        formatRequests.push({
+          updateTextStyle: {
+            range: { startIndex: pos.start, endIndex: pos.end - 1 },
+            textStyle: {
+              foregroundColor: { color: { rgbColor: hexToRgb(COLORS.HEADING_DARK) } },
+              bold: true,
+            },
+            fields: "foregroundColor,bold",
+          },
+        })
+      } else if (pos.type === "bullet") {
+        formatRequests.push({
+          createParagraphBullets: {
+            range: { startIndex: pos.start, endIndex: pos.end },
+            bulletPreset: "BULLET_DISC_CIRCLE_SQUARE",
+          },
+        })
+      } else if (pos.type === "code") {
+        formatRequests.push({
+          updateTextStyle: {
+            range: { startIndex: pos.start, endIndex: pos.end - 1 },
+            textStyle: {
+              weightedFontFamily: { fontFamily: STYLES.fonts.code },
+              fontSize: { magnitude: 10, unit: "PT" },
+              backgroundColor: { color: { rgbColor: hexToRgb("#F5F5F5") } },
+            },
+            fields: "weightedFontFamily,fontSize,backgroundColor",
+          },
+        })
+      } else if (pos.type === "text" && pos.bold) {
+        formatRequests.push({
+          updateTextStyle: {
+            range: { startIndex: pos.start, endIndex: pos.end - 1 },
+            textStyle: { bold: true },
+            fields: "bold",
+          },
+        })
+      }
+    }
+    
+    // Execute insert first, then formatting
+    await docsApi(`/v1/documents/${document_id}:batchUpdate`, {
+      method: "POST",
+      body: JSON.stringify({ requests: insertRequests }),
+    })
+    
+    if (formatRequests.length > 0) {
+      await docsApi(`/v1/documents/${document_id}:batchUpdate`, {
+        method: "POST",
+        body: JSON.stringify({ requests: formatRequests }),
+      })
+    }
+    
+    return `Wrote ${blocks.length} formatted blocks to document`
+  },
+})
+
+export const insert_styled_table = tool({
+  description: `Insert a professionally styled table with dark header and clean formatting.`,
+  args: {
+    document_id: tool.schema.string().describe("The Google Doc ID"),
+    headers: tool.schema.string().describe("Comma-separated header labels (e.g. 'Name,Type,Description')"),
+    rows: tool.schema.string().describe(`JSON array of rows, each row is an array of cell values.
+Example: [["INT64","Number type","Primary key"],["STRING","Text type","Names and labels"]]`),
+  },
+  async execute(args) {
+    const { document_id, headers, rows } = args
+    
+    const headerCells = headers.split(",").map(h => h.trim())
+    const dataRows = JSON.parse(rows) as string[][]
+    const numColumns = headerCells.length
+    const numRows = dataRows.length + 1 // +1 for header
+    
+    // Get current document end
+    const doc = await docsApi(`/v1/documents/${document_id}`)
+    const insertIndex = (doc.body?.content?.slice(-1)[0]?.endIndex || 2) - 1
+    
+    // Create the table
+    await docsApi(`/v1/documents/${document_id}:batchUpdate`, {
+      method: "POST",
+      body: JSON.stringify({
+        requests: [{
+          insertTable: {
+            rows: numRows,
+            columns: numColumns,
+            location: { index: insertIndex },
+          },
+        }],
+      }),
+    })
+    
+    // Re-fetch doc to get table structure
+    const updatedDoc = await docsApi(`/v1/documents/${document_id}`)
+    
+    // Find the table we just inserted
+    let table: any = null
+    for (const element of updatedDoc.body?.content || []) {
+      if (element.table && element.startIndex >= insertIndex) {
+        table = element
+        break
+      }
+    }
+    
+    if (!table) {
+      return "Table created but could not find it for styling"
+    }
+    
+    const textRequests: any[] = []
+    const styleRequests: any[] = []
+    
+    // Combine headers and data rows
+    const allRows = [headerCells, ...dataRows]
+    
+    for (let r = 0; r < numRows; r++) {
+      for (let c = 0; c < numColumns; c++) {
+        const cell = table.table.tableRows[r]?.tableCells[c]
+        const cellValue = allRows[r]?.[c] || ""
+        
+        if (cell && cellValue) {
+          const paragraph = cell.content?.[0]
+          if (paragraph) {
+            textRequests.push({
+              insertText: {
+                location: { index: paragraph.startIndex },
+                text: cellValue,
+              },
+            })
+          }
+        }
+        
+        // Style header row
+        if (r === 0) {
+          styleRequests.push({
+            updateTableCellStyle: {
+              tableRange: {
+                tableCellLocation: {
+                  tableStartLocation: { index: table.startIndex },
+                  rowIndex: r,
+                  columnIndex: c,
+                },
+                rowSpan: 1,
+                columnSpan: 1,
+              },
+              tableCellStyle: {
+                backgroundColor: { color: { rgbColor: hexToRgb(COLORS.TABLE_HEADER) } },
+              },
+              fields: "backgroundColor",
+            },
+          })
+        }
+        // Alternating row colors for data rows
+        else if (r % 2 === 0) {
+          styleRequests.push({
+            updateTableCellStyle: {
+              tableRange: {
+                tableCellLocation: {
+                  tableStartLocation: { index: table.startIndex },
+                  rowIndex: r,
+                  columnIndex: c,
+                },
+                rowSpan: 1,
+                columnSpan: 1,
+              },
+              tableCellStyle: {
+                backgroundColor: { color: { rgbColor: hexToRgb(COLORS.TABLE_ALT_ROW) } },
+              },
+              fields: "backgroundColor",
+            },
+          })
+        }
+      }
+    }
+    
+    // Insert text in reverse order to maintain indices
+    if (textRequests.length > 0) {
+      await docsApi(`/v1/documents/${document_id}:batchUpdate`, {
+        method: "POST",
+        body: JSON.stringify({ requests: textRequests.reverse() }),
+      })
+    }
+    
+    // Apply cell styling
+    if (styleRequests.length > 0) {
+      await docsApi(`/v1/documents/${document_id}:batchUpdate`, {
+        method: "POST",
+        body: JSON.stringify({ requests: styleRequests }),
+      })
+    }
+    
+    // Style header text (white, bold)
+    const refreshedDoc = await docsApi(`/v1/documents/${document_id}`)
+    let refreshedTable: any = null
+    for (const element of refreshedDoc.body?.content || []) {
+      if (element.table && element.startIndex >= insertIndex) {
+        refreshedTable = element
+        break
+      }
+    }
+    
+    if (refreshedTable) {
+      const headerTextStyles: any[] = []
+      for (let c = 0; c < numColumns; c++) {
+        const cell = refreshedTable.table.tableRows[0]?.tableCells[c]
+        if (cell?.content?.[0]) {
+          const start = cell.content[0].startIndex
+          const end = cell.content[0].endIndex - 1
+          if (start < end) {
+            headerTextStyles.push({
+              updateTextStyle: {
+                range: { startIndex: start, endIndex: end },
+                textStyle: {
+                  foregroundColor: { color: { rgbColor: hexToRgb(COLORS.TABLE_HEADER_TEXT) } },
+                  bold: true,
+                },
+                fields: "foregroundColor,bold",
+              },
+            })
+          }
+        }
+      }
+      
+      if (headerTextStyles.length > 0) {
+        await docsApi(`/v1/documents/${document_id}:batchUpdate`, {
+          method: "POST",
+          body: JSON.stringify({ requests: headerTextStyles }),
+        })
+      }
+    }
+    
+    return `Inserted ${numRows}x${numColumns} styled table with headers: ${headers}`
+  },
+})
