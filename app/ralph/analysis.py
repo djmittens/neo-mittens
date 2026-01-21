@@ -1,7 +1,7 @@
 """Rejection pattern analysis for detecting recurring failure patterns."""
 
 from collections import defaultdict
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Dict, List, Optional, Tuple, Union, Set, Mapping
 
 from ralph.models import Issue, Tombstone
 from ralph.utils import gen_id
@@ -26,7 +26,9 @@ REJECTION_THRESHOLD = 3
 PATTERN_THRESHOLD = 2
 
 
-def analyze_rejection_patterns(tombstones: list[Tombstone]) -> dict:
+def analyze_rejection_patterns(
+    tombstones: List[Tombstone],
+) -> Dict[str, Union[Dict[str, List[str]], List[str]]]:
     """Detect recurring failure patterns in rejected tasks.
 
     Args:
@@ -39,12 +41,12 @@ def analyze_rejection_patterns(tombstones: list[Tombstone]) -> dict:
             - repeated_tasks: list of task_ids rejected >= REJECTION_THRESHOLD times
             - common_patterns: list of patterns affecting >= PATTERN_THRESHOLD tasks
     """
-    rejections_by_task: dict[str, list[str]] = defaultdict(list)
+    rejections_by_task: Dict[str, List[str]] = defaultdict(list)
     for tomb in tombstones:
         if tomb.tombstone_type == "reject":
             rejections_by_task[tomb.id].append(tomb.reason)
 
-    error_patterns: dict[str, list[tuple[str, str]]] = defaultdict(list)
+    error_patterns: Dict[str, List[Tuple[str, str]]] = defaultdict(list)
     for tomb in tombstones:
         if tomb.tombstone_type != "reject":
             continue
@@ -54,13 +56,13 @@ def analyze_rejection_patterns(tombstones: list[Tombstone]) -> dict:
                 error_patterns[keyword].append((tomb.id, tomb.reason))
                 break
 
-    repeated_tasks = [
+    repeated_tasks: List[str] = [
         task_id
         for task_id, reasons in rejections_by_task.items()
         if len(reasons) >= REJECTION_THRESHOLD
     ]
 
-    common_patterns = [
+    common_patterns: List[str] = [
         pattern
         for pattern, occurrences in error_patterns.items()
         if len(set(task_id for task_id, _ in occurrences)) >= PATTERN_THRESHOLD
@@ -75,11 +77,13 @@ def analyze_rejection_patterns(tombstones: list[Tombstone]) -> dict:
 
 
 def suggest_issues(
-    patterns: dict,
-    tasks: list | None = None,
-    existing_issues: list[Issue] | None = None,
+    patterns: Dict[
+        str, Union[List[str], Mapping[str, List[Union[str, Tuple[str, str]]]]]
+    ],
+    tasks: Optional[List] = None,
+    existing_issues: Optional[List[Issue]] = None,
     spec: str = "",
-) -> list[Issue]:
+) -> List[Issue]:
     """Generate issue suggestions from detected patterns.
 
     Args:
@@ -91,21 +95,25 @@ def suggest_issues(
     Returns:
         List of suggested Issue objects.
     """
-    new_issues: list[Issue] = []
-    existing_descs = {i.desc.lower() for i in (existing_issues or [])}
+    new_issues: List[Issue] = []
+    existing_descs: Set[str] = {i.desc.lower() for i in (existing_issues or [])}
 
-    rejections_by_task = patterns.get("rejections_by_task", {})
-    error_patterns = patterns.get("error_patterns", {})
+    rejections_by_task: Dict[str, List[str]] = (
+        patterns.get("rejections_by_task", {}) or {}
+    )
+    error_patterns: Dict[str, List[Tuple[str, str]]] = (
+        patterns.get("error_patterns", {}) or {}
+    )
 
-    for task_id in patterns.get("repeated_tasks", []):
-        reasons = rejections_by_task.get(task_id, [])
+    for task_id in patterns.get("repeated_tasks", []) or []:
+        reasons: List[str] = rejections_by_task.get(task_id, [])
         task_name = _find_task_name(task_id, tasks)
 
         issue_key = f"repeated rejection: {task_id}"
         if issue_key in existing_descs:
             continue
 
-        unique_reasons = list(set(reasons))[:3]
+        unique_reasons: List[str] = list(set(reasons))[:3]
         reason_summary = "; ".join(r[:100] for r in unique_reasons)
 
         issue_desc = (
@@ -118,16 +126,18 @@ def suggest_issues(
             Issue(id=gen_id("i"), desc=issue_desc, spec=spec, priority="high")
         )
 
-    for pattern in patterns.get("common_patterns", []):
-        occurrences = error_patterns.get(pattern, [])
-        unique_task_ids = list(set(task_id for task_id, _ in occurrences))
+    for pattern in patterns.get("common_patterns", []) or []:
+        occurrences: List[Tuple[str, str]] = error_patterns.get(pattern, [])
+        unique_task_ids: List[str] = list(set(task_id for task_id, _ in occurrences))
 
         pattern_key = f"common failure pattern: {pattern}"
         if pattern_key in existing_descs:
             continue
 
-        task_names = [_find_task_name(tid, tasks)[:30] for tid in unique_task_ids[:3]]
-        sample_reason = occurrences[0][1][:150] if occurrences else ""
+        task_names: List[str] = [
+            _find_task_name(tid, tasks)[:30] for tid in unique_task_ids[:3]
+        ]
+        sample_reason: str = occurrences[0][1][:150] if occurrences else ""
 
         issue_desc = (
             f"COMMON FAILURE PATTERN: {len(unique_task_ids)} tasks fail with '{pattern}'. "
@@ -143,11 +153,21 @@ def suggest_issues(
     return new_issues
 
 
-def _find_task_name(task_id: str, tasks: list | None) -> str:
-    """Look up task name by ID, returning ID if not found."""
+def _find_task_name(task_id: str, tasks: Optional[List] = None) -> str:
+    """Look up task name by ID, returning ID if not found.
+
+    Args:
+        task_id: Unique identifier of the task.
+        tasks: Optional list of task objects to search.
+
+    Returns:
+        Task name if found, otherwise the original task_id.
+    """
     if not tasks:
         return task_id
+
     for task in tasks:
-        if task.id == task_id:
-            return task.name
+        if getattr(task, "id", None) == task_id:
+            return getattr(task, "name", task_id)
+
     return task_id
