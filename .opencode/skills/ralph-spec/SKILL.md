@@ -429,6 +429,19 @@ The acceptance criteria section is parsed by VERIFY stage - each unchecked item 
 6. **Keep tasks atomic** - Each task should be completable in ONE iteration (< context limit)
 7. **Consider context pressure** - Break large features into smaller specs to avoid DECOMPOSE cycles
 
+## Log Files
+
+Ralph logs are stored in `/tmp/ralph-logs/<repo>/<branch>/<spec>/`.
+
+Example: `/tmp/ralph-logs/neo-mittens/main/my-feature/ralph-20260120_162538-build.log`
+
+Logs are organized by:
+- **repo**: Repository name (e.g., `neo-mittens`)
+- **branch**: Git branch (e.g., `main`, `feature-x`)
+- **spec**: Spec name without `.md` extension
+
+Logs are auto-cleared on system restart.
+
 ## Ralph CLI Commands Reference
 
 ### Planning Commands

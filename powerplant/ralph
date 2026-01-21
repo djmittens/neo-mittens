@@ -2817,6 +2817,7 @@ def cmd_status(config: RalphConfig):
         print(f"  Spec:   {Colors.CYAN}{state.spec}{Colors.NC}")
     else:
         print(f"  Spec:   {Colors.YELLOW}None - run 'ralph plan <spec.md>'{Colors.NC}")
+    print(f"  Logs:   {Colors.DIM}{config.log_dir}{Colors.NC}")
     
     stage_colors = {
         'PLAN': Colors.YELLOW,

@@ -11,6 +11,13 @@ The `next.task` field shows:
 - `kill_reason`: Why it was killed ("timeout" or "context_limit")
 - `kill_log`: Path to the log from the failed iteration
 
+## Log File Location
+
+Ralph logs are stored in `/tmp/ralph-logs/<repo>/<branch>/<spec>/`.
+For example: `/tmp/ralph-logs/neo-mittens/main/my-feature/ralph-20260120_162538-build.log`
+
+Logs are auto-cleared on system restart.
+
 ## Step 2: Review the Failed Iteration Log (if available)
 
 If `kill_log` is provided in the task, review it to understand what went wrong.
