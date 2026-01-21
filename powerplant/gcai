@@ -114,27 +114,8 @@ fi
 COMMIT_MSG_FILE="$(mktemp)"
 trap 'rm -f "$TEMP_MSG" "$COMMIT_MSG_FILE"' EXIT
 
-# Create a wrapper script that prepends AI message then opens real editor
-WRAPPER="$(mktemp)"
-chmod +x "$WRAPPER"
-cat > "$WRAPPER" << 'EDITSCRIPT'
-#!/bin/bash
-MSG_FILE="$1"
-AI_MSG="$GCAI_MSG"
-REAL_EDITOR="${GCAI_EDITOR:-${VISUAL:-${EDITOR:-vi}}}"
+# Write AI message to template file
+printf '%s\n' "$GENERATED_MSG" > "$COMMIT_MSG_FILE"
 
-# Prepend AI message to the file git created
-ORIGINAL="$(cat "$MSG_FILE")"
-printf '%s\n\n%s' "$AI_MSG" "$ORIGINAL" > "$MSG_FILE"
-
-# Open real editor
-exec $REAL_EDITOR "$MSG_FILE"
-EDITSCRIPT
-
-# Export the message and editor for the wrapper
-export GCAI_MSG="$GENERATED_MSG"
-export GCAI_EDITOR="${GIT_EDITOR:-$(git config core.editor)}"
-export GCAI_EDITOR="${GCAI_EDITOR:-${VISUAL:-${EDITOR:-vi}}}"
-
-# Run git commit with our wrapper as editor
-GIT_EDITOR="$WRAPPER" exec git commit ${COMMIT_ARGS[@]+"${COMMIT_ARGS[@]}"} --verbose
+# Run git commit with template and verbose diff
+exec git commit ${COMMIT_ARGS[@]+"${COMMIT_ARGS[@]}"} --verbose --template="$COMMIT_MSG_FILE"
