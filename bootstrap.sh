@@ -104,6 +104,41 @@ ${end}"
   fi
 }
 
+install_pythonpath_block() {
+  local profile_file="$1"
+  local repo_root="$2"
+
+  ensure_dir "$(dirname -- "$profile_file")"
+
+  local begin='# >>> neo-mittens pythonpath >>>'
+  local end='# <<< neo-mittens pythonpath <<<'
+  local block
+  block="${begin}
+if [ -d \"${repo_root}\" ] && [[ :\$PYTHONPATH: != *:${repo_root}:* ]]; then
+  export PYTHONPATH=\"${repo_root}\${PYTHONPATH:+:\$PYTHONPATH}\"
+fi
+${end}"
+
+  if [ -f "$profile_file" ] && grep -Fq "$begin" "$profile_file"; then
+    # Replace existing managed block
+    tmp="$(mktemp)"
+    awk -v b="$begin" -v e="$end" '
+      BEGIN{inb=0}
+      $0==b {inb=1; next}
+      $0==e {inb=0; next}
+      inb==0 {print}
+    ' "$profile_file" >"$tmp"
+    printf "\n%s\n" "$block" >>"$tmp"
+    # Use copy-overwrite to avoid cross-device mv issues
+    cat "$tmp" > "$profile_file"
+    echo "UPDATE: Managed PYTHONPATH block in $profile_file"
+  else
+    # Append new block (file may or may not exist)
+    printf "\n%s\n" "$block" >>"$profile_file"
+    echo "ADD: Managed PYTHONPATH block to $profile_file"
+  fi
+}
+
 # tmux helpers
 ensure_tpm() {
   local tpm_dir="$HOME/.tmux/plugins/tpm"
@@ -299,6 +334,10 @@ append_require_if_missing "$NVIM_DIR/init.lua"
 # 4) Add powerplant to PATH via managed block
 install_path_block "$HOME/.profile" "$SCRIPT_DIR/powerplant"
 install_path_block "$HOME/.zshrc" "$SCRIPT_DIR/powerplant"
+
+# 4b) Add repo root to PYTHONPATH for ralph package imports
+install_pythonpath_block "$HOME/.profile" "$SCRIPT_DIR"
+install_pythonpath_block "$HOME/.zshrc" "$SCRIPT_DIR"
 
 # 5) Disable ohmyzsh auto-title to allow custom tmux pane titles
 disable_omz_auto_title

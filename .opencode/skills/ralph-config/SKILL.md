@@ -25,11 +25,12 @@ mkdir -p ~/.config/ralph
 
 ## Quick Setup
 
-Minimal config (uses defaults for everything else):
+Minimal config (both model and model_build are required):
 
 ```toml
 [default]
-model = "anthropic/claude-sonnet-4"
+model = "ck-gateway/claude-opus-4-5"
+model_build = "ck-gateway/claude-haiku-4-5-20251001"
 ```
 
 ## Full Configuration Reference
@@ -39,10 +40,10 @@ model = "anthropic/claude-sonnet-4"
 # https://ghuntley.com/ralph/
 
 [default]
-# Model to use for AI operations
-# Options: anthropic/claude-sonnet-4, anthropic/claude-opus-4, 
-#          openrouter/anthropic/claude-opus-4, etc.
-model = "anthropic/claude-sonnet-4"
+# Model for reasoning stages (PLAN, VERIFY, etc.)
+model = "ck-gateway/claude-opus-4-5"
+# Fast/cheap model for BUILD stage
+model_build = "ck-gateway/claude-haiku-4-5-20251001"
 
 # Context window settings (tokens)
 context_window = 200000
@@ -80,12 +81,40 @@ log_dir = "/tmp/ralph-logs"
 
 | Option | Default | Description |
 |--------|---------|-------------|
-| `model` | `anthropic/claude-opus-4-5` | AI model identifier |
+| `model` | (required) | AI model for reasoning stages |
+| `model_build` | (required) | Fast/cheap model for BUILD stage |
 
-Common model values:
-- `anthropic/claude-sonnet-4` - Fast, cost-effective
-- `anthropic/claude-opus-4` - Most capable
-- `openrouter/anthropic/claude-opus-4` - Opus via OpenRouter
+**IMPORTANT**: Both `model` and `model_build` are required parameters.
+
+#### CK AI Gateway Models (ck-gateway/)
+
+For Credit Karma internal use, prefix models with `ck-gateway/`:
+
+| Model | Description |
+|-------|-------------|
+| `ck-gateway/claude-opus-4-5` | Opus 4.5 - most capable |
+| `ck-gateway/claude-opus-4-20250514` | Opus 4 |
+| `ck-gateway/claude-sonnet-4-20250514` | Sonnet 4 |
+| `ck-gateway/claude-sonnet-4-5-20250929` | Sonnet 4.5 |
+| `ck-gateway/claude-haiku-4-5-20251001` | Haiku 4.5 - fastest/cheapest |
+
+See https://code.corp.creditkarma.com/ck-private/de_ai-gateway for full model list.
+
+#### Anthropic Direct Models
+
+| Model | Description |
+|-------|-------------|
+| `anthropic/claude-sonnet-4` | Fast, cost-effective |
+| `anthropic/claude-opus-4` | Most capable |
+
+#### OpenRouter Models
+
+| Model | Description |
+|-------|-------------|
+| `openrouter/anthropic/claude-opus-4` | Opus via OpenRouter |
+| `openrouter/anthropic/claude-sonnet-4` | Sonnet via OpenRouter |
+
+Note: OpenRouter requires `OPENROUTER_API_KEY` environment variable.
 
 ### Context Limits
 
@@ -145,24 +174,22 @@ Art style options:
 
 ## Profiles
 
-Set up different configurations for different environments:
+Set up different configurations for different scenarios:
 
 ```toml
 [default]
-model = "anthropic/claude-sonnet-4"
+model = "ck-gateway/claude-opus-4-5"
+model_build = "ck-gateway/claude-haiku-4-5-20251001"
 
-[profiles.work]
-model = "anthropic/claude-opus-4"
-stage_timeout_ms = 600000  # 10 min for complex work
+[profiles.opus]
+# Opus for everything (max quality)
+model = "ck-gateway/claude-opus-4-5"
+model_build = "ck-gateway/claude-opus-4-5"
 
-[profiles.home]
-model = "openrouter/anthropic/claude-opus-4"
-art_style = "braille_full"
-
-[profiles.fast]
-model = "anthropic/claude-sonnet-4"
-stage_timeout_ms = 180000  # 3 min
-context_warn_pct = 60
+[profiles.balanced]
+# Opus + Haiku for BUILD (cost-effective)
+model = "ck-gateway/claude-opus-4-5"
+model_build = "ck-gateway/claude-haiku-4-5-20251001"
 ```
 
 Activate a profile with environment variable:
@@ -185,48 +212,45 @@ RALPH_PROFILE=fast ralph construct my-spec
 
 ## Example Configurations
 
+### CK Gateway Setup (Recommended for CK)
+
+```toml
+[default]
+model = "ck-gateway/claude-opus-4-5"
+model_build = "ck-gateway/claude-haiku-4-5-20251001"
+
+[profiles.opus]
+# Opus for everything
+model = "ck-gateway/claude-opus-4-5"
+model_build = "ck-gateway/claude-opus-4-5"
+
+[profiles.haiku]
+# Opus + Haiku for BUILD
+model = "ck-gateway/claude-opus-4-5"
+model_build = "ck-gateway/claude-haiku-4-5-20251001"
+```
+
 ### Cost-Conscious Development
 
 ```toml
 [default]
-model = "anthropic/claude-sonnet-4"
+model = "ck-gateway/claude-sonnet-4-20250514"
+model_build = "ck-gateway/claude-haiku-4-5-20251001"
 stage_timeout_ms = 180000  # 3 min - fail fast
 max_failures = 2
 context_compact_pct = 75   # Compact earlier
-```
-
-### Complex Enterprise Work
-
-```toml
-[default]
-model = "anthropic/claude-opus-4"
-stage_timeout_ms = 900000  # 15 min for complex tasks
-iteration_timeout_ms = 900000
-context_window = 200000
-max_decompose_depth = 5    # Allow deeper decomposition
 ```
 
 ### CI/Headless Mode
 
 ```toml
 [default]
-model = "anthropic/claude-sonnet-4"
+model = "ck-gateway/claude-opus-4-5"
+model_build = "ck-gateway/claude-haiku-4-5-20251001"
 art_style = "none"
 dashboard_buffer_lines = 500
 log_dir = "/var/log/ralph"
 ```
-
-### OpenRouter Setup
-
-```toml
-[default]
-model = "openrouter/anthropic/claude-opus-4"
-
-[profiles.cheap]
-model = "openrouter/anthropic/claude-sonnet-4"
-```
-
-Note: OpenRouter requires `OPENROUTER_API_KEY` environment variable.
 
 ## Verifying Configuration
 

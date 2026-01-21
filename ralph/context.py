@@ -12,7 +12,24 @@ KILL_PCT = 95
 
 @dataclass
 class Metrics:
-    """In-memory metrics for the current session."""
+    """In-memory metrics for the current session.
+
+    Tracks cumulative costs, token usage, and iteration outcomes during a
+    Ralph construct session.
+
+    Attributes:
+        total_cost: Total cost in dollars for the session.
+        total_iterations: Number of iterations completed.
+        total_tokens_in: Total input tokens consumed.
+        total_tokens_out: Total output tokens generated.
+        failures: Number of failed iterations.
+        successes: Number of successful iterations.
+        kills_timeout: Number of iterations killed due to timeout.
+        kills_context: Number of iterations killed due to context limit.
+        started_at: ISO timestamp when session started.
+        last_kill_reason: Reason for the last kill ("timeout" or "context_limit").
+        last_kill_activity: What the agent was doing when killed.
+    """
 
     total_cost: float = 0.0
     total_iterations: int = 0
@@ -23,24 +40,45 @@ class Metrics:
     kills_timeout: int = 0
     kills_context: int = 0
     started_at: Optional[str] = None
-    last_kill_reason: str = ""  # "timeout" or "context_limit"
-    last_kill_activity: str = ""  # What agent was doing when killed
+    last_kill_reason: str = ""
+    last_kill_activity: str = ""
 
 
 @dataclass
 class IterationKillInfo:
-    """Information about why an iteration was killed."""
+    """Information about why an iteration was killed.
 
-    reason: str  # "timeout", "context_limit", "compaction_failed", or "none"
+    When an iteration is terminated (due to timeout, context limit, or
+    compaction failure), this class captures the relevant details for
+    diagnosing the issue and informing the next iteration.
+
+    Attributes:
+        reason: Kill reason ("timeout", "context_limit", "compaction_failed", or "none").
+        task_name: Name of the task being executed when killed.
+        tokens_used: Number of tokens consumed before kill.
+        context_limit: Maximum context window size in tokens.
+        timeout_seconds: Timeout threshold in seconds.
+        elapsed_seconds: Actual elapsed time before kill.
+        last_activity: Description of what the agent was doing when killed.
+    """
+
+    reason: str
     task_name: Optional[str] = None
     tokens_used: int = 0
     context_limit: int = 0
     timeout_seconds: int = 0
     elapsed_seconds: int = 0
-    last_activity: Optional[str] = None  # What the agent was doing when killed
+    last_activity: Optional[str] = None
 
     def to_prompt_injection(self) -> str:
-        """Generate prompt text to inject into the next iteration."""
+        """Generate prompt text to inject into the next iteration.
+
+        Creates a formatted message explaining why the previous iteration
+        was killed and providing guidance for the next iteration.
+
+        Returns:
+            Formatted prompt text with kill reason and required actions.
+        """
         if self.reason == "none":
             return ""
 
@@ -118,18 +156,47 @@ class IterationKillInfo:
 
 @dataclass
 class ToolSummaries:
-    """Summarized tool activity from conversation."""
+    """Summarized tool activity from conversation.
 
-    files_read: dict  # path -> summary of content
-    files_edited: list  # paths that were edited
-    searches_performed: list  # list of search summaries
-    tests_run: list  # test execution summaries
-    subagents_spawned: list  # task summaries
+    Captures a summary of the tool usage during an iteration for context
+    compaction. This allows resuming work with knowledge of what has been
+    explored and modified.
+
+    Attributes:
+        files_read: Mapping of file paths to content summaries.
+        files_edited: List of file paths that were modified.
+        searches_performed: List of search query summaries.
+        tests_run: List of test execution summaries.
+        subagents_spawned: List of subagent task descriptions.
+    """
+
+    files_read: dict
+    files_edited: list
+    searches_performed: list
+    tests_run: list
+    subagents_spawned: list
 
 
 @dataclass
 class CompactedContext:
-    """Compacted context for resuming execution after context pressure."""
+    """Compacted context for resuming execution after context pressure.
+
+    When an iteration approaches the context limit, the context is compacted
+    into this structure. It preserves the essential information needed to
+    resume work without the full conversation history.
+
+    Attributes:
+        task_name: Name of the current task.
+        task_notes: Implementation notes for the task.
+        task_accept: Acceptance criteria for the task.
+        progress_summary: Summary of work completed so far.
+        uncommitted_changes: Git diff of uncommitted changes.
+        key_files: List of important file paths for this task.
+        blockers: List of blocking issues discovered.
+        next_step: Description of what to do next.
+        key_decisions: List of decisions made during execution.
+        tool_summaries: Optional summarized tool activity.
+    """
 
     task_name: str
     task_notes: Optional[str]
@@ -143,7 +210,14 @@ class CompactedContext:
     tool_summaries: Optional[ToolSummaries] = None
 
     def to_prompt(self) -> str:
-        """Generate the compacted context prompt for resumption."""
+        """Generate the compacted context prompt for resumption.
+
+        Creates a formatted prompt that summarizes the work done so far,
+        key files and decisions, and provides guidance for continuing.
+
+        Returns:
+            Formatted prompt text for resuming from compacted context.
+        """
         lines = [
             "=== COMPACTED CONTEXT ===",
             "",
