@@ -7476,6 +7476,7 @@ def cmd_task(config: RalphConfig, action: str, desc: Optional[str] = None, arg3:
         
         # Try parsing as JSON for structured task, otherwise treat as simple name
         custom_id = None
+        research_data = None
         try:
             if desc.startswith('{'):
                 d = json.loads(desc)
@@ -7487,6 +7488,7 @@ def cmd_task(config: RalphConfig, action: str, desc: Optional[str] = None, arg3:
                 parent = d.get("parent")  # Parent task ID for decomposition
                 created_from = d.get("created_from")  # Issue ID for investigate
                 custom_id = d.get("id")  # Optional custom task ID
+                research_data = d.get("research")  # Structured research findings
             else:
                 name = desc
                 notes = None
@@ -7578,6 +7580,12 @@ def cmd_task(config: RalphConfig, action: str, desc: Optional[str] = None, arg3:
             if source_issue and source_issue.priority:
                 priority = source_issue.priority
             
+        # Parse research data if provided
+        task_research = None
+        if research_data and isinstance(research_data, dict):
+            from ralph.models import TaskResearch
+            task_research = TaskResearch.from_dict(research_data)
+        
         task = Task(
             id=task_id, 
             name=name, 

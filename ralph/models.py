@@ -6,6 +6,70 @@ from typing import List, Optional, Dict, Union, Any
 
 
 @dataclass
+class TaskResearch:
+    """Research findings captured during PLAN/INVESTIGATE/DECOMPOSE stages.
+
+    Preserves structured research data that informed task creation, enabling
+    the BUILD stage to execute without re-researching the codebase.
+
+    Attributes:
+        files_analyzed: List of files examined with optional line ranges (e.g., 'src/foo.py:100-200').
+        patterns_found: Description of code patterns discovered.
+        imports_needed: List of imports required for the task.
+        spec_section: Which section of the spec this task implements.
+        root_cause_location: For issue-derived tasks, where the bug is (e.g., 'file.py:150').
+        fix_approach: Brief description of the fix strategy.
+    """
+
+    files_analyzed: Optional[List[str]] = None
+    patterns_found: Optional[str] = None
+    imports_needed: Optional[List[str]] = None
+    spec_section: Optional[str] = None
+    root_cause_location: Optional[str] = None
+    fix_approach: Optional[str] = None
+
+    def to_dict(self) -> Dict[str, Any]:
+        """Convert research to a dictionary for JSONL serialization.
+
+        Returns:
+            Dictionary with research data, omitting None/empty optional fields.
+        """
+        d: Dict[str, Any] = {}
+        if self.files_analyzed:
+            d["files_analyzed"] = self.files_analyzed
+        if self.patterns_found:
+            d["patterns_found"] = self.patterns_found
+        if self.imports_needed:
+            d["imports_needed"] = self.imports_needed
+        if self.spec_section:
+            d["spec_section"] = self.spec_section
+        if self.root_cause_location:
+            d["root_cause_location"] = self.root_cause_location
+        if self.fix_approach:
+            d["fix_approach"] = self.fix_approach
+        return d
+
+    @classmethod
+    def from_dict(cls, d: Dict[str, Any]) -> "TaskResearch":
+        """Create a TaskResearch from a dictionary.
+
+        Args:
+            d: Dictionary with research data (from JSONL parsing).
+
+        Returns:
+            A TaskResearch instance.
+        """
+        return cls(
+            files_analyzed=d.get("files_analyzed"),
+            patterns_found=d.get("patterns_found"),
+            imports_needed=d.get("imports_needed"),
+            spec_section=d.get("spec_section"),
+            root_cause_location=d.get("root_cause_location"),
+            fix_approach=d.get("fix_approach"),
+        )
+
+
+@dataclass
 class Task:
     """A task in the Ralph plan.
 
@@ -32,6 +96,7 @@ class Task:
         supersedes: Task ID this replaces (when rejection leads to new approach).
         decompose_depth: How many times this task's lineage has been decomposed (max 3).
         timeout_ms: Per-task timeout override (None = use stage default).
+        research: Structured research findings from PLAN/INVESTIGATE/DECOMPOSE stages.
     """
 
     id: str
@@ -52,14 +117,15 @@ class Task:
     supersedes: Optional[str] = None
     decompose_depth: int = 0
     timeout_ms: Optional[int] = None
+    research: Optional[TaskResearch] = None
 
-    def to_dict(self) -> Dict[str, Union[str, List[str], bool, int, None]]:
+    def to_dict(self) -> Dict[str, Any]:
         """Convert task to a dictionary for JSONL serialization.
 
         Returns:
             Dictionary with task data, omitting None/empty optional fields.
         """
-        d: Dict[str, Union[str, List[str], bool, int, None]] = {
+        d: Dict[str, Any] = {
             "t": "task",
             "id": self.id,
             "spec": self.spec,
@@ -94,6 +160,10 @@ class Task:
             d["decompose_depth"] = self.decompose_depth
         if self.timeout_ms is not None:
             d["timeout_ms"] = self.timeout_ms
+        if self.research:
+            research_dict = self.research.to_dict()
+            if research_dict:  # Only include if non-empty
+                d["research"] = research_dict
         return d
 
     def to_jsonl(self) -> str:
@@ -134,6 +204,9 @@ class Task:
             supersedes=d.get("supersedes"),
             decompose_depth=d.get("decompose_depth", 0),
             timeout_ms=d.get("timeout_ms"),
+            research=TaskResearch.from_dict(d["research"])
+            if d.get("research")
+            else None,
         )
 
     @classmethod

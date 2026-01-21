@@ -14,56 +14,105 @@ from ralph.state import RalphState, save_state
 from ralph.utils import Colors
 
 
-DEFAULT_PROMPT_PLAN = """## Target Spec: {{SPEC_FILE}}
+DEFAULT_PROMPT_PLAN = """# PLAN Stage: Gap Analysis for {{SPEC_FILE}}
+
+## Step 1: Understand Current State
 
 1. Run `ralph query` to see current state
 2. Read the spec file: `ralph/specs/{{SPEC_FILE}}`
 
-## CRITICAL: Use Subagents for Research
+## Step 2: Research with Subagents
 
 Your context window is LIMITED. Do NOT read many files yourself.
 
-**Launch subagents in parallel to research different aspects:**
+**Launch subagents in parallel to research different aspects. Each subagent MUST return structured findings:**
 
 ```
-Task: "Research how [aspect] is currently implemented. Find relevant files, understand the patterns used, and report back what exists and what's missing for [spec requirement]"
+Task: "Research [requirement] for spec {{SPEC_FILE}}
+
+Analyze the codebase and return a JSON object:
+{
+  \\"requirement\\": \\"<spec requirement being researched>\\",
+  \\"current_state\\": \\"<what exists now - implemented/partial/missing>\\",
+  \\"files_to_modify\\": [
+    {\\"path\\": \\"src/foo.py\\", \\"lines\\": \\"100-150\\", \\"what\\": \\"extract X function\\", \\"how\\": \\"move to new module Y\\"}
+  ],
+  \\"files_to_create\\": [
+    {\\"path\\": \\"src/bar.py\\", \\"template\\": \\"similar to src/existing.py\\", \\"purpose\\": \\"new module for Z\\"}
+  ],
+  \\"imports_needed\\": [\\"from X import Y\\", \\"from Z import W\\"],
+  \\"dependencies\\": {
+    \\"internal\\": [\\"requires module A to exist first\\"],
+    \\"external\\": [\\"needs package X installed\\"]
+  },
+  \\"patterns_to_follow\\": \\"<reference similar existing code>\\",
+  \\"spec_section\\": \\"<which section of spec defines this requirement>\\",
+  \\"risks\\": [\\"could break if X\\", \\"depends on Y being complete\\"],
+  \\"verification\\": \\"<how to verify this works: specific command + expected output>\\"
+}"
 ```
 
 Launch multiple Task calls in a single message to parallelize research.
 
-## Task: Gap Analysis for {{SPEC_FILE}}
+## Step 3: Create Tasks from Research
 
-Compare the spec against the CURRENT codebase and generate a task list:
+For each gap identified, create a task that **captures the research findings**:
 
-1. Use subagents to study the spec and relevant source code thoroughly
-2. For each requirement in the spec, check if it's already implemented
-3. Create tasks ONLY for what's missing or broken
-4. DO NOT implement anything - planning only
+```
+ralph task add \'{"name": "Short task name", "notes": "<DETAILED>", "accept": "<MEASURABLE>", "deps": ["t-xxxx"], "research": {"files_analyzed": ["path:lines"], "spec_section": "Section"}}\'
+```
+
+## Task Field Requirements
+
+### `notes` (required) - MUST INCLUDE ALL OF:
+
+1. **Source locations**: Exact file paths with line numbers (e.g., "Source: src/foo.py lines 100-150")
+2. **What to do**: Specific actions with targets
+3. **How to do it**: Implementation approach or pattern to follow
+4. **Imports/Dependencies**: What's needed
+5. **Spec reference**: Which spec section
+6. **Risks/Prerequisites**: What could go wrong
+
+**Notes Template:**
+```
+Source: <file> lines <N-M>. <What to extract/modify>. 
+Imports needed: <list>. Pattern: follow <similar code>. 
+Spec ref: <section>. Prerequisites: <deps>. 
+Risk: <what to watch for>.
+```
+
+### `accept` (required) - MUST BE:
+
+1. **Specific**: Name exact files, commands, outputs
+2. **Measurable**: Has concrete pass/fail condition
+3. **Executable**: Can run command and check result
+
+**Good examples:**
+- `test -f ralph/tui/fallback.py && python3 -c "from ralph.tui.fallback import X" exits 0`
+- `pytest ralph/tests/unit/test_parser.py passes`
+- `grep -c 'pattern' file.py returns 1`
+
+**Bad examples (WILL BE REJECTED):**
+- "works correctly" - not measurable
+- "tests pass" - which tests?
+
+### `research` (optional but recommended)
+
+Structured research findings:
+```json
+{"files_analyzed": ["file:lines"], "patterns_found": "...", "spec_section": "..."}
+```
+
+## Validation
+
+Tasks are validated. REJECTED if:
+- Notes < 50 chars or missing file paths
+- Modification tasks without line numbers or function names
+- Acceptance criteria is vague ("works correctly", "is implemented")
 
 ## Output
 
-For each task identified, run:
-```
-ralph task add \'{"name": "Short task name", "notes": "Implementation details", "accept": "How to verify", "deps": ["t-xxxx"]}\'
-```
-
-Task fields:
-- `name` (required): Short description of what to do (e.g., "Add unit tests for parser")
-- `notes` (optional): Implementation context, hints, relevant files
-- `accept` (optional): Acceptance criteria / test plan (e.g., "pytest tests/test_parser.py passes")
-- `deps` (optional): List of task IDs this task depends on
-
-The command returns the new task ID (e.g., "Task added: t-1a2b - ..."). Use this ID when other tasks depend on it.
-
-Rules:
-- Each task should be completable in ONE iteration
-- Add tasks in dependency order - add prerequisite tasks first so you have their IDs
-- Be specific - "Add X to Y" not "Improve Z"
-- Tasks are for {{SPEC_FILE}} only
-- Include `accept` criteria when testable
-- Use `deps` when a task requires another task to be done first
-
-When done adding tasks, output:
+When done:
 ```
 [RALPH] PLAN_COMPLETE: Added N tasks for {{SPEC_FILE}}
 ```
@@ -282,109 +331,91 @@ Otherwise:
 
 DEFAULT_PROMPT_INVESTIGATE = """# INVESTIGATE Stage
 
-Issues were discovered during build. Research and resolve ALL of them in parallel.
+Issues were discovered during build or verification. Research and resolve ALL of them in parallel.
 
 ## Step 1: Get All Issues
 
 Run `ralph query issues` to see all pending issues.
 
-## Step 2: Parallel Investigation
+## Step 2: Parallel Investigation with Structured Output
 
-Use the Task tool to investigate ALL issues in parallel. Launch one subagent per issue:
+Use the Task tool to investigate ALL issues in parallel. Each subagent MUST return structured findings:
 
 ```
-For each issue, launch a Task with prompt:
-"Investigate this issue: <issue description>
-Issue priority: <issue priority or 'medium' if not set>
+Task: "Investigate this issue: <issue description>
+Issue ID: <id>
+Issue priority: <priority or 'medium'>
 
-1. Read relevant code to understand the problem
-2. Determine root cause
-3. Decide resolution:
-   - If fix is non-trivial: describe the fix task needed
-   - If fix is trivial: describe the simple fix
-   - If out of scope: explain why
-
-Return a JSON object:
+Analyze the codebase and return a JSON object:
 {
   \\"issue_id\\": \\"<id>\\",
-  \\"root_cause\\": \\"<what you found>\\",
+  \\"root_cause\\": \\"<specific file:line reference>\\",
   \\"resolution\\": \\"task\\" | \\"trivial\\" | \\"out_of_scope\\",
-  \\"task\\": {  // only if resolution is \\"task\\"
-    \\"name\\": \\"<fix description>\\",
-    \\"notes\\": \\"<root cause and approach>\\",
-    \\"accept\\": \\"<how to verify>\\",
-    \\"priority\\": \\"<inherit from issue priority above>\\"
-  },
-  \\"trivial_fix\\": \\"<description>\\"  // only if resolution is \\"trivial\\"
-}
-"
+  \\"task\\": {
+    \\"name\\": \\"<specific fix>\\",
+    \\"notes\\": \\"Root cause: <file:line>. Fix: <approach>. Imports: <needed>. Risk: <side effects>.\\",
+    \\"accept\\": \\"<measurable command + expected result>\\",
+    \\"priority\\": \\"<from issue>\\",
+    \\"research\\": {\\"files_analyzed\\": [\\"path:lines\\"], \\"root_cause_location\\": \\"file:line\\"}
+  }
+}"
 ```
 
-## Step 3: Collect Results and Apply
+## Step 3: Create Tasks with Full Context
 
-After all subagents complete:
+After subagents complete, create tasks preserving research:
 
-1. Add all tasks in batch (include `created_from` to link back to issue, and `priority` from originating issue):
 ```
-ralph task add \'{"name": "...", "notes": "...", "accept": "...", "created_from": "i-xxxx", "priority": "high|medium|low"}\'
-ralph task add \'{"name": "...", "notes": "...", "accept": "...", "created_from": "i-yyyy", "priority": "high|medium|low"}\'
-...
+ralph task add \'{"name": "Fix: <desc>", "notes": "Root cause: <file:line>. Fix: <approach>. Pattern: <similar code>. Risk: <effects>.", "accept": "<measurable>", "created_from": "<issue-id>", "priority": "<from issue>", "research": {"files_analyzed": ["path:lines"], "root_cause_location": "file:line"}}\'
 ```
 
-2. Clear all issues in one command:
+### Task Notes Template for Issues
+
+```
+Root cause: <file:line - specific problem>. 
+Current behavior: <what happens>. Expected: <what should happen>. 
+Fix approach: <how to fix>. Similar pattern: <existing code ref>. 
+Imports needed: <any>. Risk: <side effects>.
+```
+
+## Step 4: Clear Issues
+
 ```
 ralph issue done-all
 ```
 
-Or if only clearing specific issues:
-```
-ralph issue done-ids i-abc1 i-def2 i-ghi3
-```
-
-## Step 4: Report Summary
+## Step 5: Report
 
 ```
 [RALPH] === INVESTIGATE COMPLETE ===
 [RALPH] Processed: N issues
-[RALPH] Tasks created: X
-[RALPH] Trivial fixes: Y
-[RALPH] Out of scope: Z
+[RALPH] Tasks created: X (with full context)
 ```
 
 ## Handling Auto-Generated Pattern Issues
 
-Issues starting with "REPEATED REJECTION" or "COMMON FAILURE PATTERN" are auto-generated from rejection analysis.
-These require special handling:
+**REPEATED REJECTION issues:** Same task failed 3+ times
+- Create HIGH PRIORITY blocking task addressing root cause
+- Notes MUST include: which task fails, rejection pattern, how new task unblocks it
 
-**For REPEATED REJECTION issues:**
-1. The same task has failed 3+ times with similar errors
-2. Read the spec and task to understand what's expected
-3. Compare with rejection reasons to find the gap
-4. Usually indicates: missing prerequisite, wrong approach, or spec ambiguity
-5. Create a HIGH PRIORITY blocking task that addresses the root cause
-6. Consider if the failing task's `deps` should include the new task
+**COMMON FAILURE PATTERN issues:** Multiple tasks fail same way
+- Create single HIGH PRIORITY task fixing root cause
+- Notes MUST include: error pattern, affected tasks, fix approach
 
-**For COMMON FAILURE PATTERN issues:**
-1. Multiple different tasks fail with the same error type
-2. This strongly indicates a missing prerequisite that all tasks need
-3. Read the spec section about the failing functionality
-4. The error message tells you what's missing (e.g., "argument count mismatch" = API changed)
-5. Create a single HIGH PRIORITY task to fix the root cause
-6. Mark existing failing tasks as depending on this new task using `ralph task add \'{"deps": [...]}\'`
+## Validation
 
-**Example:**
-If multiple tasks fail with "grep returns 0, expected 1" and they all involve `aio/then`, likely:
-- The API wasn't changed to return handles yet
-- A prerequisite C implementation task is missing
-- Create: `ralph task add \'{"name": "Refactor X to return handle", "priority": "high", "notes": "..."}\'`
+Tasks from issues are validated. REJECTED if:
+- Notes < 50 chars or missing root cause location
+- Acceptance criteria is vague
+- Missing file:line references
 
-## IMPORTANT
+## Rules
 
-- Launch ALL investigations in parallel using multiple Task tool calls in a single message
-- Wait for all results before applying any changes
-- Do NOT make code changes during investigation - only create tasks
-- Use `ralph issue done-all` to clear all issues at once
-- EXIT after all issues are resolved
+- Launch ALL investigations in parallel
+- Preserve research in notes with file:line references
+- Measurable acceptance for every task
+- Use `created_from` to link to source issue
+- EXIT after all issues resolved
 """
 
 DEFAULT_PROMPT_DECOMPOSE = """# DECOMPOSE Stage
@@ -397,94 +428,99 @@ You must break it down into smaller subtasks.
 Run `ralph query` to see the task that needs decomposition.
 The `next.task` field shows:
 - `name`: The task that failed
+- `notes`: Original implementation guidance
 - `kill_reason`: Why it was killed ("timeout" or "context_limit")
 - `kill_log`: Path to the log from the failed iteration
 
-## Step 2: Review the Failed Iteration Log (if available)
+## Step 2: Review the Failed Iteration Log
 
-If `kill_log` is provided in the task, review it to understand what went wrong.
-
-**CRITICAL**: The log file may be HUGE (it killed the previous iteration's context!). 
-NEVER read the entire file. Always use head/tail:
+**CRITICAL**: Log may be HUGE. NEVER read entire file:
 
 ```bash
-# First check the size
 wc -l <kill_log_path>
-
-# Read ONLY the header (first 50 lines) - shows what task started
 head -50 <kill_log_path>
-
-# Read ONLY the tail (last 100 lines) - shows where it stopped  
 tail -100 <kill_log_path>
-
-# If you need to search for specific content
-grep -n -E "error|Error|ERROR|failed|FAILED" <kill_log_path> | head -20
 ```
 
-From this limited sample, determine:
-- What work was started but not completed
-- Where the iteration got stuck or ran out of context
-- Which files were being modified
-- Any partial progress that was made
-- **What output flooded the context** (e.g., sanitizer output, verbose test logs)
-  - This is important! Subtasks may need to suppress or redirect verbose output
+Determine: what was completed, what caused context explosion, partial progress.
 
-If no `kill_log` is provided, skip this step and proceed to analyze the task based on its description.
+## Step 3: Research the Breakdown
 
-## Step 3: Analyze the Task
-
-Use subagents to understand what the task requires:
+Use subagent to analyze:
 
 ```
-Task: "Analyze what's needed to implement: [task name]
+Task: "Analyze how to decompose: [task name]
+Original notes: [task notes]
 
-Research the codebase and report:
-1. Which files need to be modified
-2. What are the distinct pieces of work
-3. What order should they be done in
-4. Any dependencies between pieces"
+Return JSON:
+{
+  \\"remaining_work\\": [
+    {\\"subtask\\": \\"<specific piece>\\", \\"files\\": [{\\"path\\": \\"file.py\\", \\"lines\\": \\"100-150\\"}], \\"effort\\": \\"small|medium\\"}
+  ],
+  \\"context_risks\\": \\"<what caused explosion>\\",
+  \\"mitigation\\": \\"<how subtasks avoid it>\\"
+}"
 ```
 
-## Step 4: Create Subtasks
+## Step 4: Create Subtasks with Full Context
 
-Break the original task into 2-5 smaller tasks that:
-- Can each be completed in ONE iteration
-- Have clear, specific scope
-- Together accomplish the original task
-- Account for any partial progress from the failed iteration
+Each subtask MUST include:
 
-For each subtask, **include `parent` to link back to the original task**:
+1. **Source locations**: Exact file paths with line numbers
+2. **What to do**: Specific bounded action
+3. **How to do it**: Implementation approach
+4. **Context from parent**: What was learned
+5. **Risk mitigation**: How to avoid re-kill
+
+**Template:**
 ```
-ralph task add \'{"name": "Specific subtask", "notes": "What to do", "accept": "How to verify", "parent": "<original-task-id>"}\'
+ralph task add \'{"name": "Specific subtask", "notes": "Source: <file> lines <N-M>. <Action>. Imports: <list>. Context from parent: <findings>. Risk mitigation: <avoid context explosion by...>", "accept": "<measurable>", "parent": "<task-id>"}\'
 ```
 
-Use `deps` to specify order if needed.
-
-## Step 5: Remove the Original Task
-
-After adding all subtasks, delete the original oversized task:
+**Example:**
+```json
+{
+  "name": "Create fallback.py with DashboardState dataclass",
+  "notes": "Source: powerplant/ralph lines 4022-4045 (DashboardState only). Create ralph/tui/fallback.py with just dataclass. Imports: dataclass, field, Optional, deque. Risk mitigation: Don't extract full class yet - just dataclass.",
+  "accept": "python3 -c 'from ralph.tui.fallback import DashboardState' exits 0",
+  "parent": "t-original"
+}
 ```
-ralph task delete <task-id>
+
+## Step 5: Delete Original Task
+
+```
+ralph task delete <original-task-id>
 ```
 
 ## Step 6: Report
 
 ```
 [RALPH] === DECOMPOSE COMPLETE ===
-[RALPH] Original: <original task name>
+[RALPH] Original: <task name>
 [RALPH] Kill reason: <timeout|context_limit>
+[RALPH] Context risk: <what caused explosion>
+[RALPH] Mitigation: <how subtasks avoid it>
 [RALPH] Split into: N subtasks
 ```
 
-Then EXIT to let the build loop process the new subtasks.
+## Validation
+
+Subtasks are validated. REJECTED if:
+- Notes < 50 chars or missing source line numbers
+- Modification tasks without specific locations
+- Acceptance criteria is vague
 
 ## Rules
 
-- ALWAYS read the log file first to understand what happened
-- Each subtask should be completable in ONE iteration (< 100k tokens)
-- Be specific: "Add X to file Y" not "Implement feature Z"
-- If a subtask is still too big, it will be killed and decomposed again
-- DO NOT try to implement anything - just create the task breakdown
+1. ALWAYS review kill log first (head/tail only!)
+2. Each subtask < 100k tokens - completable in ONE iteration
+3. Preserve context from parent task notes
+4. Include line numbers for every subtask
+5. Measurable acceptance criteria
+6. Include risk mitigation for each subtask
+7. Maximum decomposition depth: 3 levels
+8. DO NOT implement - just create task breakdown
 """
 
 EXAMPLE_SPEC = """# Example Specification
