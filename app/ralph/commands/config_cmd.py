@@ -21,5 +21,5 @@ def cmd_config() -> int:
     print(f"  Context window: {gcfg.context_window:,}")
     print(f"  Stage timeout: {gcfg.stage_timeout_ms:,}ms")
     print(f"  Max failures: {gcfg.max_failures}")
-    print(f"  Profile: {gcfg._profile_name}")
+    print(f"  Profile: {gcfg.profile}")
     return 0
