@@ -1982,6 +1982,149 @@ def validate_state(state: RalphState, config: RalphConfig = None) -> dict:
     }
 
 
+def validate_acceptance_criteria(accept: str) -> tuple[bool, Optional[str]]:
+    """Validate that acceptance criteria is measurable and specific.
+    
+    Returns:
+        Tuple of (is_valid, error_message)
+        - is_valid: True if criteria passes validation
+        - error_message: Description of why validation failed, or None if valid
+    
+    Acceptance criteria must be:
+    - Specific (not vague phrases like "works correctly")
+    - Measurable (has concrete pass/fail conditions)
+    - Actionable (can be verified by running a command or checking output)
+    
+    Good examples:
+    - "pytest tests/test_parser.py passes"
+    - "`ralph query` returns JSON with `tasks` array"
+    - "Build exits with code 0 and produces build/output.bin"
+    - "grep -c 'ERROR' output.log returns 0"
+    
+    Bad examples:
+    - "works correctly"
+    - "tests pass" (which tests?)
+    - "is implemented"
+    - "errors are handled"
+    """
+    if not accept:
+        return False, "Acceptance criteria is required. Specify how to verify the task is done."
+    
+    accept_lower = accept.lower().strip()
+    
+    VAGUE_PHRASES = [
+        'works correctly',
+        'works properly', 
+        'works as expected',
+        'works well',
+        'is correct',
+        'is proper',
+        'is working',
+        'is implemented',
+        'is complete',
+        'is done',
+        'is finished',
+        'is fixed',
+        'is resolved',
+        'is handled',
+        'is supported',
+        'functions correctly',
+        'functions properly',
+        'behaves correctly',
+        'behaves properly',
+        'operates correctly',
+        'runs correctly',
+        'executes correctly',
+        'performs correctly',
+        'performs well',
+        'performs as expected',
+        'no errors',
+        'no issues',
+        'no problems',
+        'no bugs',
+        'errors handled',
+        'errors are handled',
+        'handles errors',
+        'error handling works',
+        'properly handles',
+        'correctly handles',
+        'should work',
+        'should pass',
+        'should be correct',
+        'should be working',
+        'all good',
+        'looks good',
+        'seems to work',
+        'appears to work',
+    ]
+    
+    for phrase in VAGUE_PHRASES:
+        if phrase in accept_lower:
+            return False, f"Acceptance criteria is too vague: '{phrase}'. Be specific about what to verify (e.g., command to run, expected output, exit code)."
+    
+    VAGUE_WORD_BOUNDARY_PATTERNS = [
+        (r'\bworks\b', "' works'"),  # "X works" without qualifier
+    ]
+    import re
+    for pattern, label in VAGUE_WORD_BOUNDARY_PATTERNS:
+        if re.search(pattern, accept_lower):
+            context = accept_lower
+            if ' works' in context:
+                before_works = context.split(' works')[0].split()[-1] if context.split(' works')[0].split() else ''
+                after_works = context.split(' works')[1].split()[0] if len(context.split(' works')) > 1 and context.split(' works')[1].split() else ''
+                if after_works not in ('with', 'by', 'when', 'after', 'before', 'if', 'only'):
+                    return False, f"Acceptance criteria contains vague '{before_works} works'. Specify HOW to verify it works (e.g., 'X returns Y', 'X produces output Z', 'running X shows Y')."
+    
+    STANDALONE_VAGUE = [
+        'tests pass',
+        'test passes',
+        'all tests pass',
+        'unit tests pass',
+        'the tests pass',
+    ]
+    for phrase in STANDALONE_VAGUE:
+        if accept_lower == phrase or accept_lower == phrase + '.':
+            return False, f"'{phrase}' is too vague. Specify WHICH tests (e.g., 'pytest tests/test_foo.py passes' or 'make test-unit exits with code 0')."
+    
+    MIN_LENGTH = 15
+    if len(accept.strip()) < MIN_LENGTH:
+        return False, f"Acceptance criteria too short ({len(accept.strip())} chars). Be specific about verification steps (minimum {MIN_LENGTH} chars)."
+    
+    MEASURABLE_INDICATORS = [
+        'pass', 'passes', 'passed',
+        'fail', 'fails', 'failed',
+        'return', 'returns', 'returned',
+        'output', 'outputs',
+        'print', 'prints',
+        'exit', 'exits',
+        'code', 'status',
+        'contain', 'contains',
+        'include', 'includes',
+        'match', 'matches',
+        'equal', 'equals',
+        'produce', 'produces',
+        'create', 'creates',
+        'generate', 'generates',
+        'show', 'shows',
+        'display', 'displays',
+        'count', 'counts',
+        'exist', 'exists',
+        '==', '!=', '>', '<', '>=', '<=',
+        'grep', 'find', 'test', 'check',
+        'assert', 'verify', 'confirm',
+        'build', 'compile', 'run',
+        'pytest', 'jest', 'mocha', 'cargo test', 'go test', 'npm test', 'make test',
+        '`',  # backticks often indicate commands
+        'should',  # "X should Y" patterns
+    ]
+    
+    has_measurable = any(indicator in accept_lower for indicator in MEASURABLE_INDICATORS)
+    if not has_measurable:
+        return False, "Acceptance criteria lacks measurable verification. Include: a command to run, expected output/exit code, or specific condition to check."
+    
+    return True, None
+
+
 def get_historical_task_ids(config: RalphConfig) -> set:
     """Get all task IDs that have ever existed in plan.jsonl from git history.
     
@@ -2519,8 +2662,23 @@ ralph task add '{"name": "Short task name", "notes": "Implementation details", "
 Task fields:
 - `name` (required): Short description of what to do (e.g., "Add unit tests for parser")
 - `notes` (required): Implementation details - what files to modify, what approach to take, relevant context
-- `accept` (required): Acceptance criteria - how to verify the task is done (e.g., "pytest tests/test_parser.py passes")
+- `accept` (required): **MEASURABLE** acceptance criteria - MUST specify concrete verification steps
 - `deps` (optional): List of task IDs this task depends on
+
+**CRITICAL: Acceptance criteria MUST be measurable and specific.**
+
+Good `accept` examples:
+- "pytest tests/test_parser.py passes"
+- "`make build` exits with code 0"
+- "file test/test_foo.valk exists and `make test` passes"
+- "grep -c 'aio/within' src/builtins.c returns 1"
+- "output contains 'Success' when running `./build/valk test.valk`"
+
+Bad `accept` examples (WILL BE REJECTED):
+- "works correctly" - too vague
+- "tests pass" - which tests?
+- "is implemented" - not measurable
+- "feature works" - how do you verify?
 
 **IMPORTANT**: Every task MUST have `notes` with implementation guidance. Tasks without `notes` will fail during BUILD.
 
@@ -2531,7 +2689,7 @@ Rules:
 - Add tasks in dependency order - add prerequisite tasks first so you have their IDs
 - Be specific - "Add X to Y" not "Improve Z"
 - Tasks are for {{SPEC_FILE}} only
-- Include `accept` criteria when testable
+- `accept` MUST be measurable (command to run, expected output, exit code)
 - Use `deps` when a task requires another task to be done first
 
 When done adding tasks, output:
@@ -2735,10 +2893,13 @@ Read the spec\'s **Acceptance Criteria section only** (not entire spec):
 
 For any unchecked criteria (`- [ ]`) not covered by existing tasks, research what's needed and create a well-defined task:
 ```
-ralph task add \'{"name": "<specific action>", "notes": "<implementation approach and relevant files>", "accept": "<how to verify>"}\\'
+ralph task add \'{"name": "<specific action>", "notes": "<implementation approach and relevant files>", "accept": "<measurable verification>"}\\'
 ```
 
-**IMPORTANT**: Tasks must include `notes` with implementation guidance. Vague tasks will fail.
+**IMPORTANT**: 
+- Tasks must include `notes` with implementation guidance
+- `accept` MUST be measurable: command to run, expected exit code, or specific output to check
+- Vague acceptance like "works correctly" or "tests pass" will be REJECTED
 
 ## Step 5: Final Decision
 
@@ -2788,7 +2949,7 @@ Return a JSON object:
   \\"task\\": {  // only if resolution is \\"task\\"
     \\"name\\": \\"<fix description>\\",
     \\"notes\\": \\"<root cause and approach>\\",
-    \\"accept\\": \\"<how to verify>\\",
+    \\"accept\\": \\"<MEASURABLE: command + expected result, e.g. 'make test passes' or 'grep X file returns 1'>\\",
     \\"priority\\": \\"<inherit from issue priority above>\\"
   },
   \\"trivial_fix\\": \\"<description>\\"  // only if resolution is \\"trivial\\"
@@ -2802,8 +2963,8 @@ After all subagents complete:
 
 1. Add all tasks in batch (include `created_from` to link back to issue, and `priority` from originating issue):
 ```
-ralph task add \'{"name": "...", "notes": "...", "accept": "...", "created_from": "i-xxxx", "priority": "high|medium|low"}\'
-ralph task add \'{"name": "...", "notes": "...", "accept": "...", "created_from": "i-yyyy", "priority": "high|medium|low"}\'
+ralph task add \'{"name": "...", "notes": "...", "accept": "<measurable: command + expected result>", "created_from": "i-xxxx", "priority": "high|medium|low"}\'
+ralph task add \'{"name": "...", "notes": "...", "accept": "<measurable: command + expected result>", "created_from": "i-yyyy", "priority": "high|medium|low"}\'
 ...
 ```
 
@@ -2932,8 +3093,10 @@ Break the original task into 2-5 smaller tasks that:
 
 For each subtask, **include `parent` to link back to the original task**:
 ```
-ralph task add \'{"name": "Specific subtask", "notes": "What to do", "accept": "How to verify", "parent": "<original-task-id>"}\'
+ralph task add \'{"name": "Specific subtask", "notes": "What to do", "accept": "<measurable: command + expected result>", "parent": "<original-task-id>"}\'
 ```
+
+**IMPORTANT**: `accept` MUST be measurable - specify command to run and expected result (e.g., "make test passes", "file X exists", "grep Y returns Z").
 
 Use `deps` to specify order if needed.
 
@@ -2960,6 +3123,7 @@ Then EXIT to let the build loop process the new subtasks.
 - ALWAYS read the log file first to understand what happened
 - Each subtask should be completable in ONE iteration (< 100k tokens)
 - Be specific: "Add X to file Y" not "Implement feature Z"
+- `accept` MUST be measurable (vague criteria like "works correctly" will be REJECTED)
 - If a subtask is still too big, it will be killed and decomposed again
 - DO NOT try to implement anything - just create the task breakdown
 '''
@@ -6928,6 +7092,17 @@ def cmd_task(config: RalphConfig, action: str, desc: Optional[str] = None, arg3:
         
         if not name:
             print(f"{Colors.RED}Task name is required{Colors.NC}")
+            return 1
+        
+        # Validate acceptance criteria is measurable and specific
+        is_valid, error_msg = validate_acceptance_criteria(accept)
+        if not is_valid:
+            print(f"{Colors.RED}ERROR: {error_msg}{Colors.NC}")
+            print(f"  {Colors.DIM}Good examples:{Colors.NC}")
+            print(f"  {Colors.DIM}  - 'pytest tests/test_parser.py passes'{Colors.NC}")
+            print(f"  {Colors.DIM}  - '`make build` exits with code 0'{Colors.NC}")
+            print(f"  {Colors.DIM}  - 'grep -c \"ERROR\" log.txt returns 0'{Colors.NC}")
+            print(f"  {Colors.DIM}  - 'output contains \"Success\" and no \"Error\"'{Colors.NC}")
             return 1
         
         # Validate custom task ID if provided
