@@ -134,7 +134,10 @@ def cmd_query(
 
 
 def cmd_task(
-    config: dict, action: str, arg2: Optional[str] = None, arg3: Optional[str] = None
+    config: dict,
+    action: Optional[str] = None,
+    arg2: Optional[str] = None,
+    arg3: Optional[str] = None,
 ) -> int:
     """Handle task subcommands.
 
@@ -147,6 +150,13 @@ def cmd_task(
     Returns:
         Exit code.
     """
+    if not action:
+        print(
+            f"{Colors.RED}Usage: ralph task "
+            f"[done|add|accept|reject|delete|prioritize]{Colors.NC}"
+        )
+        return 1
+
     plan_file = config["plan_file"]
     state = load_state(plan_file)
 
@@ -331,7 +341,9 @@ def cmd_task(
     return 1
 
 
-def cmd_issue(config: dict, action: str, desc: Optional[str] = None) -> int:
+def cmd_issue(
+    config: dict, action: Optional[str] = None, desc: Optional[str] = None
+) -> int:
     """Handle issue subcommands.
 
     Args:
@@ -342,6 +354,10 @@ def cmd_issue(config: dict, action: str, desc: Optional[str] = None) -> int:
     Returns:
         Exit code.
     """
+    if not action:
+        print(f"{Colors.RED}Usage: ralph issue [done|done-all|done-ids|add]{Colors.NC}")
+        return 1
+
     plan_file = config["plan_file"]
     state = load_state(plan_file)
 
@@ -409,6 +425,39 @@ def cmd_issue(config: dict, action: str, desc: Optional[str] = None) -> int:
     return 1
 
 
+def cmd_set_spec(config: dict, spec_name: Optional[str] = None) -> int:
+    """Set the current spec for ralph.
+
+    Args:
+        config: Ralph configuration dictionary.
+        spec_name: Name of the spec file to set.
+
+    Returns:
+        Exit code.
+    """
+    if not spec_name:
+        print(f"{Colors.RED}Usage: ralph set-spec <spec.md>{Colors.NC}")
+        return 1
+
+    plan_file = config["plan_file"]
+    state = load_state(plan_file)
+    specs_dir = config["specs_dir"]
+    spec_path = Path(spec_name)
+    if not spec_path.is_absolute() and not spec_path.exists():
+        spec_path = specs_dir / spec_name
+        if not spec_path.exists() and not spec_name.endswith(".md"):
+            spec_path = specs_dir / f"{spec_name}.md"
+    if not spec_path.exists():
+        print(f"{Colors.RED}Spec not found: {spec_name}{Colors.NC}")
+        return 1
+    state.spec = spec_path.name
+    state.tasks = []
+    state.tombstones = []
+    save_state(state, plan_file)
+    print(f"{Colors.GREEN}Spec set:{Colors.NC} {spec_path.name}")
+    return 0
+
+
 def cmd_stream() -> int:
     """Stream command - pipe opencode JSON for pretty output.
 
@@ -457,24 +506,75 @@ def cmd_watch(config: dict) -> int:
     Returns:
         Exit code.
     """
-    print(
-        f"{Colors.YELLOW}Watch mode not yet implemented in refactored ralph.{Colors.NC}"
-    )
-    print("Use 'ralph status' or 'ralph query' for now.")
+    import subprocess
+    from ralph.tui.fallback import FallbackDashboard
+
+    class ConfigWrapper:
+        """Wrapper to provide attribute access to config dict."""
+
+        def __init__(self, cfg: dict):
+            self.plan_file = cfg["plan_file"]
+            self.ralph_dir = cfg["ralph_dir"]
+            self.repo_root = cfg["repo_root"]
+
+    cfg = ConfigWrapper(config)
+    dashboard = FallbackDashboard(cfg)
+
+    try:
+        result = subprocess.run(
+            ["git", "branch", "--show-current"],
+            capture_output=True,
+            text=True,
+            cwd=config["repo_root"],
+        )
+        dashboard.branch = (
+            result.stdout.strip() if result.returncode == 0 else "unknown"
+        )
+    except Exception:
+        dashboard.branch = "unknown"
+
+    dashboard.ralph_state = load_state(config["plan_file"])
+
+    def poll_data():
+        return []
+
+    def update_state(dash: FallbackDashboard):
+        dash.is_running = False
+        dash.running_count = 0
+
+    try:
+        dashboard.run_loop(poll_data, on_quit=lambda: None, update_state=update_state)
+    except KeyboardInterrupt:
+        pass
+
+    print("Stopped watching.")
     return 0
 
 
-def cmd_plan(config: dict, spec_file: str, args: argparse.Namespace) -> int:
+def cmd_plan(config: dict, spec_file: Optional[str], args: argparse.Namespace) -> int:
     """Plan mode - generate implementation plan from spec.
 
     Args:
         config: Ralph configuration dict.
-        spec_file: Spec file to plan.
+        spec_file: Spec file to plan, or None to list available specs.
         args: Command-line arguments.
 
     Returns:
         Exit code.
     """
+    if not spec_file:
+        specs_dir = config["specs_dir"]
+        specs = list(specs_dir.glob("*.md")) if specs_dir.exists() else []
+        if not specs:
+            print(f"{Colors.RED}No specs found in ralph/specs/{Colors.NC}")
+            print("Create a spec file first, e.g.: ralph/specs/my-feature.md")
+            return 1
+        print(f"{Colors.YELLOW}Usage: ralph plan <spec.md>{Colors.NC}")
+        print()
+        print("Available specs:")
+        for spec in sorted(specs):
+            print(f"  {spec.name}")
+        return 1
     print(
         f"{Colors.YELLOW}Plan mode not yet implemented in refactored ralph.{Colors.NC}"
     )
@@ -493,11 +593,9 @@ def cmd_construct(config: dict, iterations: int, args: argparse.Namespace) -> in
     Returns:
         Exit code.
     """
-    print(
-        f"{Colors.YELLOW}Construct mode not yet implemented in refactored ralph.{Colors.NC}"
-    )
-    print(f"Iterations: {iterations if iterations else 'unlimited'}")
-    return 0
+    from ralph.commands.construct import cmd_construct as construct_impl
+
+    return construct_impl(config, iterations, args)
 
 
 def create_parser() -> argparse.ArgumentParser:
@@ -611,14 +709,17 @@ Examples:
     return parser
 
 
+def _get_iterations(args: argparse.Namespace) -> int:
+    """Extract iteration count from args."""
+    if args.max_iterations is not None:
+        return args.max_iterations
+    if args.arg and args.arg.isdigit():
+        return int(args.arg)
+    return 0
+
+
 def main() -> int:
-    """Main entry point for the Ralph CLI.
-
-    Parses arguments and dispatches to the appropriate command handler.
-
-    Returns:
-        Exit code.
-    """
+    """Main entry point for the Ralph CLI."""
     parser = create_parser()
     args = parser.parse_args()
 
@@ -632,12 +733,6 @@ def main() -> int:
         args.arg = args.command
         args.command = "construct"
 
-    iterations = 0
-    if args.max_iterations is not None:
-        iterations = args.max_iterations
-    elif args.arg and args.arg.isdigit():
-        iterations = int(args.arg)
-
     if args.command == "stream":
         return cmd_stream()
 
@@ -647,86 +742,35 @@ def main() -> int:
         return 1
 
     config = get_ralph_config(repo_root)
+    cmd = args.command
 
-    if args.command == "init":
+    if cmd == "init":
         from ralph.commands import cmd_init
 
         return cmd_init(repo_root)
-
-    if args.command == "config":
+    if cmd == "config":
         return cmd_config_show()
-
-    if args.command == "status":
+    if cmd == "status":
         return cmd_status(config)
-
-    if args.command == "query":
+    if cmd == "query":
         return cmd_query(config, args.arg, done_only=args.done)
-
-    if args.command == "task":
-        if not args.arg:
-            print(
-                f"{Colors.RED}Usage: ralph task [done|add|accept|reject|delete|prioritize]{Colors.NC}"
-            )
-            return 1
+    if cmd == "task":
         return cmd_task(config, args.arg, args.arg2, args.arg3)
-
-    if args.command == "issue":
-        if not args.arg:
-            print(
-                f"{Colors.RED}Usage: ralph issue [done|done-all|done-ids|add]{Colors.NC}"
-            )
-            return 1
+    if cmd == "issue":
         return cmd_issue(config, args.arg, args.arg2)
-
-    if args.command == "set-spec":
-        if not args.arg:
-            print(f"{Colors.RED}Usage: ralph set-spec <spec.md>{Colors.NC}")
-            return 1
-        plan_file = config["plan_file"]
-        state = load_state(plan_file)
-        specs_dir = config["specs_dir"]
-        spec_path = Path(args.arg)
-        if not spec_path.is_absolute() and not spec_path.exists():
-            spec_path = specs_dir / args.arg
-            if not spec_path.exists() and not args.arg.endswith(".md"):
-                spec_path = specs_dir / f"{args.arg}.md"
-        if not spec_path.exists():
-            print(f"{Colors.RED}Spec not found: {args.arg}{Colors.NC}")
-            return 1
-        state.spec = spec_path.name
-        state.tasks = []
-        state.tombstones = []
-        save_state(state, plan_file)
-        print(f"{Colors.GREEN}Spec set:{Colors.NC} {spec_path.name}")
-        return 0
-
-    if args.command == "watch":
+    if cmd == "set-spec":
+        return cmd_set_spec(config, args.arg)
+    if cmd == "watch":
         return cmd_watch(config)
-
-    if args.command == "plan":
-        if not args.arg:
-            specs_dir = config["specs_dir"]
-            specs = list(specs_dir.glob("*.md")) if specs_dir.exists() else []
-            if not specs:
-                print(f"{Colors.RED}No specs found in ralph/specs/{Colors.NC}")
-                print("Create a spec file first, e.g.: ralph/specs/my-feature.md")
-                return 1
-            print(f"{Colors.YELLOW}Usage: ralph plan <spec.md>{Colors.NC}")
-            print()
-            print("Available specs:")
-            for spec in sorted(specs):
-                print(f"  {spec.name}")
-            return 1
+    if cmd == "plan":
         return cmd_plan(config, args.arg, args)
-
-    if args.command in ("construct", "build", ""):
-        return cmd_construct(config, iterations, args)
-
-    if args.command == "help":
+    if cmd in ("construct", "build", ""):
+        return cmd_construct(config, _get_iterations(args), args)
+    if cmd == "help":
         parser.print_help()
         return 0
 
-    print(f"{Colors.RED}Unknown command: {args.command}{Colors.NC}")
+    print(f"{Colors.RED}Unknown command: {cmd}{Colors.NC}")
     parser.print_help()
     return 1
 

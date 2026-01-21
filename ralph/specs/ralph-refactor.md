@@ -4,6 +4,38 @@
 
 Refactor ralph from a monolithic 6,949-line Python script (`powerplant/ralph`) into a well-structured modular package at `ralph/` with clear separation of concerns, comprehensive test coverage, and self-maintaining SDLC. The refactored ralph remains in this repository, is built/installed via `bootstrap.sh`, and operates locally with immediate testability of changes.
 
+## Critical Guardrails
+
+### Protected Files - DO NOT MODIFY
+
+The following file is the **production ralph implementation** and MUST NOT be modified as part of this refactor:
+
+```
+powerplant/ralph    # The original monolithic Python script - DO NOT TOUCH
+```
+
+**Why this matters:**
+- `powerplant/ralph` is the working, tested implementation currently in use
+- The new `python -m ralph` package is being developed **in parallel**, not as a replacement
+- Until the refactored package achieves 100% feature parity and passes all acceptance criteria, the original must remain intact
+- Modifying `powerplant/ralph` during development could break the production tool
+
+**What you CAN do:**
+- Create and modify files in the `ralph/` package directory
+- Create tests in `ralph/tests/`
+- Modify `ralph/AGENTS.md`, `ralph/specs/*.md`, `ralph/PROMPT_*.md`
+
+**What you MUST NOT do:**
+- Edit, delete, or replace `powerplant/ralph`
+- Create a wrapper script at `powerplant/ralph` (this is Phase 7, after full parity)
+- Modify `powerplant/ralph` "to fix a bug" or "to add a feature"
+
+The wrapper script replacement (Phase 7) happens ONLY after:
+1. All acceptance criteria pass
+2. Full command parity is verified
+3. All tests pass
+4. Human approval is given
+
 ## Requirements
 
 ### Directory Structure
@@ -75,34 +107,44 @@ ralph/
 
 ### Bootstrap Integration
 
-Update `bootstrap.sh` to install the refactored ralph:
+Update `bootstrap.sh` to support the refactored ralph **in parallel** with the original:
 
-1. **Create wrapper script** at `powerplant/ralph` that invokes `python -m ralph`:
-   ```bash
-   #!/usr/bin/env bash
-   exec python3 -m ralph "$@"
-   ```
+1. **DO NOT modify `powerplant/ralph`** - it remains the production implementation
 
 2. **Add ralph package to PYTHONPATH** in bootstrap:
    - Add `export PYTHONPATH="$REPO_ROOT:$PYTHONPATH"` to shell configs
    - The `ralph/` directory at repo root becomes an importable package
+   - This enables `python -m ralph` to run the new implementation for testing
 
 3. **Preserve existing PATH setup** for `powerplant/` directory
+   - The `ralph` command continues to invoke `powerplant/ralph`
+   - Use `python -m ralph` to test the refactored version
 
-4. **Keep shell completions working** - update if command structure changes
+4. **Keep shell completions working** - no changes needed during development
+
+**During development:**
+- `ralph` → runs `powerplant/ralph` (production)
+- `python -m ralph` → runs the new modular package (testing)
+
+**After Phase 7 (with human approval):**
+- `powerplant/ralph` becomes a wrapper that invokes `python -m ralph`
+- Both commands run the same code
 
 ### Local Development Mode
 
-Ralph operates with this repository as source of truth:
+The new `python -m ralph` package operates with this repository as source of truth:
 
 1. **No pip install required** - direct execution via PYTHONPATH
 2. **Changes take effect immediately** - no rebuild/reinstall step
-3. **Editable development** - modify any module, run ralph, see changes
+3. **Editable development** - modify any module in `ralph/`, run `python -m ralph`, see changes
 
 Verification command:
 ```bash
 # After making a change to ralph/cli.py, this reflects the change immediately:
-ralph --help
+python -m ralph --help
+
+# The production ralph command is UNAFFECTED by changes to ralph/:
+ralph --help  # Still runs powerplant/ralph
 ```
 
 ### Test Harness
@@ -325,10 +367,20 @@ The refactor must be incremental to maintain functionality:
 2. Write unit tests for extracted modules
 3. Write e2e tests for CLI
 
-**Phase 7: Cleanup**
-1. Remove original `powerplant/ralph` (replace with wrapper)
-2. Verify all commands work
-3. Run complexity checks
+**Phase 7: Cleanup (REQUIRES HUMAN APPROVAL)**
+
+⚠️ **DO NOT EXECUTE PHASE 7 AUTONOMOUSLY** ⚠️
+
+Phase 7 modifies `powerplant/ralph` and requires explicit human approval:
+
+1. **Human verification**: All acceptance criteria must be manually verified
+2. **Human approval**: Get explicit "proceed with Phase 7" confirmation
+3. Replace `powerplant/ralph` with wrapper script (only after approval)
+4. Verify all commands work via the new wrapper
+5. Run complexity checks
+6. Final human sign-off
+
+Until Phase 7 is explicitly approved, `powerplant/ralph` remains the production implementation and `python -m ralph` runs in parallel for testing.
 
 ## Acceptance Criteria
 
@@ -340,15 +392,17 @@ The refactor must be incremental to maintain functionality:
 - [ ] All modules listed in Directory Structure exist
 
 ### Bootstrap
-- [ ] `powerplant/ralph` is a bash wrapper that invokes `python -m ralph`
+- [ ] `powerplant/ralph` remains unchanged (original monolithic script intact)
 - [ ] `bootstrap.sh` adds repository root to PYTHONPATH
-- [ ] `ralph --version` works after running bootstrap
+- [ ] `python -m ralph --version` works after running bootstrap
+- [ ] `ralph --version` continues to work (runs original `powerplant/ralph`)
 - [ ] Shell completions continue to work
 
 ### Local Development
-- [ ] Editing `ralph/cli.py` and running `ralph` reflects changes immediately
-- [ ] No pip install or build step required
+- [ ] Editing `ralph/cli.py` and running `python -m ralph` reflects changes immediately
+- [ ] No pip install or build step required for `python -m ralph`
 - [ ] `python -m ralph` works from repository root
+- [ ] `ralph` command continues to run `powerplant/ralph` (unaffected by changes to `ralph/`)
 
 ### Tests
 - [ ] `pytest ralph/tests/unit/` runs without errors
@@ -375,24 +429,31 @@ The refactor must be incremental to maintain functionality:
 
 ### SDLC
 - [ ] `ralph/AGENTS.md` exists with development rules
-- [ ] Ralph can run `ralph construct ralph/specs/ralph-refactor.md` on itself
+- [ ] `python -m ralph construct` can run on specs in `ralph/specs/` (testing new implementation)
 - [ ] All public functions have type hints
 - [ ] All public functions have docstrings
+- [ ] `powerplant/ralph` has NOT been modified (guardrail respected)
 
-### Command Parity
-- [ ] `ralph init` works identically to before
-- [ ] `ralph status` works identically to before
-- [ ] `ralph config` works identically to before
-- [ ] `ralph watch` works identically to before
-- [ ] `ralph plan` works identically to before
-- [ ] `ralph construct` works identically to before
-- [ ] `ralph query` works identically to before
-- [ ] `ralph task add/done/accept/reject/delete/prioritize` work identically
-- [ ] `ralph issue add/done/done-all/done-ids` work identically
-- [ ] `ralph stream` works identically to before
+### Command Parity (python -m ralph vs powerplant/ralph)
+
+The new `python -m ralph` must produce identical behavior to `powerplant/ralph`:
+
+- [ ] `python -m ralph init` works identically to `ralph init`
+- [ ] `python -m ralph status` works identically to `ralph status`
+- [ ] `python -m ralph config` works identically to `ralph config`
+- [ ] `python -m ralph watch` works identically to `ralph watch`
+- [ ] `python -m ralph plan` works identically to `ralph plan`
+- [ ] `python -m ralph construct` works identically to `ralph construct`
+- [ ] `python -m ralph query` works identically to `ralph query`
+- [ ] `python -m ralph task add/done/accept/reject/delete/prioritize` work identically
+- [ ] `python -m ralph issue add/done/done-all/done-ids` work identically
+- [ ] `python -m ralph stream` works identically to `ralph stream`
+- [ ] `python -m ralph validate` works identically to `ralph validate`
+- [ ] `python -m ralph compact` works identically to `ralph compact`
 
 ### Backwards Compatibility
 - [ ] Existing `ralph/specs/*.md` files are preserved
-- [ ] Existing `ralph/plan.jsonl` files are readable by new code
-- [ ] Existing `ralph/PROMPT_*.md` files work with new code
-- [ ] Global config at `~/.config/ralph/config.toml` works unchanged
+- [ ] Existing `ralph/plan.jsonl` files are readable by `python -m ralph`
+- [ ] Existing `ralph/PROMPT_*.md` files work with `python -m ralph`
+- [ ] Global config at `~/.config/ralph/config.toml` works with `python -m ralph`
+- [ ] `powerplant/ralph` continues to work exactly as before (not modified)

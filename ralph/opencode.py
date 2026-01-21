@@ -165,7 +165,7 @@ def run_opencode_print(
     timeout: int = 120,
     model: Optional[str] = None,
 ) -> subprocess.CompletedProcess:
-    """Run opencode in --print mode and return the result.
+    """Run opencode and return the result.
 
     This is a simpler interface for cases where you just need the
     final output without streaming.
@@ -183,7 +183,7 @@ def run_opencode_print(
         subprocess.TimeoutExpired: If the process times out.
         FileNotFoundError: If opencode is not installed.
     """
-    cmd = ["opencode", "run", "--print"]
+    cmd = ["opencode", "run"]
 
     if model:
         cmd.extend(["--model", model])

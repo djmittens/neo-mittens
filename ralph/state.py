@@ -135,7 +135,8 @@ class RalphState:
         def can_run(task: Task) -> bool:
             if not task.deps:
                 return True
-            return all(dep in self.done_ids for dep in task.deps)
+            satisfied_ids = self.done_ids | self.accepted_ids
+            return all(dep in satisfied_ids for dep in task.deps)
 
         runnable = [t for t in pending if can_run(t)]
         runnable.sort(key=lambda t: (priority_order.get(t.priority, 3), t.id))
@@ -372,7 +373,7 @@ def load_state(path: Path) -> RalphState:
         task_id = reject.get("id")
         if task_id:
             task = state.get_task_by_id(task_id)
-            if task and task.status != "d":  # Don't reset if later accepted
+            if task and task.status not in ("d", "a"):  # Don't reset if later accepted
                 task.status = "p"
                 task.reject_reason = reject.get("reason")
 

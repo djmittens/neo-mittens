@@ -13,7 +13,12 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import TYPE_CHECKING, Any, Callable, Optional
 from ralph.state import load_state
-from ralph.tui.art import RALPH_ART, RALPH_WIDTH
+from ralph.tui.art import (
+    RALPH_ART,
+    RALPH_WIDTH,
+    SKELETON_FRAMES,
+    DEFAULT_CONTEXT_WINDOW,
+)
 from ralph.tui.dashboard import parse_cost_line
 from ralph.utils import Colors
 
@@ -26,35 +31,6 @@ __all__ = [
     "render_dashboard",
     "SKELETON_FRAMES",
     "DEFAULT_CONTEXT_WINDOW",
-]
-
-DEFAULT_CONTEXT_WINDOW = 200_000
-
-SKELETON_FRAMES = [
-    "\033[90m░░░░░░░░░░░░░░░░░░░░\033[0m",
-    "\033[90m█░░░░░░░░░░░░░░░░░░░\033[0m",
-    "\033[90m▓█░░░░░░░░░░░░░░░░░░\033[0m",
-    "\033[90m▒▓█░░░░░░░░░░░░░░░░░\033[0m",
-    "\033[90m░▒▓█░░░░░░░░░░░░░░░░\033[0m",
-    "\033[90m░░▒▓█░░░░░░░░░░░░░░░\033[0m",
-    "\033[90m░░░▒▓█░░░░░░░░░░░░░░\033[0m",
-    "\033[90m░░░░▒▓█░░░░░░░░░░░░░\033[0m",
-    "\033[90m░░░░░▒▓█░░░░░░░░░░░░\033[0m",
-    "\033[90m░░░░░░▒▓█░░░░░░░░░░░\033[0m",
-    "\033[90m░░░░░░░▒▓█░░░░░░░░░░\033[0m",
-    "\033[90m░░░░░░░░▒▓█░░░░░░░░░\033[0m",
-    "\033[90m░░░░░░░░░▒▓█░░░░░░░░\033[0m",
-    "\033[90m░░░░░░░░░░▒▓█░░░░░░░\033[0m",
-    "\033[90m░░░░░░░░░░░▒▓█░░░░░░\033[0m",
-    "\033[90m░░░░░░░░░░░░▒▓█░░░░░\033[0m",
-    "\033[90m░░░░░░░░░░░░░▒▓█░░░░\033[0m",
-    "\033[90m░░░░░░░░░░░░░░▒▓█░░░\033[0m",
-    "\033[90m░░░░░░░░░░░░░░░▒▓█░░\033[0m",
-    "\033[90m░░░░░░░░░░░░░░░░▒▓█░\033[0m",
-    "\033[90m░░░░░░░░░░░░░░░░░▒▓█\033[0m",
-    "\033[90m░░░░░░░░░░░░░░░░░░▒▓\033[0m",
-    "\033[90m░░░░░░░░░░░░░░░░░░░▒\033[0m",
-    "\033[90m░░░░░░░░░░░░░░░░░░░░\033[0m",
 ]
 
 
@@ -265,24 +241,34 @@ class FallbackDashboard:
 
     def enter(self) -> None:
         """Enter dashboard mode - set up terminal."""
-        import termios
+        if not sys.stdin.isatty():
+            return
+        try:
+            import termios
 
-        self.old_settings = termios.tcgetattr(sys.stdin)
-        new_settings = termios.tcgetattr(sys.stdin)
-        new_settings[3] = new_settings[3] & ~termios.ECHO
-        new_settings[3] = new_settings[3] & ~termios.ICANON
-        termios.tcsetattr(sys.stdin, termios.TCSANOW, new_settings)
-
+            self.old_settings = termios.tcgetattr(sys.stdin)
+            new_settings = termios.tcgetattr(sys.stdin)
+            new_settings[3] = new_settings[3] & ~termios.ECHO
+            new_settings[3] = new_settings[3] & ~termios.ICANON
+            termios.tcsetattr(sys.stdin, termios.TCSANOW, new_settings)
+        except (ImportError, termios.error):
+            self.old_settings = None
+            return
         sys.stdout.write("\033[?1049h")
         sys.stdout.write("\033[?25l")
         sys.stdout.flush()
 
     def exit(self) -> None:
         """Exit dashboard mode - restore terminal."""
-        import termios
+        if not sys.stdin.isatty():
+            return
+        try:
+            import termios
 
-        if self.old_settings:
-            termios.tcsetattr(sys.stdin, termios.TCSADRAIN, self.old_settings)
+            if self.old_settings:
+                termios.tcsetattr(sys.stdin, termios.TCSADRAIN, self.old_settings)
+        except (ImportError, termios.error):
+            pass
         sys.stdout.write("\033[?25h")
         sys.stdout.write("\033[?1049l")
         sys.stdout.flush()
@@ -404,29 +390,107 @@ class FallbackDashboard:
         return None
 
 
+def _truncate(text: str, max_width: int, prefix_len: int = 0) -> str:
+    """Truncate text to fit within max_width, accounting for prefix."""
+    visible_max = max_width - prefix_len - 3
+    return text[:visible_max] + "..." if len(text) > visible_max else text
+
+
+def _get_context_color(pct: float) -> str:
+    """Get color for context usage percentage."""
+    if pct >= 90:
+        return Colors.RED
+    elif pct >= 70:
+        return Colors.YELLOW
+    return Colors.CYAN
+
+
+STAGE_COLORS = {
+    "PLAN": Colors.MAGENTA,
+    "BUILD": Colors.CYAN,
+    "VERIFY": Colors.YELLOW,
+    "INVESTIGATE": Colors.RED,
+    "COMPLETE": Colors.GREEN,
+}
+
+
+def _build_status_lines(
+    state: DashboardState,
+    ralph_state: Any,
+    term_width: int,
+) -> list[str]:
+    """Build status information lines for the dashboard."""
+    lines = [f"🌿 {Colors.GREEN}Branch:{Colors.NC} {state.branch}"]
+
+    # Running status
+    if state.is_running:
+        count = f" ({state.running_count})" if state.running_count > 0 else ""
+        lines.append(f"🟢 {Colors.GREEN}Status:{Colors.NC} Running{count}")
+    else:
+        lines.append(f"🟡 {Colors.YELLOW}Status:{Colors.NC} Stopped")
+
+    # Stage
+    stage = ralph_state.get_stage() if ralph_state else "UNKNOWN"
+    stage_color = STAGE_COLORS.get(stage, Colors.WHITE)
+    lines.append(f"🔧 {Colors.GREEN}Stage:{Colors.NC} {stage_color}{stage}{Colors.NC}")
+
+    # Cost
+    cost_str = f"${state.cost:.4f}" if state.cost > 0 else "--"
+    lines.append(f"💰 {Colors.CYAN}Cost:{Colors.NC} {cost_str}")
+
+    # Context
+    pct = (
+        (state.context_tokens / state.context_limit * 100)
+        if state.context_limit > 0
+        else 0
+    )
+    ctx_color = _get_context_color(pct)
+    lines.append(
+        f"🧠 {ctx_color}Context:{Colors.NC} {state.context_tokens:,} / "
+        f"{state.context_limit:,} ({pct:.0f}%)"
+    )
+
+    # Kill reason
+    if state.last_kill_reason:
+        kill_msg = f"⚠️  {Colors.RED}Kill:{Colors.NC} {state.last_kill_reason}"
+        if state.last_kill_activity:
+            kill_msg += f" @ {state.last_kill_activity[:30]}"
+        lines.append(kill_msg)
+
+    # Progress
+    pending = len(ralph_state.pending) if ralph_state else 0
+    done = len(ralph_state.done) if ralph_state else 0
+    lines.extend(
+        [
+            "",
+            f"📊 {Colors.GREEN}Progress:{Colors.NC} {done} done, {pending} pending",
+            "",
+        ]
+    )
+
+    # Spec
+    if ralph_state and ralph_state.spec:
+        lines.append(f"📋 {Colors.GREEN}Spec:{Colors.NC} {ralph_state.spec}")
+
+    # Current task
+    lines.append(f"🎯 {Colors.GREEN}Task:{Colors.NC}")
+    next_task_obj = ralph_state.get_next_task() if ralph_state else None
+    task_name = next_task_obj.name if next_task_obj else None
+    if task_name:
+        lines.append(f"   {_truncate(task_name, term_width - RALPH_WIDTH - 6, 3)}")
+    else:
+        lines.append("   (no pending tasks)")
+
+    return lines
+
+
 def render_dashboard(
     state: DashboardState, term_width: int, term_height: int
 ) -> list[str]:
-    """Render the dashboard and return lines.
-
-    Args:
-        state: Current dashboard state.
-        term_width: Terminal width in characters.
-        term_height: Terminal height in characters.
-
-    Returns:
-        List of lines to display.
-    """
+    """Render the dashboard and return lines."""
     from pathlib import Path
 
     CLEAR_LINE = "\033[K"
-
-    def truncate(text: str, max_width: int, prefix_len: int = 0) -> str:
-        visible_max = max_width - prefix_len - 3
-        if len(text) > visible_max:
-            return text[:visible_max] + "..."
-        return text
-
     lines: list[str] = []
 
     def add(text: str = "") -> None:
@@ -436,25 +500,27 @@ def render_dashboard(
     section_bar = "─" * (term_width - 1)
     footer_bar = "─" * (term_width - 1)
 
+    # Header
     add(f"{Colors.BLUE}{header_bar}{Colors.NC}")
-
-    kills_str = ""
-    if state.kills_timeout > 0 or state.kills_context > 0:
-        parts = []
-        if state.kills_timeout > 0:
-            parts.append(f"T:{state.kills_timeout}")
-        if state.kills_context > 0:
-            parts.append(f"C:{state.kills_context}")
-        kills_str = f" | {Colors.RED}Kills: {' '.join(parts)}{Colors.NC}"
-
-    if state.iteration is not None:
-        title = f"  RALPH WIGGUM - Iteration {state.iteration} - {datetime.now().strftime('%H:%M:%S')}{kills_str}"
-    else:
-        title = f"  RALPH WIGGUM - {datetime.now().strftime('%H:%M:%S')}{kills_str}"
+    kills_parts = []
+    if state.kills_timeout > 0:
+        kills_parts.append(f"T:{state.kills_timeout}")
+    if state.kills_context > 0:
+        kills_parts.append(f"C:{state.kills_context}")
+    kills_str = (
+        f" | {Colors.RED}Kills: {' '.join(kills_parts)}{Colors.NC}"
+        if kills_parts
+        else ""
+    )
+    iteration_str = (
+        f"Iteration {state.iteration} - " if state.iteration is not None else ""
+    )
+    title = f"  RALPH WIGGUM - {iteration_str}{datetime.now().strftime('%H:%M:%S')}{kills_str}"
     add(f"{Colors.BLUE}{title}{Colors.NC}")
     add(f"{Colors.BLUE}{header_bar}{Colors.NC}")
     add()
 
+    # Get state
     ralph_state = state.ralph_state
     if ralph_state is None:
         plan_file = (
@@ -463,124 +529,52 @@ def render_dashboard(
         if plan_file:
             ralph_state = load_state(plan_file)
 
-    status_lines: list[str] = []
-    status_lines.append(f"🌿 {Colors.GREEN}Branch:{Colors.NC} {state.branch}")
-
-    if state.is_running:
-        if state.running_count > 0:
-            status_lines.append(
-                f"🟢 {Colors.GREEN}Status:{Colors.NC} Running ({state.running_count})"
-            )
-        else:
-            status_lines.append(f"🟢 {Colors.GREEN}Status:{Colors.NC} Running")
-    else:
-        status_lines.append(f"🟡 {Colors.YELLOW}Status:{Colors.NC} Stopped")
-
-    stage = ralph_state.get_stage() if ralph_state else "UNKNOWN"
-    stage_colors = {
-        "PLAN": Colors.MAGENTA,
-        "BUILD": Colors.CYAN,
-        "VERIFY": Colors.YELLOW,
-        "INVESTIGATE": Colors.RED,
-        "COMPLETE": Colors.GREEN,
-    }
-    stage_color = stage_colors.get(stage, Colors.WHITE)
-    status_lines.append(
-        f"🔧 {Colors.GREEN}Stage:{Colors.NC} {stage_color}{stage}{Colors.NC}"
-    )
-
-    if state.cost > 0:
-        status_lines.append(f"💰 {Colors.CYAN}Cost:{Colors.NC} ${state.cost:.4f}")
-    else:
-        status_lines.append(f"💰 {Colors.CYAN}Cost:{Colors.NC} --")
-
-    pct = (
-        (state.context_tokens / state.context_limit * 100)
-        if state.context_limit > 0
-        else 0
-    )
-    if pct >= 90:
-        ctx_color = Colors.RED
-    elif pct >= 70:
-        ctx_color = Colors.YELLOW
-    else:
-        ctx_color = Colors.CYAN
-    status_lines.append(
-        f"🧠 {ctx_color}Context:{Colors.NC} {state.context_tokens:,} / {state.context_limit:,} ({pct:.0f}%)"
-    )
-
-    if state.last_kill_reason:
-        kill_msg = f"⚠️  {Colors.RED}Kill:{Colors.NC} {state.last_kill_reason}"
-        if state.last_kill_activity:
-            kill_msg += f" @ {state.last_kill_activity[:30]}"
-        status_lines.append(kill_msg)
-
-    pending = len(ralph_state.pending) if ralph_state else 0
-    done = len(ralph_state.done) if ralph_state else 0
-    status_lines.append("")
-    status_lines.append(
-        f"📊 {Colors.GREEN}Progress:{Colors.NC} {done} done, {pending} pending"
-    )
-    status_lines.append("")
-    if ralph_state and ralph_state.spec:
-        status_lines.append(f"📋 {Colors.GREEN}Spec:{Colors.NC} {ralph_state.spec}")
-    status_lines.append(f"🎯 {Colors.GREEN}Task:{Colors.NC}")
-    next_task_obj = ralph_state.get_next_task() if ralph_state else None
-    next_task = next_task_obj.name if next_task_obj else None
-    if next_task:
-        status_lines.append(
-            f"   {truncate(next_task, term_width - RALPH_WIDTH - 6, 3)}"
-        )
-    else:
-        status_lines.append("   (no pending tasks)")
-
-    num_art_lines = max(len(RALPH_ART), len(status_lines))
-    for i in range(num_art_lines):
+    # Status lines with art
+    status_lines = _build_status_lines(state, ralph_state, term_width)
+    for i in range(max(len(RALPH_ART), len(status_lines))):
         ralph_line = RALPH_ART[i] if i < len(RALPH_ART) else " " * RALPH_WIDTH
         status_line = status_lines[i] if i < len(status_lines) else ""
         add(f"{ralph_line} {Colors.DIM}│{Colors.NC} {status_line}")
 
-    left_width = RALPH_WIDTH + 1
-    right_width = term_width - left_width - 1
-    if right_width < 0:
-        right_width = 0
-    t_join_separator = "─" * left_width + "┴" + "─" * right_width
-    add(f"{Colors.DIM}{t_join_separator}{Colors.NC}")
+    # Separator
+    left_width, right_width = RALPH_WIDTH + 1, max(0, term_width - RALPH_WIDTH - 2)
+    add(f"{Colors.DIM}{'─' * left_width}┴{'─' * right_width}{Colors.NC}")
 
+    # Issues section
     if ralph_state and ralph_state.issues:
         add(
             f"{Colors.YELLOW}Discovered Issues:{Colors.NC} ({len(ralph_state.issues)} open)"
         )
         for issue in ralph_state.issues[:5]:
-            truncated_text = truncate(issue.desc, term_width, 9)
-            add(f"  {Colors.RED}OPEN{Colors.NC}   {truncated_text}")
+            add(
+                f"  {Colors.RED}OPEN{Colors.NC}   {_truncate(issue.desc, term_width, 9)}"
+            )
         if len(ralph_state.issues) > 5:
             add(
                 f"  {Colors.YELLOW}... and {len(ralph_state.issues) - 5} more{Colors.NC}"
             )
         add(f"{Colors.DIM}{section_bar}{Colors.NC}")
 
-    lines_used = len(lines)
-    available_lines = term_height - lines_used - 3
+    # Output section
+    available_lines = term_height - len(lines) - 3
     add(f"{Colors.GREEN}Output:{Colors.NC}")
     if available_lines >= 1:
         display_lines = (
             state.output_lines[-available_lines:] if state.output_lines else []
         )
         for line in display_lines:
-            add(f"  {truncate(line, term_width, 2)}")
+            add(f"  {_truncate(line, term_width, 2)}")
         if state.skeleton_frame is not None:
-            frame = SKELETON_FRAMES[state.skeleton_frame % len(SKELETON_FRAMES)]
-            add(f"  {frame}")
+            add(f"  {SKELETON_FRAMES[state.skeleton_frame % len(SKELETON_FRAMES)]}")
             for _ in range(available_lines - len(display_lines) - 1):
                 add()
         else:
             for _ in range(available_lines - len(display_lines)):
                 add()
 
+    # Footer
     add(f"{Colors.BLUE}{footer_bar}{Colors.NC}")
     add(state.footer_text)
-
     while len(lines) < term_height:
         add()
 
