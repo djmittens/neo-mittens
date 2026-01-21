@@ -7,7 +7,7 @@ import json
 from ralph.commands.compact import cmd_compact, is_task_too_old
 from ralph.config import GlobalConfig
 from ralph.models import Task, Tombstone
-from ralph.state import RalphState, save_state
+from ralph.state import RalphState, save_state, load_state
 
 
 @pytest.fixture
@@ -75,7 +75,7 @@ def test_is_task_too_old():
     assert is_task_too_old(old_task_date, threshold_date)
 
 
-def test_compact_command(mock_state_file, monkeypatch):
+def test_compact_command(mock_state_file, monkeypatch, tmp_path):
     # Use a fixed datetime to make the test deterministic
     fixed_now = datetime(2026, 2, 1, 12, 0, 0)
 
@@ -104,40 +104,17 @@ def test_compact_command(mock_state_file, monkeypatch):
         for line in original_lines:
             print(line.strip())
 
-    # Patch the save_state function to always call
-    import ralph.state
-
-    def mock_save_state(state, path):
-        with open(path, "w") as f:
-            # Force saving modified state
-            tasks = state.tasks
-            tombstones = state.tombstones
-            for task in tasks:
-                f.write(json.dumps(task.to_dict()) + "\n")
-            for tombstone in tombstones["accepted"]:
-                f.write(json.dumps(tombstone.to_dict()) + "\n")
-
-    monkeypatch.setattr(ralph.state, "save_state", mock_save_state)
-
     # Run compact command on the mock state file
     cmd_compact(config, args)
 
     # Verify the state was compacted correctly
-    with open(mock_state_file, "r") as f:
-        lines = f.readlines()
-        print("\nCompacted file contents:")
-        for line in lines:
-            print(line.strip())
-        assert len(lines) > 0  # File should still exist and not be empty
+    # Reload the state to ensure exact contents
+    reloaded_state = load_state(Path(mock_state_file))
 
-        # Manually parse the state to check its contents
-        tasks = [
-            json.loads(line)
-            for line in lines
-            if "t" in json.loads(line) and json.loads(line)["t"] == "task"
-        ]
-        task_ids = [task["id"] for task in tasks]
-        print("\nTask IDs:", task_ids)
-        assert "active" in task_ids  # Active task should be kept
-        assert "recent-done" in task_ids  # Recent done task should be kept
-        assert "old-done" not in task_ids  # Old done task should be removed
+    # Manually identify task IDs
+    task_ids = [task.id for task in reloaded_state.tasks]
+    print("\nTask IDs:", task_ids)
+
+    assert "active" in task_ids  # Active task should be kept
+    assert "recent-done" in task_ids  # Recent done task should be kept
+    assert "old-done" not in task_ids  # Old done task should be removed

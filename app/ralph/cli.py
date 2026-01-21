@@ -212,10 +212,18 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         return _stub_command(f"issue {args.action}")
 
     if args.command == "validate":
-        return _stub_command("validate")
+        from ralph.commands.validate import cmd_validate
+        from ralph.config import get_global_config
+
+        global_config = get_global_config()
+        return cmd_validate(global_config, args)
 
     if args.command == "compact":
-        return _stub_command("compact")
+        from ralph.commands.compact import cmd_compact
+        from ralph.config import get_global_config
+
+        global_config = get_global_config()
+        return cmd_compact(global_config, args)
 
     if args.command == "log":
         return _stub_command("log")
