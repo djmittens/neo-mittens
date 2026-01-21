@@ -114,17 +114,9 @@ fi
 COMMIT_MSG_FILE="$(mktemp)"
 trap 'rm -f "$TEMP_MSG" "$COMMIT_MSG_FILE"' EXIT
 
-{
-  printf '%s\n' "$GENERATED_MSG"
-  echo ""
-  echo "# ─────────────────────────────────────────────────────────────────"
-  echo "# AI-generated message above. Edit as needed."
-  echo "# Lines starting with '#' will be ignored."
-  echo "# ─────────────────────────────────────────────────────────────────"
-  echo "#"
-  echo "# Changes to be committed:"
-  git diff --cached --stat | sed 's/^/#   /'
-} > "$COMMIT_MSG_FILE"
+# Write the AI message to the file
+printf '%s\n' "$GENERATED_MSG" > "$COMMIT_MSG_FILE"
 
-# Run git commit with the generated message file
-exec git commit ${COMMIT_ARGS[@]+"${COMMIT_ARGS[@]}"} --edit --file="$COMMIT_MSG_FILE"
+# Use -m to pass the message, then -e to edit, and -v for diff
+# This way git has a message, opens editor to review, :wq commits, :q! aborts
+exec git commit ${COMMIT_ARGS[@]+"${COMMIT_ARGS[@]}"} --verbose --edit -m "$GENERATED_MSG"
