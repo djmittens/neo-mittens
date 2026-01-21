@@ -4,10 +4,12 @@ Handles loading configuration from ~/.config/ralph/config.toml with profile
 support via the RALPH_PROFILE environment variable.
 """
 
+import json
+import os
+import subprocess
 from dataclasses import dataclass, fields
 from pathlib import Path
 from typing import Any, Dict, Optional
-import os
 
 
 @dataclass
@@ -124,3 +126,87 @@ def reload_global_config() -> GlobalConfig:
     global _global_config
     _global_config = GlobalConfig.load()
     return _global_config
+
+
+@dataclass
+class RalphConfig:
+    """Project-level configuration for Ralph.
+
+    Contains paths to all Ralph-related files and directories for a specific
+    repository. Created via the from_repo() class method.
+    """
+
+    repo_root: Path
+    ralph_dir: Path
+    log_dir: Path
+    prompt_plan: Path
+    prompt_build: Path
+    prompt_verify: Path
+    prompt_investigate: Path
+    prompt_decompose: Path
+    specs_dir: Path
+    output_fifo: Path
+    plan_file: Path
+    runtime_file: Path
+
+    @classmethod
+    def from_repo(
+        cls, repo_root: Path, spec_name: Optional[str] = None
+    ) -> "RalphConfig":
+        """Create RalphConfig from a repository root path.
+
+        Args:
+            repo_root: Path to the repository root.
+            spec_name: Optional spec name. If not provided, auto-detected from plan.jsonl.
+
+        Returns:
+            RalphConfig instance with all paths configured.
+        """
+        ralph_dir = repo_root / "ralph"
+
+        repo_name = repo_root.name
+
+        try:
+            result = subprocess.run(
+                ["git", "branch", "--show-current"],
+                cwd=repo_root,
+                capture_output=True,
+                text=True,
+            )
+            branch = result.stdout.strip() or "detached"
+        except Exception:
+            branch = "unknown"
+
+        if not spec_name:
+            plan_file = ralph_dir / "plan.jsonl"
+            if plan_file.exists():
+                try:
+                    for line in plan_file.read_text().splitlines():
+                        if line.strip():
+                            d = json.loads(line)
+                            if d.get("t") == "spec" and d.get("spec"):
+                                spec_name = d["spec"]
+                                break
+                except (json.JSONDecodeError, IOError):
+                    pass
+
+        if spec_name:
+            spec_name = spec_name.replace(".md", "")
+            log_dir = Path("/tmp/ralph-logs") / repo_name / branch / spec_name
+        else:
+            log_dir = Path("/tmp/ralph-logs") / repo_name / branch
+
+        return cls(
+            repo_root=repo_root,
+            ralph_dir=ralph_dir,
+            log_dir=log_dir,
+            prompt_plan=ralph_dir / "PROMPT_plan.md",
+            prompt_build=ralph_dir / "PROMPT_build.md",
+            prompt_verify=ralph_dir / "PROMPT_verify.md",
+            prompt_investigate=ralph_dir / "PROMPT_investigate.md",
+            prompt_decompose=ralph_dir / "PROMPT_decompose.md",
+            specs_dir=ralph_dir / "specs",
+            output_fifo=log_dir / "output.fifo",
+            plan_file=ralph_dir / "plan.jsonl",
+            runtime_file=ralph_dir / ".runtime",
+        )

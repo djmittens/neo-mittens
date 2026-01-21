@@ -1,25 +1,24 @@
-"""Fallback ANSI dashboard for Ralph when Textual is not available.
+"""ANSI fallback dashboard for terminals without Textual support.
 
-This module provides a terminal-based dashboard using raw ANSI escape codes,
-suitable for environments where the Textual TUI library is not installed.
+This module provides a simpler ANSI-based dashboard that works in any terminal.
+It displays the same information as the Textual dashboard but uses standard
+ANSI escape codes for rendering.
 """
 
-import os
-import re
 import select
 import sys
 import time
 from collections import deque
 from dataclasses import dataclass, field
 from datetime import datetime
-from pathlib import Path
-from typing import Callable, List, Optional, Tuple, Union
-
-from ralph.config import GlobalConfig
-from ralph.state import RalphState, load_state
+from typing import TYPE_CHECKING, Any, Callable, Optional
+from ralph.state import load_state
 from ralph.tui.art import RALPH_ART, RALPH_WIDTH
 from ralph.tui.dashboard import parse_cost_line
 from ralph.utils import Colors
+
+if TYPE_CHECKING:
+    from ralph.state import RalphState
 
 __all__ = [
     "DashboardState",
@@ -31,7 +30,6 @@ __all__ = [
 
 DEFAULT_CONTEXT_WINDOW = 200_000
 
-# Skeleton animation frames - pulsing bar for waiting indicator
 SKELETON_FRAMES = [
     "\033[90m░░░░░░░░░░░░░░░░░░░░\033[0m",
     "\033[90m█░░░░░░░░░░░░░░░░░░░\033[0m",
@@ -62,33 +60,9 @@ SKELETON_FRAMES = [
 
 @dataclass
 class DashboardState:
-    """State for rendering the dashboard.
+    """State for rendering the dashboard."""
 
-    Attributes:
-        config: Ralph configuration object.
-        branch: Current git branch name.
-        cost: Cumulative cost parsed from stream.
-        tokens_in: Input tokens count.
-        tokens_out: Output tokens count.
-        context_tokens: Current context window size.
-        context_limit: Maximum context window size.
-        iteration: Current iteration number.
-        output_lines: Lines of output to display.
-        is_running: Whether Ralph is currently running.
-        running_count: Number of running processes.
-        footer_text: Text to display in the footer.
-        scroll_offset: Scroll offset for output display.
-        auto_scroll: Whether to auto-scroll to bottom.
-        stage: Current stage (PLAN, BUILD, VERIFY, etc.).
-        kills_timeout: Count of timeout kills.
-        kills_context: Count of context kills.
-        last_kill_reason: Reason for last kill.
-        last_kill_activity: Activity during last kill.
-        skeleton_frame: Current skeleton animation frame (None = not showing).
-        ralph_state: Cached ralph state to avoid loading every frame.
-    """
-
-    config: GlobalConfig
+    config: Any  # Dict with plan_file, repo_root, etc.
     branch: str
     cost: float = 0.0
     tokens_in: int = 0
@@ -96,7 +70,7 @@ class DashboardState:
     context_tokens: int = 0
     context_limit: int = DEFAULT_CONTEXT_WINDOW
     iteration: Optional[int] = None
-    output_lines: List[str] = field(default_factory=list)
+    output_lines: list[str] = field(default_factory=list)
     is_running: bool = False
     running_count: int = 0
     footer_text: str = "Watching..."
@@ -108,40 +82,28 @@ class DashboardState:
     last_kill_reason: str = ""
     last_kill_activity: str = ""
     skeleton_frame: Optional[int] = None
-    ralph_state: Optional[RalphState] = None
+    ralph_state: Optional["RalphState"] = None
 
 
 class FallbackDashboard:
-    """Shared ANSI fallback dashboard for watch and build modes.
+    """Shared ANSI fallback dashboard for watch and build modes."""
 
-    This dashboard uses raw ANSI escape codes for rendering when the
-    Textual library is not available.
-    """
-
-    def __init__(
-        self,
-        plan_file: Path,
-        global_config: Optional[GlobalConfig] = None,
-        iteration: Optional[int] = None,
-    ):
+    def __init__(self, config: Any, iteration: Optional[int] = None) -> None:
         """Initialize the fallback dashboard.
 
         Args:
-            plan_file: Path to the plan.jsonl file.
-            global_config: Optional global configuration.
-            iteration: Optional starting iteration number.
+            config: Ralph configuration.
+            iteration: Optional current iteration number.
         """
-        self.plan_file = plan_file
-        self.global_config = global_config or GlobalConfig()
+        self.config = config
         self.iteration = iteration
-        self.output_lines: deque = deque(maxlen=2000)
+        self.output_lines: deque[str] = deque(maxlen=2000)
         self.scroll_offset = 0
         self.auto_scroll = True
         self.old_settings = None
         self.term_width = 80
         self.term_height = 24
 
-        # Cached data
         self.cost = 0.0
         self.tokens_in = 0
         self.tokens_out = 0
@@ -155,15 +117,13 @@ class FallbackDashboard:
         self.last_kill_reason = ""
         self.last_kill_activity = ""
         self.skeleton_frame: Optional[int] = None
-        self.ralph_state: Optional[RalphState] = None
+        self.ralph_state: Optional["RalphState"] = None
 
-    def get_input(self) -> Optional[Union[str, Tuple[str, int]]]:
+    def get_input(self) -> Optional[str | tuple[str, int]]:
         """Non-blocking keyboard input with coalescing for scroll keys.
 
         Returns:
-            - None if no input
-            - str for single actions ('quit', 'page_down', etc.)
-            - ('scroll', delta) for coalesced j/k scroll (delta can be negative)
+            None if no input, str for single actions, or ('scroll', delta) tuple.
         """
         scroll_delta = 0
         last_action: Optional[str] = None
@@ -175,7 +135,7 @@ class FallbackDashboard:
                     break
 
                 ch = sys.stdin.read(1)
-                if ch == "q" or ch == "Q":
+                if ch in ("q", "Q"):
                     return "quit"
                 elif ch == "j":
                     scroll_delta += 1
@@ -191,7 +151,7 @@ class FallbackDashboard:
                     last_action = "page_down"
                 elif ch == "u":
                     last_action = "page_up"
-                elif ch == "f" or ch == "F":
+                elif ch in ("f", "F"):
                     last_action = "toggle_follow"
                 elif ch == "\x1b":
                     ready2, _, _ = select.select([sys.stdin], [], [], 0.01)
@@ -214,7 +174,7 @@ class FallbackDashboard:
             return ("scroll", scroll_delta)
         return last_action
 
-    def handle_action(self, action: Union[str, Tuple[str, int], None]) -> bool:
+    def handle_action(self, action: Optional[str | tuple[str, int]]) -> bool:
         """Handle a keyboard action.
 
         Args:
@@ -272,17 +232,13 @@ class FallbackDashboard:
         ]
 
         if len(self.output_lines) > viewport_height:
-            scroll_info = (
-                f"[{self.scroll_offset + 1}-"
-                f"{min(self.scroll_offset + viewport_height, len(self.output_lines))}"
-                f"/{len(self.output_lines)}]"
-            )
+            scroll_info = f"[{self.scroll_offset + 1}-{min(self.scroll_offset + viewport_height, len(self.output_lines))}/{len(self.output_lines)}]"
             scroll_info += " FOLLOW" if self.auto_scroll else " SCROLL"
         else:
             scroll_info = "FOLLOW" if self.auto_scroll else ""
 
         state = DashboardState(
-            config=self.global_config,
+            config=self.config,
             branch=self.branch,
             cost=self.cost,
             tokens_in=self.tokens_in,
@@ -317,8 +273,8 @@ class FallbackDashboard:
         new_settings[3] = new_settings[3] & ~termios.ICANON
         termios.tcsetattr(sys.stdin, termios.TCSANOW, new_settings)
 
-        sys.stdout.write("\033[?1049h")  # Alternate screen
-        sys.stdout.write("\033[?25l")  # Hide cursor
+        sys.stdout.write("\033[?1049h")
+        sys.stdout.write("\033[?25l")
         sys.stdout.flush()
 
     def exit(self) -> None:
@@ -327,15 +283,15 @@ class FallbackDashboard:
 
         if self.old_settings:
             termios.tcsetattr(sys.stdin, termios.TCSADRAIN, self.old_settings)
-        sys.stdout.write("\033[?25h")  # Show cursor
-        sys.stdout.write("\033[?1049l")  # Exit alternate screen
+        sys.stdout.write("\033[?25h")
+        sys.stdout.write("\033[?1049l")
         sys.stdout.flush()
 
     def add_line(self, line: str) -> None:
-        """Add an output line.
+        """Add an output line to the dashboard.
 
         Args:
-            line: Line to add to output.
+            line: The line to add.
         """
         if line.startswith("\x01HEARTBEAT:"):
             try:
@@ -356,21 +312,22 @@ class FallbackDashboard:
 
     def run_loop(
         self,
-        poll_data: Callable[[], Optional[List[str]]],
-        on_quit: Optional[Callable[[], Optional[int]]] = None,
+        poll_data: Callable[[], Optional[list[str]]],
+        on_quit: Optional[Callable[[], Optional[object]]] = None,
         update_state: Optional[Callable[["FallbackDashboard"], None]] = None,
-    ) -> Optional[int]:
+    ) -> Optional[object]:
         """Unified main loop for dashboard rendering.
 
         Args:
-            poll_data: Callable that returns list of new lines (or None to continue).
-                Raise StopIteration to exit.
+            poll_data: Callable that returns list of new lines. Raise StopIteration to exit.
             on_quit: Optional callable when user presses quit.
             update_state: Optional callable to update dashboard state each iteration.
 
         Returns:
             Return value from on_quit, or None if loop exits normally.
         """
+        from pathlib import Path
+
         ANIMATION_FPS = 30
         FRAME_DURATION = 1.0 / ANIMATION_FPS
         SKELETON_DELAY = 0.5
@@ -410,8 +367,13 @@ class FallbackDashboard:
                     )
 
                 if now - last_state_refresh >= STATE_REFRESH_INTERVAL:
-                    if self.plan_file.exists():
-                        self.ralph_state = load_state(self.plan_file)
+                    plan_file = (
+                        Path(self.config.plan_file)
+                        if hasattr(self.config, "plan_file")
+                        else None
+                    )
+                    if plan_file:
+                        self.ralph_state = load_state(plan_file)
                     last_state_refresh = now
 
                 if update_state:
@@ -444,27 +406,28 @@ class FallbackDashboard:
 
 def render_dashboard(
     state: DashboardState, term_width: int, term_height: int
-) -> List[str]:
+) -> list[str]:
     """Render the dashboard and return lines.
 
     Args:
         state: Current dashboard state.
         term_width: Terminal width in characters.
-        term_height: Terminal height in lines.
+        term_height: Terminal height in characters.
 
     Returns:
         List of lines to display.
     """
+    from pathlib import Path
+
     CLEAR_LINE = "\033[K"
 
     def truncate(text: str, max_width: int, prefix_len: int = 0) -> str:
-        """Truncate text to fit terminal, accounting for ANSI codes."""
         visible_max = max_width - prefix_len - 3
         if len(text) > visible_max:
             return text[:visible_max] + "..."
         return text
 
-    lines: List[str] = []
+    lines: list[str] = []
 
     def add(text: str = "") -> None:
         lines.append(f"{text}{CLEAR_LINE}")
@@ -473,7 +436,6 @@ def render_dashboard(
     section_bar = "─" * (term_width - 1)
     footer_bar = "─" * (term_width - 1)
 
-    # Header
     add(f"{Colors.BLUE}{header_bar}{Colors.NC}")
 
     kills_str = ""
@@ -486,27 +448,22 @@ def render_dashboard(
         kills_str = f" | {Colors.RED}Kills: {' '.join(parts)}{Colors.NC}"
 
     if state.iteration is not None:
-        title = (
-            f"  RALPH WIGGUM - Iteration {state.iteration} - "
-            f"{datetime.now().strftime('%H:%M:%S')}{kills_str}"
-        )
+        title = f"  RALPH WIGGUM - Iteration {state.iteration} - {datetime.now().strftime('%H:%M:%S')}{kills_str}"
     else:
         title = f"  RALPH WIGGUM - {datetime.now().strftime('%H:%M:%S')}{kills_str}"
     add(f"{Colors.BLUE}{title}{Colors.NC}")
     add(f"{Colors.BLUE}{header_bar}{Colors.NC}")
     add()
 
-    ralph_state = (
-        state.ralph_state
-        if state.ralph_state
-        else (
-            load_state(Path("ralph/plan.jsonl"))
-            if Path("ralph/plan.jsonl").exists()
-            else RalphState()
+    ralph_state = state.ralph_state
+    if ralph_state is None:
+        plan_file = (
+            Path(state.config.plan_file) if hasattr(state.config, "plan_file") else None
         )
-    )
+        if plan_file:
+            ralph_state = load_state(plan_file)
 
-    status_lines: List[str] = []
+    status_lines: list[str] = []
     status_lines.append(f"🌿 {Colors.GREEN}Branch:{Colors.NC} {state.branch}")
 
     if state.is_running:
@@ -519,7 +476,7 @@ def render_dashboard(
     else:
         status_lines.append(f"🟡 {Colors.YELLOW}Status:{Colors.NC} Stopped")
 
-    stage = ralph_state.get_stage()
+    stage = ralph_state.get_stage() if ralph_state else "UNKNOWN"
     stage_colors = {
         "PLAN": Colors.MAGENTA,
         "BUILD": Colors.CYAN,
@@ -549,8 +506,7 @@ def render_dashboard(
     else:
         ctx_color = Colors.CYAN
     status_lines.append(
-        f"🧠 {ctx_color}Context:{Colors.NC} {state.context_tokens:,} / "
-        f"{state.context_limit:,} ({pct:.0f}%)"
+        f"🧠 {ctx_color}Context:{Colors.NC} {state.context_tokens:,} / {state.context_limit:,} ({pct:.0f}%)"
     )
 
     if state.last_kill_reason:
@@ -559,17 +515,17 @@ def render_dashboard(
             kill_msg += f" @ {state.last_kill_activity[:30]}"
         status_lines.append(kill_msg)
 
-    pending = len(ralph_state.pending)
-    done = len(ralph_state.done)
+    pending = len(ralph_state.pending) if ralph_state else 0
+    done = len(ralph_state.done) if ralph_state else 0
     status_lines.append("")
     status_lines.append(
         f"📊 {Colors.GREEN}Progress:{Colors.NC} {done} done, {pending} pending"
     )
     status_lines.append("")
-    if ralph_state.spec:
+    if ralph_state and ralph_state.spec:
         status_lines.append(f"📋 {Colors.GREEN}Spec:{Colors.NC} {ralph_state.spec}")
     status_lines.append(f"🎯 {Colors.GREEN}Task:{Colors.NC}")
-    next_task_obj = ralph_state.get_next_task()
+    next_task_obj = ralph_state.get_next_task() if ralph_state else None
     next_task = next_task_obj.name if next_task_obj else None
     if next_task:
         status_lines.append(
@@ -591,18 +547,16 @@ def render_dashboard(
     t_join_separator = "─" * left_width + "┴" + "─" * right_width
     add(f"{Colors.DIM}{t_join_separator}{Colors.NC}")
 
-    if ralph_state.issues:
+    if ralph_state and ralph_state.issues:
         add(
-            f"{Colors.YELLOW}Discovered Issues:{Colors.NC} "
-            f"({len(ralph_state.issues)} open)"
+            f"{Colors.YELLOW}Discovered Issues:{Colors.NC} ({len(ralph_state.issues)} open)"
         )
         for issue in ralph_state.issues[:5]:
             truncated_text = truncate(issue.desc, term_width, 9)
             add(f"  {Colors.RED}OPEN{Colors.NC}   {truncated_text}")
         if len(ralph_state.issues) > 5:
             add(
-                f"  {Colors.YELLOW}... and {len(ralph_state.issues) - 5} more"
-                f"{Colors.NC}"
+                f"  {Colors.YELLOW}... and {len(ralph_state.issues) - 5} more{Colors.NC}"
             )
         add(f"{Colors.DIM}{section_bar}{Colors.NC}")
 
