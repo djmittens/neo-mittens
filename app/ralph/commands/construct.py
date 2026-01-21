@@ -10,17 +10,17 @@ import time
 from pathlib import Path
 from typing import Optional
 
-from ralph.config import GlobalConfig
-from ralph.context import Metrics
-from ralph.opencode import spawn_opencode, parse_json_stream, extract_metrics
-from ralph.stages.base import (
+from ..config import GlobalConfig
+from ..context import Metrics
+from ..opencode import spawn_opencode, parse_json_stream, extract_metrics
+from ..stages.base import (
     ConstructStateMachine,
     Stage,
     StageOutcome,
     StageResult,
 )
-from ralph.state import RalphState, load_state, save_state
-from ralph.utils import Colors
+from ..state import RalphState, load_state, save_state
+from ..utils import Colors
 
 __all__ = ["cmd_construct"]
 

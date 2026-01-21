@@ -2,72 +2,156 @@
 """Ralph CLI - argparse setup and command dispatch."""
 
 import argparse
+import os
 import sys
+
+# Add the parent directory to the Python path to resolve ralph imports
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
+
+import sys
+from pathlib import Path
 from typing import Optional, Sequence
 
-from ralph import __version__
+# Local imports
+from .commands.init import cmd_init
+from .commands.construct import cmd_construct
+from .commands.task import cmd_task
+from .commands.validate import cmd_validate
+from .commands.compact import cmd_compact
+from .commands.status import cmd_status
+from .config import get_global_config
+
+
+def _stub_command(name: str) -> int:
+    """Return stub message for unimplemented commands."""
+    print(f"ralph {name}: stub - not yet implemented")
+    return 0
+
+
+def main(argv: Optional[Sequence[str]] = None) -> int:
+    """Main entry point for ralph CLI."""
+    parser = _create_parser()
+    args = parser.parse_args(argv)
+
+    if args.command is None:
+        parser.print_help()
+        return 0
+
+    if args.command == "init":
+        return cmd_init()
+
+    if args.command == "status":
+        return cmd_status()
+
+    if args.command == "config":
+        return _stub_command("config")
+
+    if args.command == "watch":
+        return _stub_command("watch")
+
+    if args.command == "stream":
+        return _stub_command("stream")
+
+    if args.command == "plan":
+        return _stub_command("plan")
+
+    if args.command == "construct":
+        global_config = get_global_config()
+        cwd = Path.cwd()
+        ralph_dir = cwd / "ralph"
+        plan_file = ralph_dir / "plan.jsonl"
+
+        # Determine spec and iterations
+        spec_file = args.spec
+
+        config = {
+            "plan_file": plan_file,
+            "repo_root": cwd,
+            "ralph_dir": ralph_dir,
+            **global_config.__dict__,
+        }
+
+        # Use max_iterations if provided, otherwise use iterations
+        iterations = 0
+        if args.max_iterations is not None:
+            iterations = args.max_iterations
+        elif args.iterations is not None:
+            iterations = args.iterations
+
+        return cmd_construct(config, iterations, args)
+
+    if args.command == "query":
+        return _stub_command("query")
+
+    if args.command == "task":
+        if not args.action:
+            print(
+                "Usage: ralph task [add|done|accept|reject|delete|prioritize] <description>"
+            )
+            return 1
+
+        global_config = get_global_config()
+        cwd = Path.cwd()
+        ralph_dir = cwd / "ralph"
+        plan_file = ralph_dir / "plan.jsonl"
+        config = {
+            "plan_file": plan_file,
+            "repo_root": cwd,
+            **global_config.__dict__,
+        }
+        return cmd_task(config, args.action, args.description, args.extra)
+
+    if args.command == "issue":
+        if not args.action:
+            print("Usage: ralph issue [add|done|done-all|done-ids] <description>")
+            return 1
+        return _stub_command(f"issue {args.action}")
+
+    if args.command == "validate":
+        global_config = get_global_config()
+        return cmd_validate(global_config, args)
+
+    if args.command == "compact":
+        global_config = get_global_config()
+        return cmd_compact(global_config, args)
+
+    if args.command == "log":
+        return _stub_command("log")
+
+    if args.command == "set-spec":
+        return _stub_command("set-spec")
+
+    print(f"ralph: unknown command '{args.command}'", file=sys.stderr)
+    return 1
 
 
 def _create_parser() -> argparse.ArgumentParser:
-    """Create and configure the argument parser."""
+    """Create argument parser with all subcommands."""
     parser = argparse.ArgumentParser(
-        prog="ralph",
-        description="Ralph Wiggum - Autonomous AI Development Loop",
-        formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog="""
-Examples:
-  ralph init                    Initialize in current repo
-  ralph plan spec.md            Plan tasks for a specific spec
-  ralph construct               Run autonomous construction
-  ralph status                  Show current status
-  ralph query                   Query current state as JSON
-  ralph task add "description"  Add a new task
-  ralph issue add "description" Add a new issue
-""",
+        description="Ralph CLI - Autonomous Development Assistant"
     )
-
-    parser.add_argument("--version", action="version", version=f"ralph {__version__}")
-
-    subparsers = parser.add_subparsers(dest="command", help="Command to run")
+    parser.add_argument("--version", action="version", version="%(prog)s 0.1.0")
+    subparsers = parser.add_subparsers(
+        dest="command", help="Ralph commands", required=False
+    )
 
     # init
-    subparsers.add_parser("init", help="Initialize ralph in current directory")
+    subparsers.add_parser("init", help="Initialize a new ralph project")
 
     # status
-    subparsers.add_parser("status", help="Show ralph status")
+    subparsers.add_parser("status", help="Show current project status")
 
     # config
-    subparsers.add_parser("config", help="Configure ralph settings")
-
-    # watch
-    subparsers.add_parser("watch", help="Watch for changes and show live dashboard")
-
-    # stream
-    subparsers.add_parser(
-        "stream", help="Stream opencode output with pretty formatting"
-    )
-
-    # plan
-    plan_parser = subparsers.add_parser("plan", help="Create plan from spec")
-    plan_parser.add_argument("spec", nargs="?", help="Spec file to plan")
-    plan_parser.add_argument(
-        "--max-cost", type=float, default=0, help="Stop when cost exceeds $N"
-    )
-    plan_parser.add_argument(
-        "--timeout", type=int, help="Kill stage after N milliseconds"
-    )
-    plan_parser.add_argument(
-        "--no-ui", action="store_true", help="Disable interactive dashboard"
-    )
+    subparsers.add_parser("config", help="Configure Ralph settings")
 
     # construct
     construct_parser = subparsers.add_parser(
         "construct", help="Run autonomous construction"
     )
+    construct_parser.add_argument("spec", nargs="?", help="Spec file to construct")
     construct_parser.add_argument(
         "iterations", nargs="?", type=int, help="Max iterations"
     )
-    construct_parser.add_argument("spec", nargs="?", help="Spec file to construct")
     construct_parser.add_argument(
         "--max-cost", type=float, default=0, help="Stop when cost exceeds $N"
     )
@@ -95,15 +179,6 @@ Examples:
         help="Cost profile: budget, balanced, hybrid, cost_smart, quality",
     )
 
-    # query
-    query_parser = subparsers.add_parser("query", help="Query current state as JSON")
-    query_parser.add_argument(
-        "subquery", nargs="?", help="Subquery: stage, iteration, tasks, issues, next"
-    )
-    query_parser.add_argument(
-        "--done", action="store_true", help="Show only done tasks"
-    )
-
     # task
     task_parser = subparsers.add_parser("task", help="Manage tasks")
     task_parser.add_argument(
@@ -116,6 +191,15 @@ Examples:
         "extra", nargs="?", help="Extra argument (e.g., reject reason)"
     )
 
+    # query
+    query_parser = subparsers.add_parser("query", help="Query current state as JSON")
+    query_parser.add_argument(
+        "subquery", nargs="?", help="Subquery: stage, iteration, tasks, issues, next"
+    )
+    query_parser.add_argument(
+        "--done", action="store_true", help="Show only done tasks"
+    )
+
     # issue
     issue_parser = subparsers.add_parser("issue", help="Manage issues")
     issue_parser.add_argument(
@@ -123,116 +207,14 @@ Examples:
     )
     issue_parser.add_argument("description", nargs="?", help="Issue description or IDs")
 
-    # validate
+    # Additional parsers with minimal setup
     subparsers.add_parser("validate", help="Validate plan for issues")
-
-    # compact
-    subparsers.add_parser("compact", help="Compact plan file, archive old tombstones")
-
-    # log
-    log_parser = subparsers.add_parser("log", help="Show state change history")
-    log_parser.add_argument("--all", action="store_true", help="Show all history")
-    log_parser.add_argument("--spec", help="Filter by spec")
-    log_parser.add_argument("--branch", help="Filter by branch")
-    log_parser.add_argument("--since", help="Filter since date/commit")
-
-    # set-spec
+    subparsers.add_parser("compact", help="Compact plan file")
+    subparsers.add_parser("log", help="Show state change history")
     set_spec_parser = subparsers.add_parser("set-spec", help="Set current spec")
     set_spec_parser.add_argument("spec", help="Spec file to set")
 
     return parser
-
-
-def _stub_command(name: str) -> int:
-    """Return stub message for unimplemented commands."""
-    print(f"ralph {name}: stub - not yet implemented")
-    return 0
-
-
-def main(argv: Optional[Sequence[str]] = None) -> int:
-    """Main entry point for ralph CLI."""
-    parser = _create_parser()
-    args = parser.parse_args(argv)
-
-    if args.command is None:
-        parser.print_help()
-        return 0
-
-    if args.command == "init":
-        from ralph.commands.init import cmd_init
-
-        return cmd_init()
-
-    if args.command == "status":
-        return _stub_command("status")
-
-    if args.command == "config":
-        return _stub_command("config")
-
-    if args.command == "watch":
-        return _stub_command("watch")
-
-    if args.command == "stream":
-        return _stub_command("stream")
-
-    if args.command == "plan":
-        return _stub_command("plan")
-
-    if args.command == "construct":
-        return _stub_command("construct")
-
-    if args.command == "query":
-        return _stub_command("query")
-
-    if args.command == "task":
-        if not args.action:
-            print(
-                "Usage: ralph task [add|done|accept|reject|delete|prioritize] <description>"
-            )
-            return 1
-        from ralph.commands.task import cmd_task
-        from ralph.config import get_global_config
-        from pathlib import Path
-
-        global_config = get_global_config()
-        cwd = Path.cwd()
-        ralph_dir = cwd / "ralph"
-        plan_file = ralph_dir / "plan.jsonl"
-        config = {
-            "plan_file": plan_file,
-            "repo_root": cwd,
-            **global_config.__dict__,
-        }
-        return cmd_task(config, args.action, args.description, args.extra)
-
-    if args.command == "issue":
-        if not args.action:
-            print("Usage: ralph issue [add|done|done-all|done-ids] <description>")
-            return 1
-        return _stub_command(f"issue {args.action}")
-
-    if args.command == "validate":
-        from ralph.commands.validate import cmd_validate
-        from ralph.config import get_global_config
-
-        global_config = get_global_config()
-        return cmd_validate(global_config, args)
-
-    if args.command == "compact":
-        from ralph.commands.compact import cmd_compact
-        from ralph.config import get_global_config
-
-        global_config = get_global_config()
-        return cmd_compact(global_config, args)
-
-    if args.command == "log":
-        return _stub_command("log")
-
-    if args.command == "set-spec":
-        return _stub_command("set-spec")
-
-    print(f"ralph: unknown command '{args.command}'", file=sys.stderr)
-    return 1
 
 
 if __name__ == "__main__":
