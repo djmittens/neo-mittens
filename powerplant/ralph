@@ -6170,7 +6170,15 @@ def cmd_task(config: RalphConfig, action: str, desc: Optional[str] = None, arg3:
         )
         staged_files = [f for f in result_staged.stdout.strip().split('\n') if f and f != 'ralph/plan.jsonl']
         
-        all_changed = set(changed_files + staged_files)
+        # Also check untracked files (new files created but not yet staged)
+        result_untracked = subprocess.run(
+            ['git', 'ls-files', '--others', '--exclude-standard'],
+            cwd=config.repo_root, capture_output=True, text=True
+        )
+        untracked_files = [f for f in result_untracked.stdout.strip().split('\n') 
+                          if f and not f.startswith('ralph/plan') and not f.endswith('.log')]
+        
+        all_changed = set(changed_files + staged_files + untracked_files)
         
         if not all_changed:
             print(f"{Colors.RED}ERROR: No code changes detected!{Colors.NC}")
@@ -6184,6 +6192,11 @@ def cmd_task(config: RalphConfig, action: str, desc: Optional[str] = None, arg3:
         
         # Stage all tracked file changes (code changes made by AI)
         subprocess.run(['git', 'add', '-u'], cwd=config.repo_root, capture_output=True)
+        
+        # Also stage any untracked files that were detected as changes
+        if untracked_files:
+            for f in untracked_files:
+                subprocess.run(['git', 'add', f], cwd=config.repo_root, capture_output=True)
         
         # Save plan state and stage it
         save_state(config, state)
@@ -6208,6 +6221,7 @@ def cmd_task(config: RalphConfig, action: str, desc: Optional[str] = None, arg3:
             return 1
         
         # Try parsing as JSON for structured task, otherwise treat as simple name
+        custom_id = None
         try:
             if desc.startswith('{'):
                 d = json.loads(desc)
@@ -6218,6 +6232,7 @@ def cmd_task(config: RalphConfig, action: str, desc: Optional[str] = None, arg3:
                 priority = d.get("priority")  # Priority inherited from issue
                 parent = d.get("parent")  # Parent task ID for decomposition
                 created_from = d.get("created_from")  # Issue ID for investigate
+                custom_id = d.get("id")  # Optional custom task ID
             else:
                 name = desc
                 notes = None
@@ -6238,6 +6253,30 @@ def cmd_task(config: RalphConfig, action: str, desc: Optional[str] = None, arg3:
         if not name:
             print(f"{Colors.RED}Task name is required{Colors.NC}")
             return 1
+        
+        # Validate custom task ID if provided
+        if custom_id:
+            import re
+            if not re.match(r'^t-[a-z0-9]{4,10}$', custom_id):
+                print(f"{Colors.RED}ERROR: Invalid task ID format: {custom_id}{Colors.NC}")
+                print(f"  {Colors.DIM}Expected format: t-[a-z0-9]{{4,10}} (e.g., t-abc123){Colors.NC}")
+                return 1
+            # Check for duplicate ID
+            existing_ids = {t.id for t in state.tasks}
+            if custom_id in existing_ids:
+                print(f"{Colors.RED}ERROR: Task ID already exists: {custom_id}{Colors.NC}")
+                return 1
+            task_id = custom_id
+        else:
+            task_id = _generate_id('t')
+        
+        # Validate dependencies exist (warn but don't block)
+        if deps:
+            existing_ids = {t.id for t in state.tasks}
+            missing_deps = [d for d in deps if d not in existing_ids]
+            if missing_deps:
+                print(f"{Colors.YELLOW}WARNING: Dependencies not found: {', '.join(missing_deps)}{Colors.NC}")
+                print(f"  {Colors.DIM}This task will be blocked until these deps are created or removed.{Colors.NC}")
         
         # Calculate decompose_depth from parent task
         decompose_depth = 0
@@ -6262,7 +6301,7 @@ def cmd_task(config: RalphConfig, action: str, desc: Optional[str] = None, arg3:
                 priority = source_issue.priority
             
         task = Task(
-            id=_generate_id('t'), 
+            id=task_id, 
             name=name, 
             spec=state.spec, 
             notes=notes, 
