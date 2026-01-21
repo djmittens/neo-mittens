@@ -5884,7 +5884,7 @@ def cmd_run(config: RalphConfig, mode: str, max_iterations: int, max_cost: float
             if kill_state["killed"]:
                 print(f"\n{Colors.RED}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━{Colors.NC}")
                 if kill_state["reason"] == "timeout":
-                    print(f"{Colors.RED}TIMEOUT: Iteration killed after {iteration_timeout_ms}ms{Colors.NC}")
+                    print(f"{Colors.RED}TIMEOUT: Iteration killed after {stage_timeout_ms}ms{Colors.NC}")
                 elif kill_state["info"] and kill_state["info"].tokens_used > 0:
                     pct = kill_state["info"].tokens_used / context_limit * 100
                     reason_text = "COMPACTION FAILED" if kill_state["reason"] == "compaction_failed" else "CONTEXT LIMIT"
