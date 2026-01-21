@@ -146,7 +146,7 @@ _MINIMAL_RAW = [
 ]
 
 
-def get_ralph_art(style: str = "braille") -> List[str]:
+def get_ralph_art(style: str = "braille") -> str:
     """Get Ralph art based on the specified style.
 
     Args:
@@ -154,23 +154,23 @@ def get_ralph_art(style: str = "braille") -> List[str]:
             Possible values: 'none', 'braille', 'braille_full', 'blocks', 'minimal'
 
     Returns:
-        List[str]: Colorized ASCII art lines
+        str: Colorized ASCII art as a single string with newlines
     """
     style = style.lower()
 
     if style == "none":
-        return []
+        return ""
     elif style == "braille_full":
-        art = _colorize_art(_BRAILLE_FULL_RAW, _BRAILLE_FULL_COLORS, _COLOR_CODES)
+        art_lines = _colorize_art(_BRAILLE_FULL_RAW, _BRAILLE_FULL_COLORS, _COLOR_CODES)
     elif style == "blocks":
-        art = _colorize_art(_BLOCKS_RAW, _BLOCKS_COLORS, _COLOR_CODES)
+        art_lines = _colorize_art(_BLOCKS_RAW, _BLOCKS_COLORS, _COLOR_CODES)
     elif style == "minimal":
-        art = _MINIMAL_RAW  # Already colored
+        art_lines = _MINIMAL_RAW  # Already colored
     else:  # default: braille
-        art = _colorize_art(_BRAILLE_RAW, _BRAILLE_COLORS, _COLOR_CODES)
+        art_lines = _colorize_art(_BRAILLE_RAW, _BRAILLE_COLORS, _COLOR_CODES)
 
-    return art
+    return "\n".join(art_lines)
 
 
 # Default art constant
-RALPH_ART: List[str] = get_ralph_art()
+RALPH_ART: str = get_ralph_art()
