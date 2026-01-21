@@ -68,6 +68,83 @@ def has_uncommitted_plan(plan_file: Path, cwd: Optional[Path] = None) -> bool:
     return bool(result.stdout.strip())
 
 
+def _commit_plan_if_modified(plan_file: Optional[Path], cwd: Optional[Path]) -> None:
+    """Commit plan.jsonl changes if file has uncommitted modifications.
+
+    Args:
+        plan_file: Path to plan.jsonl
+        cwd: Working directory for git commands
+    """
+    if plan_file and has_uncommitted_plan(plan_file, cwd):
+        subprocess.run(["git", "add", str(plan_file)], cwd=cwd, capture_output=True)
+        subprocess.run(
+            ["git", "commit", "-m", "ralph: save state before sync"],
+            cwd=cwd,
+            capture_output=True,
+        )
+
+
+def _fetch_remote(branch: str, cwd: Optional[Path]) -> bool:
+    """Fetch changes from the remote for a specific branch.
+
+    Args:
+        branch: Branch name to fetch
+        cwd: Working directory for git commands
+
+    Returns:
+        True if fetch succeeded, False otherwise
+    """
+    fetch_result = subprocess.run(
+        ["git", "fetch", "origin", branch], capture_output=True, text=True, cwd=cwd
+    )
+    return fetch_result.returncode == 0
+
+
+def _is_branch_behind(cwd: Optional[Path]) -> bool:
+    """Check if current branch is behind or has diverged.
+
+    Args:
+        cwd: Working directory for git commands
+
+    Returns:
+        True if branch is behind or has diverged, False if up to date
+    """
+    status_result = subprocess.run(
+        ["git", "status", "-uno"], capture_output=True, text=True, cwd=cwd
+    )
+    return (
+        "Your branch is behind" in status_result.stdout
+        or "have diverged" in status_result.stdout
+    )
+
+
+def _rebase_onto_remote(branch: str, cwd: Optional[Path]) -> str:
+    """Attempt to rebase current branch onto remote branch.
+
+    Args:
+        branch: Branch name
+        cwd: Working directory for git commands
+
+    Returns:
+        "updated" on success, "conflict" on merge conflict, "error" otherwise
+    """
+    rebase_result = subprocess.run(
+        ["git", "rebase", f"origin/{branch}"], capture_output=True, text=True, cwd=cwd
+    )
+
+    if rebase_result.returncode != 0:
+        # Abort rebase to restore clean state
+        subprocess.run(["git", "rebase", "--abort"], capture_output=True, cwd=cwd)
+        if (
+            "CONFLICT" in rebase_result.stdout
+            or "conflict" in rebase_result.stderr.lower()
+        ):
+            return "conflict"
+        return "error"
+
+    return "updated"
+
+
 def sync_with_remote(
     branch: Optional[str] = None,
     plan_file: Optional[Path] = None,
@@ -95,48 +172,18 @@ def sync_with_remote(
             return "error"
 
     # Commit uncommitted plan changes to avoid losing work
-    if plan_file and has_uncommitted_plan(plan_file, cwd):
-        subprocess.run(["git", "add", str(plan_file)], cwd=cwd, capture_output=True)
-        subprocess.run(
-            ["git", "commit", "-m", "ralph: save state before sync"],
-            cwd=cwd,
-            capture_output=True,
-        )
+    _commit_plan_if_modified(plan_file, cwd)
 
     # Fetch from remote
-    fetch_result = subprocess.run(
-        ["git", "fetch", "origin", branch], capture_output=True, text=True, cwd=cwd
-    )
-    if fetch_result.returncode != 0:
+    if not _fetch_remote(branch, cwd):
         return "error"
 
     # Check if we're behind
-    status_result = subprocess.run(
-        ["git", "status", "-uno"], capture_output=True, text=True, cwd=cwd
-    )
-
-    if (
-        "Your branch is behind" not in status_result.stdout
-        and "have diverged" not in status_result.stdout
-    ):
+    if not _is_branch_behind(cwd):
         return "current"
 
     # Try to rebase
-    rebase_result = subprocess.run(
-        ["git", "rebase", f"origin/{branch}"], capture_output=True, text=True, cwd=cwd
-    )
-
-    if rebase_result.returncode != 0:
-        # Abort rebase to restore clean state
-        subprocess.run(["git", "rebase", "--abort"], capture_output=True, cwd=cwd)
-        if (
-            "CONFLICT" in rebase_result.stdout
-            or "conflict" in rebase_result.stderr.lower()
-        ):
-            return "conflict"
-        return "error"
-
-    return "updated"
+    return _rebase_onto_remote(branch, cwd)
 
 
 def push_with_retry(
