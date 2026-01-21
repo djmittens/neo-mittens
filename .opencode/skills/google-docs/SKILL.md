@@ -36,6 +36,19 @@ The Google Workspace tools use `gcloud auth application-default` credentials. If
 | `userinfo.email` | User email address |
 | `userinfo.profile` | User profile info |
 
+### Detecting Current Quota Project
+
+The quota project is stored in the ADC credentials file. To detect it:
+
+```bash
+cat ~/.config/gcloud/application_default_credentials.json | grep quota_project_id
+```
+
+Or use jq:
+```bash
+jq -r '.quota_project_id // empty' ~/.config/gcloud/application_default_credentials.json
+```
+
 ### Full Authentication Setup
 
 When you see errors like:
@@ -45,15 +58,19 @@ When you see errors like:
 - `SERVICE_DISABLED`
 - `API requires a quota project`
 
-Run these commands to fix authentication:
-
-**Step 1: Set your quota project** (replace with user's GCP project):
+**First, detect or ask for the quota project:**
 
 ```bash
-gcloud auth application-default set-quota-project YOUR_PROJECT_ID
+# Try to get existing quota project
+PROJECT=$(jq -r '.quota_project_id // empty' ~/.config/gcloud/application_default_credentials.json 2>/dev/null)
+echo "Current quota project: ${PROJECT:-not set}"
 ```
 
-**Step 2: Enable the required APIs** on the quota project:
+If not set, ask the user for their GCP project ID.
+
+**Then run the setup commands:**
+
+**Step 1: Enable the required APIs** on the quota project:
 
 ```bash
 gcloud services enable \
@@ -64,13 +81,15 @@ gcloud services enable \
   calendar-json.googleapis.com \
   gmail.googleapis.com \
   tasks.googleapis.com \
-  --project=YOUR_PROJECT_ID
+  --project=$PROJECT
 ```
 
-**Step 3: Authenticate with all scopes**:
+**Step 2: Authenticate with all scopes and set quota project**:
 
 ```bash
-gcloud auth application-default login --scopes="\
+gcloud auth application-default login \
+  --billing-project=$PROJECT \
+  --scopes="\
 https://www.googleapis.com/auth/cloud-platform,\
 https://www.googleapis.com/auth/documents,\
 https://www.googleapis.com/auth/presentations,\
@@ -88,22 +107,22 @@ https://www.googleapis.com/auth/userinfo.email,\
 https://www.googleapis.com/auth/userinfo.profile"
 ```
 
-**Step 4: Re-set quota project** (auth login clears it):
+Note: `--billing-project` sets the quota project in ADC automatically.
+
+### One-liner Setup (Auto-detect or Prompt)
+
+This command auto-detects existing quota project or prompts for one, enables APIs, and authenticates with all scopes in a single flow:
 
 ```bash
-gcloud auth application-default set-quota-project YOUR_PROJECT_ID
-```
-
-### One-liner Setup
-
-For convenience, here's a combined command (replace YOUR_PROJECT_ID):
-
-```bash
-PROJECT=YOUR_PROJECT_ID && \
+PROJECT=${PROJECT:-$(jq -r '.quota_project_id // empty' ~/.config/gcloud/application_default_credentials.json 2>/dev/null)} && \
+[ -z "$PROJECT" ] && read -p "Enter GCP project ID: " PROJECT && \
 gcloud services enable docs.googleapis.com slides.googleapis.com drive.googleapis.com sheets.googleapis.com calendar-json.googleapis.com gmail.googleapis.com tasks.googleapis.com --project=$PROJECT && \
-gcloud auth application-default login --scopes="https://www.googleapis.com/auth/cloud-platform,https://www.googleapis.com/auth/documents,https://www.googleapis.com/auth/presentations,https://www.googleapis.com/auth/drive,https://www.googleapis.com/auth/drive.file,https://www.googleapis.com/auth/spreadsheets,https://www.googleapis.com/auth/calendar,https://www.googleapis.com/auth/calendar.events,https://www.googleapis.com/auth/gmail.modify,https://www.googleapis.com/auth/gmail.readonly,https://www.googleapis.com/auth/gmail.send,https://www.googleapis.com/auth/gmail.labels,https://www.googleapis.com/auth/tasks,https://www.googleapis.com/auth/userinfo.email,https://www.googleapis.com/auth/userinfo.profile" && \
-gcloud auth application-default set-quota-project $PROJECT
+gcloud auth application-default login \
+  --billing-project=$PROJECT \
+  --scopes="https://www.googleapis.com/auth/cloud-platform,https://www.googleapis.com/auth/documents,https://www.googleapis.com/auth/presentations,https://www.googleapis.com/auth/drive,https://www.googleapis.com/auth/drive.file,https://www.googleapis.com/auth/spreadsheets,https://www.googleapis.com/auth/calendar,https://www.googleapis.com/auth/calendar.events,https://www.googleapis.com/auth/gmail.modify,https://www.googleapis.com/auth/gmail.readonly,https://www.googleapis.com/auth/gmail.send,https://www.googleapis.com/auth/gmail.labels,https://www.googleapis.com/auth/tasks,https://www.googleapis.com/auth/userinfo.email,https://www.googleapis.com/auth/userinfo.profile"
 ```
+
+Note: `--billing-project` sets the quota project automatically, no need to run `set-quota-project` separately.
 
 This opens a browser for the user to authenticate with all required scopes.
 
