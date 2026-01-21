@@ -159,7 +159,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         return 0
 
     if args.command == "init":
-        return _stub_command("init")
+        from ralph.commands.init import cmd_init
+
+        return cmd_init()
 
     if args.command == "status":
         return _stub_command("status")
