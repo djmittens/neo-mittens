@@ -249,21 +249,40 @@ export const update_text = tool({
   async execute(args) {
     const { presentation_id, object_id, text } = args
 
-    const requests = [
-      {
+    // First, get the presentation to check if the text box has content
+    const pres = await slidesApi(`/v1/presentations/${presentation_id}`)
+    
+    // Find the element and check if it has text
+    let hasText = false
+    for (const slide of pres.slides || []) {
+      for (const element of slide.pageElements || []) {
+        if (element.objectId === object_id) {
+          const textContent = extractTextFromElement(element).trim()
+          hasText = textContent.length > 0
+          break
+        }
+      }
+    }
+
+    const requests: any[] = []
+    
+    // Only delete if there's existing text
+    if (hasText) {
+      requests.push({
         deleteText: {
           objectId: object_id,
           textRange: { type: "ALL" },
         },
+      })
+    }
+    
+    requests.push({
+      insertText: {
+        objectId: object_id,
+        insertionIndex: 0,
+        text: text,
       },
-      {
-        insertText: {
-          objectId: object_id,
-          insertionIndex: 0,
-          text: text,
-        },
-      },
-    ]
+    })
 
     await slidesApi(`/v1/presentations/${presentation_id}:batchUpdate`, {
       method: "POST",
