@@ -14,11 +14,23 @@ Usage: ralph [command] [options]
   ralph watch        - Live dashboard with cost tracking
 
 Options:
+  --profile, -p PROFILE    Cost profile: budget, balanced, hybrid, cost_smart, quality
   --max-cost N             Stop when cumulative cost exceeds $N
   --max-failures N         Circuit breaker: stop after N consecutive failures (default: 3)
   --timeout N              Kill iteration after N milliseconds (default: 900000)
   --context-limit N        Context window size in tokens (default: 200000)
   --completion-promise T   Stop when output contains TEXT
+
+Cost Profiles (use --profile or RALPH_PROFILE env var):
+  opus   - Full power, best results (use when you have quota)
+  sonnet - Balanced fallback (when Opus quota exhausted)
+  haiku  - Budget mode (Haiku for BUILD, Sonnet for reasoning stages)
+  
+  If no profile is specified, you will be prompted to select one.
+  Skip the prompt by setting --profile <name> or RALPH_PROFILE=<name>.
+  
+  Example: ralph -p haiku 50
+           RALPH_PROFILE=sonnet ralph
 
 Safety Features:
   - Iterations are killed if they exceed the timeout (prevents stuck agents)
@@ -80,9 +92,26 @@ def _check_textual():
 
 @dataclass
 class GlobalConfig:
-    """Global Ralph configuration loaded from ~/.config/ralph/config.toml"""
+    """Global Ralph configuration loaded from ~/.config/ralph/config.toml
+    
+    Model Selection
+    ===============
+    - model: Main model for reasoning stages (INVESTIGATE, VERIFY, DECOMPOSE)
+    - model_build: Fast model for BUILD stage (Haiku), upgrades to main model
+                   when task is complex (high priority, previously rejected, etc.)
+    
+    Profiles
+    ========
+    - opus:   Opus for reasoning, Haiku->Opus for BUILD
+    - sonnet: Sonnet for reasoning, Haiku->Sonnet for BUILD (when Opus quota exhausted)
+    """
     # Model settings
-    model: str = 'anthropic/claude-opus-4-5'
+    model: str = 'anthropic/claude-sonnet-4'  # Main model for reasoning stages
+    model_build: str = 'anthropic/claude-haiku-4'  # Fast model for BUILD stage
+    
+    # Complexity thresholds - BUILD upgrades to main model when task is complex
+    complexity_simple_tokens: int = 1000  # Notes shorter than this = simple
+    complexity_high_priority: bool = True  # High priority tasks get main model
     
     # Context limits
     context_window: int = 200_000
@@ -114,6 +143,60 @@ class GlobalConfig:
     
     # Profile name (for display/debugging)
     _profile_name: str = 'default'
+    
+    def get_model_for_stage(self, stage: str, task: 'Task' = None) -> str:
+        """Get the appropriate model for a stage.
+        
+        - Reasoning stages (INVESTIGATE, VERIFY, DECOMPOSE): Use main model
+        - Execution stage (BUILD): Use model_build, upgrade to main model if task is complex
+        
+        Args:
+            stage: Stage name (INVESTIGATE, BUILD, VERIFY, DECOMPOSE)
+            task: Optional task for complexity-based routing on BUILD
+            
+        Returns:
+            Model identifier string (e.g., "anthropic/claude-sonnet-4")
+        """
+        if stage == 'BUILD':
+            # BUILD uses fast model, but upgrades to main model for complex tasks
+            if task and self._is_complex_task(task):
+                return self.model
+            return self.model_build
+        
+        # Reasoning stages use the main model
+        return self.model
+    
+    def _is_complex_task(self, task: 'Task') -> bool:
+        """Check if task is complex enough to need the main model instead of Haiku.
+        
+        Returns True if task should use main model, False for Haiku.
+        """
+        if task is None:
+            return False
+        
+        # High priority tasks get the main model
+        if self.complexity_high_priority and task.priority == 'high':
+            return True
+        
+        # Previously rejected tasks need more capability
+        if task.reject_reason:
+            return True
+        
+        # Long/complex notes suggest a harder task
+        notes_len = len(task.notes or '')
+        if notes_len > self.complexity_simple_tokens * 3:
+            return True
+        
+        # Large acceptance criteria = more to verify
+        accept_len = len(task.accept or '')
+        if accept_len > 500:
+            return True
+        
+        # Large undivided task (not yet decomposed)
+        if task.decompose_depth == 0 and notes_len > 2000:
+            return True
+        
+        return False
 
     @classmethod
     def load(cls) -> 'GlobalConfig':
@@ -2411,9 +2494,11 @@ ralph task add '{"name": "Short task name", "notes": "Implementation details", "
 
 Task fields:
 - `name` (required): Short description of what to do (e.g., "Add unit tests for parser")
-- `notes` (optional): Implementation context, hints, relevant files
-- `accept` (optional): Acceptance criteria / test plan (e.g., "pytest tests/test_parser.py passes")
+- `notes` (required): Implementation details - what files to modify, what approach to take, relevant context
+- `accept` (required): Acceptance criteria - how to verify the task is done (e.g., "pytest tests/test_parser.py passes")
 - `deps` (optional): List of task IDs this task depends on
+
+**IMPORTANT**: Every task MUST have `notes` with implementation guidance. Tasks without `notes` will fail during BUILD.
 
 The command returns the new task ID (e.g., "Task added: t-1a2b - ..."). Use this ID when other tasks depend on it.
 
@@ -2621,13 +2706,15 @@ Signs of architectural blocker:
 
 ## Step 4: Check for Gaps
 
-Read the spec\\'s **Acceptance Criteria section only** (not entire spec):
+Read the spec\'s **Acceptance Criteria section only** (not entire spec):
 `ralph/specs/<spec-name>` - scroll to "## Acceptance Criteria"
 
-For any unchecked criteria (`- [ ]`) not covered by existing tasks:
+For any unchecked criteria (`- [ ]`) not covered by existing tasks, research what's needed and create a well-defined task:
 ```
-ralph task add \'{"name": "...", "accept": "..."}\\'
+ralph task add \'{"name": "<specific action>", "notes": "<implementation approach and relevant files>", "accept": "<how to verify>"}\\'
 ```
+
+**IMPORTANT**: Tasks must include `notes` with implementation guidance. Vague tasks will fail.
 
 ## Step 5: Final Decision
 
@@ -3156,6 +3243,173 @@ def cmd_compact(config: RalphConfig):
     print()
     print(f"{Colors.GREEN}Compacted {len(legacy_accepted)} tasks{Colors.NC}")
     return 0
+
+
+def load_available_profiles() -> dict:
+    """Load available profiles from config.toml.
+    
+    Returns dict of profile_name -> profile_config dict.
+    """
+    config_path = Path.home() / '.config' / 'ralph' / 'config.toml'
+    
+    if not config_path.exists():
+        return {}
+    
+    try:
+        try:
+            import tomllib
+        except ImportError:
+            try:
+                import tomli as tomllib
+            except ImportError:
+                return {}
+        
+        with open(config_path, 'rb') as f:
+            data = tomllib.load(f)
+        
+        return data.get('profiles', {})
+    except Exception:
+        return {}
+
+
+def describe_profile(name: str, profile: dict) -> tuple[str, str]:
+    """Generate a human-readable description of a profile.
+    
+    Returns (description, model_info) tuple.
+    """
+    model = profile.get('model', 'default')
+    routing = profile.get('model_routing', 'none')
+    
+    # Extract just the model name without provider prefix
+    model_short = model.split('/')[-1] if '/' in model else model
+    
+    # Build description based on configuration
+    if routing == 'smart':
+        model_info = f"{model_short} (smart routing)"
+    elif routing == 'cost':
+        model_info = f"{model_short} (cost routing)"
+    else:
+        # Check if there are per-stage overrides
+        stages = ['investigate', 'build', 'verify', 'decompose']
+        overrides = [s for s in stages if profile.get(f'model_{s}')]
+        if overrides:
+            model_info = f"{model_short} (per-stage)"
+        else:
+            model_info = model_short
+    
+    # Generate description based on model and routing
+    if 'haiku' in model.lower():
+        if routing == 'smart':
+            desc = "Cheap default, upgrades for complex tasks"
+        else:
+            desc = "All Haiku - cheapest option"
+    elif 'opus' in model.lower():
+        desc = "All Opus - maximum capability"
+    elif 'sonnet' in model.lower():
+        if routing == 'smart':
+            desc = "Balanced with smart routing"
+        else:
+            desc = "All Sonnet - good balance"
+    else:
+        desc = f"Custom ({model_short})"
+    
+    return desc, model_info
+
+
+def select_profile_interactive() -> Optional[str]:
+    """Interactive profile selector for cost optimization.
+    
+    Reads available profiles from ~/.config/ralph/config.toml and prompts
+    user to select one before starting a construct run.
+    
+    Returns the selected profile name, or None if user wants to use default.
+    """
+    # Check if already set via environment
+    env_profile = os.environ.get('RALPH_PROFILE', '')
+    if env_profile:
+        return None  # Already set, don't prompt
+    
+    # Check if stdin is a TTY (interactive)
+    if not sys.stdin.isatty():
+        return None  # Non-interactive, use default
+    
+    # Load profiles from config
+    profiles = load_available_profiles()
+    
+    if not profiles:
+        print(f"{Colors.DIM}No profiles found in ~/.config/ralph/config.toml{Colors.NC}")
+        print(f"{Colors.DIM}Using default configuration{Colors.NC}")
+        return None
+    
+    # Color rotation for profiles
+    profile_colors = [Colors.GREEN, Colors.CYAN, Colors.YELLOW, Colors.BLUE, Colors.MAGENTA]
+    
+    print()
+    print(f"{Colors.BLUE}{'─'*60}{Colors.NC}")
+    print(f"{Colors.BLUE}SELECT COST PROFILE{Colors.NC}")
+    print(f"{Colors.BLUE}{'─'*60}{Colors.NC}")
+    print()
+    print(f"{Colors.DIM}Choose a profile to optimize cost vs capability.{Colors.NC}")
+    print(f"{Colors.DIM}Tip: Use --profile <name> or RALPH_PROFILE=<name> to skip this prompt.{Colors.NC}")
+    print()
+    
+    # Display options
+    options = list(profiles.keys())
+    for i, name in enumerate(options):
+        color = profile_colors[i % len(profile_colors)]
+        desc, model_info = describe_profile(name, profiles[name])
+        print(f"  {color}{i+1}. {name:12}{Colors.NC} - {desc}")
+        print(f"     {Colors.DIM}Model: {model_info}{Colors.NC}")
+    
+    print()
+    cfg = get_global_config()
+    print(f"  {Colors.DIM}0. default{Colors.NC}      - Use [default] section (currently: {cfg.model})")
+    print()
+    
+    # Get selection
+    try:
+        while True:
+            response = input(f"Select profile [1-{len(options)}, 0=default]: ").strip()
+            
+            if response == '' or response == '0':
+                print(f"{Colors.DIM}Using default configuration{Colors.NC}")
+                return None
+            
+            # Check if they typed a profile name directly
+            if response.lower() in profiles:
+                selected = response.lower()
+                desc, _ = describe_profile(selected, profiles[selected])
+                print(f"{Colors.GREEN}Selected: {selected}{Colors.NC} - {desc}")
+                return selected
+            
+            # Check numeric selection
+            try:
+                idx = int(response)
+                if 1 <= idx <= len(options):
+                    selected = options[idx - 1]
+                    desc, _ = describe_profile(selected, profiles[selected])
+                    print(f"{Colors.GREEN}Selected: {selected}{Colors.NC} - {desc}")
+                    return selected
+                else:
+                    print(f"{Colors.RED}Invalid selection. Enter 1-{len(options)} or 0 for default.{Colors.NC}")
+            except ValueError:
+                print(f"{Colors.RED}Invalid input. Enter a number or profile name.{Colors.NC}")
+                
+    except KeyboardInterrupt:
+        print(f"\n{Colors.YELLOW}Using default configuration{Colors.NC}")
+        return None
+    except EOFError:
+        return None
+
+
+def apply_profile(profile_name: str) -> None:
+    """Apply a profile by setting RALPH_PROFILE and reloading config.
+    
+    Args:
+        profile_name: Name of profile to apply (e.g., 'budget', 'balanced')
+    """
+    os.environ['RALPH_PROFILE'] = profile_name
+    reload_global_config()
 
 
 def cmd_config():
@@ -4973,8 +5227,17 @@ def run_single_stage(config: RalphConfig, stage: Stage, state: RalphState,
         permission_config["external_directory"] = {"*": "deny"}
     opencode_env['OPENCODE_PERMISSION'] = json.dumps(permission_config)
     
-    # Build command
-    model = get_global_config().model
+    # Build command - select model based on stage and task complexity
+    gcfg = get_global_config()
+    model = gcfg.get_model_for_stage(stage_str, current_task)
+    
+    # Log model selection for visibility
+    if gcfg.model_routing != 'none':
+        routing_info = f" (routing={gcfg.model_routing})"
+    else:
+        routing_info = ""
+    print(f"{Colors.DIM}[MODEL] {stage_str}: {model}{routing_info}{Colors.NC}")
+    
     cmd = ['opencode', 'run', '--model', model,
            '--format', 'json', prompt_content]
     
@@ -5821,7 +6084,17 @@ def cmd_run(config: RalphConfig, mode: str, max_iterations: int, max_cost: float
             
             output_buffer = OutputBuffer()
 
-            model = get_global_config().model
+            # Select model based on stage and task complexity
+            gcfg = get_global_config()
+            model = gcfg.get_model_for_stage(stage, current_task)
+            
+            # Log model selection for visibility
+            if gcfg.model_routing != 'none':
+                routing_info = f" (routing={gcfg.model_routing})"
+            else:
+                routing_info = ""
+            print(f"{Colors.DIM}[MODEL] {stage}: {model}{routing_info}{Colors.NC}")
+            
             cmd = ['opencode', 'run', '--model', model, 
                    '--format', 'json', prompt_content]
             
@@ -7080,7 +7353,9 @@ Examples:
     parser.add_argument('--since', type=str, default=None,
                         help='For log: filter since date/commit')
     parser.add_argument('--max-iterations', type=int, default=None,
-                        help='For construct: max iterations (0 = unlimited)')
+                         help='For construct: max iterations (0 = unlimited)')
+    parser.add_argument('--profile', '-p', type=str, default=None,
+                         help='Cost profile: budget, balanced, hybrid, cost_smart, quality (or set RALPH_PROFILE)')
 
     args = parser.parse_args()
 
@@ -7265,6 +7540,18 @@ Examples:
             except KeyboardInterrupt:
                 print(f"\n{Colors.RED}Aborted.{Colors.NC}")
                 sys.exit(1)
+        
+        # Handle profile selection for cost optimization
+        # Priority: --profile flag > RALPH_PROFILE env > interactive selection
+        if args.profile:
+            # Profile explicitly provided via --profile flag
+            apply_profile(args.profile)
+            print(f"{Colors.GREEN}Using profile: {args.profile}{Colors.NC}")
+        elif not os.environ.get('RALPH_PROFILE'):
+            # No profile set - prompt user to select one
+            selected_profile = select_profile_interactive()
+            if selected_profile:
+                apply_profile(selected_profile)
         
         # Use the new state machine for construct mode
         cmd_construct(config, iterations, args.max_cost, args.max_failures, 

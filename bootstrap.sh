@@ -10,7 +10,7 @@ set -euo pipefail
 # - Symlinks Hyprland config to ~/.config/hypr and Rofi config to ~/.config/rofi
 # - Symlinks tmux config (both XDG ~/.config/tmux and ~/.tmux.conf)
 # - Ensures TPM exists and installs plugins (Catppuccin via TPM)
-# - Adds bin/ to PATH (includes gcai for AI-assisted git commits)
+# - powerplant/ contains ralph and gcai (AI-assisted git commits)
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" >/dev/null 2>&1 && pwd -P)"
 
@@ -342,9 +342,7 @@ for pattern in "target/" ".bsp/" ".metals/" ".bloop/" "*.class" "*.jar"; do
   fi
 done
 
-# 14) Add bin/ to PATH (contains gcai and other tools)
-install_path_block "$HOME/.profile" "$SCRIPT_DIR/bin"
-install_path_block "$HOME/.zshrc" "$SCRIPT_DIR/bin"
+# 14) bin/ PATH block removed - gcai moved to powerplant/ which is already in PATH
 
 # 15) Install global Claude commands (ralph alias)
 CLAUDE_COMMANDS_DIR="$HOME/.claude/commands"
