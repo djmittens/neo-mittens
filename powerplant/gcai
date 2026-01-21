@@ -110,13 +110,9 @@ if [ -z "$GENERATED_MSG" ]; then
   exec git commit ${COMMIT_ARGS[@]+"${COMMIT_ARGS[@]}"}
 fi
 
-# Create the commit message file
-COMMIT_MSG_FILE="$(mktemp)"
-trap 'rm -f "$TEMP_MSG" "$COMMIT_MSG_FILE"' EXIT
-
-# Create editor wrapper script
+# Create editor wrapper that prepends AI message to git's commit message file
 EDITOR_WRAPPER="$(mktemp)"
-trap 'rm -f "$TEMP_MSG" "$COMMIT_MSG_FILE" "$EDITOR_WRAPPER"' EXIT
+trap 'rm -f "$TEMP_MSG" "$EDITOR_WRAPPER"' EXIT
 chmod +x "$EDITOR_WRAPPER"
 
 cat > "$EDITOR_WRAPPER" << 'EOF'
@@ -125,9 +121,12 @@ cat > "$EDITOR_WRAPPER" << 'EOF'
 tmp=$(mktemp)
 echo "$GCAI_GENERATED_MSG" > "$tmp"
 echo "" >> "$tmp"
+# Add hint about :cq
+echo "# Hint: :wq to commit, :cq to abort" >> "$tmp"
 cat "$1" >> "$tmp"
 mv "$tmp" "$1"
-# Run real editor
+
+# Run the real editor
 exec ${VISUAL:-${EDITOR:-vi}} "$1"
 EOF
 
