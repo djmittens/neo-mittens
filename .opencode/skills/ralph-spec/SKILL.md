@@ -376,6 +376,7 @@ Before finalizing a spec, verify:
    - [ ] Single coherent feature
    - [ ] Dependencies explicitly stated
    - [ ] No circular dependencies with other specs
+   - [ ] No task-level circular dependencies (code tasks don't require tests that depend on that code)
 
 ## Common Mistakes
 
@@ -387,6 +388,85 @@ Before finalizing a spec, verify:
 | Missing edge cases | Incomplete spec | Add explicit criteria for: empty input, max limits, concurrent access, partial failures |
 | "etc." or "and so on" | Incomplete list | List all items explicitly |
 | Implementation details in Overview | Wrong section | Move to Requirements or Architecture |
+| Test requirements in code task acceptance | Circular dependency | Use import verification OR bundle test with code task |
+
+## Avoiding Task-Level Circular Dependencies
+
+**CRITICAL**: When Ralph generates tasks from a spec, acceptance criteria that reference tests can create unfulfillable dependencies.
+
+### The Anti-Pattern
+
+If your spec implies this task structure:
+
+```
+Task A: "Extract foo.py"
+  accept: "test_foo.py passes"
+  
+Task B: "Write test_foo.py"  
+  deps: [Task A]  # Can't write tests until code exists
+```
+
+Task A can never pass verification because:
+1. Task A's acceptance requires test_foo.py to pass
+2. test_foo.py doesn't exist yet (it's Task B)
+3. Task B depends on Task A completing first
+4. **Deadlock**: Task A rejected forever
+
+### Solutions
+
+**Option 1: Import-only acceptance for code tasks**
+
+Acceptance criteria for extraction/implementation tasks should verify the code works, not that tests pass:
+
+```markdown
+## Acceptance Criteria
+- [ ] `from mymodule.foo import FooClass, foo_helper` works
+- [ ] `FooClass().process()` returns expected result for basic input
+```
+
+Keep test requirements in separate test-focused criteria:
+
+```markdown
+- [ ] `pytest tests/unit/test_foo.py` passes
+```
+
+Ralph will generate separate tasks, and the test task will naturally depend on the code task.
+
+**Option 2: Bundle code + test in one task**
+
+If you want tests written alongside code, make it explicit in the same criterion:
+
+```markdown
+- [ ] `foo.py` implements FooClass with `process()` method AND `test_foo.py` covers basic functionality
+```
+
+This creates a single task that includes both.
+
+**Option 3: Test-first with stubs**
+
+Write tests first against a stub/interface:
+
+```markdown
+- [ ] `test_foo.py` exists with tests against FooInterface
+- [ ] `foo.py` implements FooInterface; all tests pass
+```
+
+### Verification Patterns That Work
+
+| Pattern | Acceptance Criteria | Why It Works |
+|---------|--------------------|--------------| 
+| Import check | `from X import Y works` | No external dependencies |
+| Inline validation | `python -c "from X import Y; assert Y().method() == expected"` | Self-contained |
+| Separate test task | Code task: imports work; Test task: pytest passes | Clear dependency order |
+| Bundled | `X.py AND test_X.py both complete` | Single atomic task |
+
+### Verification Patterns That Fail
+
+| Pattern | Acceptance Criteria | Why It Fails |
+|---------|--------------------|--------------| 
+| Forward test reference | `test_X.py passes` (when test is separate task) | Test doesn't exist yet |
+| Implicit test dependency | `All tests pass` | Unclear scope, may include unwritten tests |
+| Cross-task reference | `Works with Y.py` (when Y.py is separate task) | Y.py may not exist yet |
 
 ## Integration with Ralph Workflow
 
