@@ -108,7 +108,7 @@ class GlobalConfig:
     
     # Directories (relative to repo root, or absolute)
     ralph_dir: str = 'ralph'
-    log_dir: str = 'build/ralph-logs'
+    log_dir: str = '/tmp/ralph-logs'
     
     # Profile name (for display/debugging)
     _profile_name: str = 'default'
@@ -962,7 +962,7 @@ class RalphConfig:
     @classmethod
     def from_repo(cls, repo_root: Path) -> 'RalphConfig':
         ralph_dir = repo_root / 'ralph'
-        log_dir = repo_root / 'build' / 'ralph-logs'
+        log_dir = Path('/tmp/ralph-logs')
         return cls(
             repo_root=repo_root,
             ralph_dir=ralph_dir,
@@ -2724,13 +2724,7 @@ Describe what you want to build.
     if not is_update and not config.plan_file.exists():
         save_state(config, RalphState())
 
-    # Add logs to gitignore
-    gitignore = config.repo_root / '.gitignore'
-    if gitignore.exists():
-        content = gitignore.read_text()
-        if 'build/ralph-logs' not in content:
-            with gitignore.open('a') as f:
-                f.write('\n# Ralph logs\nbuild/ralph-logs/\n')
+    # Logs now go to /tmp/ralph-logs, no gitignore needed
 
     if is_update:
         print(f"{Colors.GREEN}Ralph updated!{Colors.NC}")
@@ -5559,7 +5553,7 @@ def cmd_run(config: RalphConfig, mode: str, max_iterations: int, max_cost: float
             }
             if stage == 'DECOMPOSE':
                 # Allow reading ralph logs so decompose can analyze the killed iteration
-                # Logs are in build/ralph-logs/ which is within repo and already readable
+                # Logs are in /tmp/ralph-logs/
                 permission_config["read"] = {
                     "*": "allow"
                 }
@@ -5930,7 +5924,7 @@ def cmd_run(config: RalphConfig, mode: str, max_iterations: int, max_cost: float
                 consecutive_failures += 1
                 metrics.failures += 1
 
-            # Log iteration output to build/ralph-logs/
+            # Log iteration output to /tmp/ralph-logs/
             # Filename format: ralph-<timestamp>-<stage>.log per spec
             config.log_dir.mkdir(parents=True, exist_ok=True)
             timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
