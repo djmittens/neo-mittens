@@ -114,9 +114,6 @@ fi
 COMMIT_MSG_FILE="$(mktemp)"
 trap 'rm -f "$TEMP_MSG" "$COMMIT_MSG_FILE"' EXIT
 
-# Write the AI message to the file
-printf '%s\n' "$GENERATED_MSG" > "$COMMIT_MSG_FILE"
-
-# Use -m to pass the message, then -e to edit, and -v for diff
-# This way git has a message, opens editor to review, :wq commits, :q! aborts
-exec git commit ${COMMIT_ARGS[@]+"${COMMIT_ARGS[@]}"} --verbose --edit -m "$GENERATED_MSG"
+# Pass AI message via stdin with -F -, then -e to edit, -v for diff
+# :wq commits, :q aborts (git detects no save)
+exec git commit ${COMMIT_ARGS[@]+"${COMMIT_ARGS[@]}"} --verbose --edit -F - <<< "$GENERATED_MSG"
