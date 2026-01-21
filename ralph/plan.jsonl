@@ -1,6 +1,6 @@
 {"t": "config", "timeout_ms": 300000, "max_iterations": 10, "context_warn": 0.7, "context_compact": 0.85, "context_kill": 0.95}
 {"t": "spec", "spec": "ralph-refactor.md"}
-{"t": "task", "id": "t-yxbx29", "spec": "ralph-refactor.md", "name": "Run full test suite", "s": "p", "notes": "Run pytest ralph/tests/ with coverage report. Ensure all unit tests complete in <30s, e2e tests in <60s. Generate coverage report with --cov=ralph --cov-report=term-missing. Fix any failing tests.", "accept": "All tests pass with good coverage", "deps": ["t-wusosd", "t-wzk7ds", "t-w3ihll", "t-w9des9", "t-xfqbot", "t-xkxnjl"], "priority": "medium"}
+{"t": "task", "id": "t-yxbx29", "spec": "ralph-refactor.md", "name": "Run full test suite", "s": "d", "notes": "Run pytest ralph/tests/ with coverage report. Ensure all unit tests complete in <30s, e2e tests in <60s. Generate coverage report with --cov=ralph --cov-report=term-missing. Fix any failing tests.", "accept": "All tests pass with good coverage", "deps": ["t-wusosd", "t-wzk7ds", "t-w3ihll", "t-w9des9", "t-xfqbot", "t-xkxnjl"], "done_at": "e6be14f", "priority": "medium"}
 {"t": "task", "id": "t-v8t79p", "spec": "ralph-refactor.md", "name": "Extract cli.py module", "s": "a", "done_at": "a0f41be"}
 {"t": "task", "id": "t-wp4c9c", "spec": "ralph-refactor.md", "name": "Create test directory structure", "s": "a", "done_at": "7813494"}
 {"t": "task", "id": "t-x6goli", "spec": "ralph-refactor.md", "name": "Update bootstrap.sh for PYTHONPATH", "s": "a", "done_at": "bb318d8"}
