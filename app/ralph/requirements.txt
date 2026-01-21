@@ -1,0 +1,13 @@
+# Ralph Wiggum - Python dependencies
+#
+# Setup:
+#   python3 -m venv .venv
+#   source .venv/bin/activate
+#   pip install -r requirements.txt
+#
+# For development with tests:
+#   pip install -r requirements-dev.txt
+
+# Core dependencies (Python 3.10+)
+# tomli is needed for TOML config parsing on Python < 3.11
+tomli>=2.0.0; python_version < "3.11"

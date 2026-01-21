@@ -11,14 +11,35 @@ mistakes, but never stopping.
 - Python 3.10+
 - [opencode](https://github.com/sst/opencode) - Claude Code CLI
 
-**Optional (for enhanced TUI):**
+## Installation
+
+**Option 1: Use the production script (powerplant/ralph)**
 
 ```bash
-# Arch Linux
-sudo pacman -S python-textual
+# Add powerplant to your PATH (add to ~/.bashrc or ~/.zshrc)
+export PATH="$PATH:/path/to/powerplant"
 
-# macOS / other Linux (via pip)
-pip3 install textual
+# No venv needed - uses system Python (3.10+)
+ralph --help
+```
+
+**Option 2: Develop with the modular package (app/ralph/)**
+
+```bash
+# Navigate to the app/ralph directory
+cd app/ralph
+
+# Run the setup script
+./setup.sh --dev  # Installs with test/dev dependencies
+
+# Activate the virtual environment
+source .venv/bin/activate
+
+# Run via python -m
+python -m ralph --help
+
+# Run tests
+pytest tests/
 ```
 
 Without textual, `ralph watch` uses a simpler but fully functional dashboard.

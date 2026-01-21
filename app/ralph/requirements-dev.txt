@@ -1,0 +1,20 @@
+# Ralph Wiggum - Development dependencies
+#
+# Install after requirements.txt:
+#   pip install -r requirements.txt -r requirements-dev.txt
+
+# Include base requirements
+-r requirements.txt
+
+# Testing
+pytest>=7.0.0
+pytest-cov>=4.0.0
+
+# Type checking
+mypy>=1.0.0
+
+# Code quality
+radon>=5.0.0  # Cyclomatic complexity
+
+# Optional: Enhanced TUI dashboard
+textual>=0.40.0
