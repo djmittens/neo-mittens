@@ -9,7 +9,7 @@ from typing import Optional
 
 from ralph.models import Task, Tombstone
 from ralph.state import load_state, save_state
-from ralph.utils import Colors, id_generate
+from ralph.utils import Colors, gen_id
 
 __all__ = ["cmd_task"]
 
@@ -65,7 +65,7 @@ def _task_add(state, plan_file, arg2: Optional[str]) -> int:
     try:
         data = json.loads(arg2)
         task = Task(
-            id=id_generate("t"),
+            id=gen_id("t"),
             name=data.get("name", ""),
             spec=state.spec or "",
             notes=data.get("notes"),
@@ -77,7 +77,7 @@ def _task_add(state, plan_file, arg2: Optional[str]) -> int:
         )
     except json.JSONDecodeError:
         task = Task(
-            id=id_generate("t"),
+            id=gen_id("t"),
             name=arg2,
             spec=state.spec or "",
         )

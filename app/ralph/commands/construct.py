@@ -12,7 +12,7 @@ from typing import Optional
 
 from ralph.config import GlobalConfig
 from ralph.context import Metrics
-from ralph.opencode import spawn_opencode, parse_json_stream_iter, run_opencode_print
+from ralph.opencode import spawn_opencode, parse_json_stream, extract_metrics
 from ralph.stages.base import (
     ConstructStateMachine,
     Stage,
@@ -98,20 +98,29 @@ def _run_stage(
         return StageResult(stage=stage, outcome=StageOutcome.SKIP)
 
     try:
-        result = run_opencode_print(
-            prompt,
-            cwd=repo_root,
-            timeout=stage_timeout_ms // 1000,
-            model=config.model if hasattr(config, "model") else None,
+        model = config.model if hasattr(config, "model") else None
+        proc = spawn_opencode(
+            prompt, cwd=repo_root, timeout=stage_timeout_ms, model=model
         )
 
-        if print_output and result.stdout:
-            for line in result.stdout.split("\n")[-20:]:
+        stdout_output = ""
+        try:
+            stdout_bytes, _ = proc.communicate(timeout=stage_timeout_ms // 1000)
+            stdout_output = (
+                stdout_bytes.decode("utf-8", errors="replace") if stdout_bytes else ""
+            )
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.wait()
+            raise
+
+        if print_output and stdout_output:
+            for line in stdout_output.split("\n")[-20:]:
                 print(f"  {line}")
 
         duration = time.time() - start_time
 
-        if result.returncode == 0:
+        if proc.returncode == 0:
             return StageResult(
                 stage=stage,
                 outcome=StageOutcome.SUCCESS,
@@ -122,9 +131,9 @@ def _run_stage(
             return StageResult(
                 stage=stage,
                 outcome=StageOutcome.FAILURE,
-                exit_code=result.returncode,
+                exit_code=proc.returncode,
                 duration_seconds=duration,
-                error=f"Stage exited with code {result.returncode}",
+                error=f"Stage exited with code {proc.returncode}",
             )
 
     except subprocess.TimeoutExpired:
@@ -221,15 +230,21 @@ def cmd_construct(config: dict, iterations: int, args: argparse.Namespace) -> in
             print_output=True,
         )
 
+    # Wrap state functions to pass plan_file
+    def load_state_wrapper() -> RalphState:
+        return load_state(plan_file)
+
+    def save_state_wrapper(st: RalphState) -> None:
+        save_state(st, plan_file)
+
     state_machine = ConstructStateMachine(
         config=global_config,
         metrics=metrics,
         stage_timeout_ms=global_config.stage_timeout_ms,
         context_limit=global_config.context_window,
         run_stage_fn=run_stage_wrapper,
-        plan_path=plan_file,
-        load_state_fn=load_state,
-        save_state_fn=save_state,
+        load_state_fn=load_state_wrapper,
+        save_state_fn=save_state_wrapper,
     )
 
     try:

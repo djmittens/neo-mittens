@@ -7,7 +7,7 @@ from typing import Optional
 
 from ralph.models import Issue
 from ralph.state import load_state, save_state
-from ralph.utils import Colors, id_generate
+from ralph.utils import Colors, gen_id
 
 __all__ = ["cmd_issue"]
 
@@ -98,7 +98,7 @@ def _issue_add(state, plan_file, desc: Optional[str]) -> int:
     if not state.spec:
         print(f"{Colors.RED}No spec set. Run 'ralph set-spec <file>' first.{Colors.NC}")
         return 1
-    issue = Issue(id=id_generate("i"), desc=desc, spec=state.spec)
+    issue = Issue(id=gen_id("i"), desc=desc, spec=state.spec)
     state.add_issue(issue)
     save_state(state, plan_file)
     print(f"{Colors.GREEN}Issue added:{Colors.NC} {issue.id} - {desc}")
