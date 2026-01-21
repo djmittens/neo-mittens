@@ -19,13 +19,13 @@ from .commands.task import cmd_task
 from .commands.validate import cmd_validate
 from .commands.compact import cmd_compact
 from .commands.status import cmd_status
+from .commands.config_cmd import cmd_config
+from .commands.watch import cmd_watch
+from .commands.stream import cmd_stream
+from .commands.plan import cmd_plan
+from .commands.query import cmd_query
+from .commands.issue import cmd_issue
 from .config import get_global_config
-
-
-def _stub_command(name: str) -> int:
-    """Return stub message for unimplemented commands."""
-    print(f"ralph {name}: stub - not yet implemented")
-    return 0
 
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
@@ -54,16 +54,32 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         return cmd_status(config)
 
     if args.command == "config":
-        return _stub_command("config")
+        return cmd_config()
 
     if args.command == "watch":
-        return _stub_command("watch")
+        global_config = get_global_config()
+        cwd = Path.cwd()
+        ralph_dir = cwd / "ralph"
+        plan_file = ralph_dir / "plan.jsonl"
+        config = {
+            "plan_file": plan_file,
+            "repo_root": cwd,
+            "ralph_dir": ralph_dir,
+            **global_config.__dict__,
+        }
+        return cmd_watch(config)
 
     if args.command == "stream":
-        return _stub_command("stream")
+        return cmd_stream()
 
     if args.command == "plan":
-        return _stub_command("plan")
+        global_config = get_global_config()
+        cwd = Path.cwd()
+        config = {
+            "repo_root": cwd,
+            **global_config.__dict__,
+        }
+        return cmd_plan(config, args.spec, args)
 
     if args.command == "construct":
         global_config = get_global_config()
@@ -91,7 +107,17 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         return cmd_construct(config, iterations, args)
 
     if args.command == "query":
-        return _stub_command("query")
+        global_config = get_global_config()
+        cwd = Path.cwd()
+        ralph_dir = cwd / "ralph"
+        plan_file = ralph_dir / "plan.jsonl"
+        config = {
+            "plan_file": plan_file,
+            "repo_root": cwd,
+            "ralph_dir": ralph_dir,
+            **global_config.__dict__,
+        }
+        return cmd_query(config, args.subquery, args.done)
 
     if args.command == "task":
         if not args.action:
@@ -115,7 +141,16 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         if not args.action:
             print("Usage: ralph issue [add|done|done-all|done-ids] <description>")
             return 1
-        return _stub_command(f"issue {args.action}")
+        global_config = get_global_config()
+        cwd = Path.cwd()
+        ralph_dir = cwd / "ralph"
+        plan_file = ralph_dir / "plan.jsonl"
+        config = {
+            "plan_file": plan_file,
+            "repo_root": cwd,
+            **global_config.__dict__,
+        }
+        return cmd_issue(config, args.action, args.description)
 
     if args.command == "validate":
         global_config = get_global_config()
@@ -127,10 +162,12 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         return 0
 
     if args.command == "log":
-        return _stub_command("log")
+        print("ralph log: feature not yet implemented")
+        return 0
 
     if args.command == "set-spec":
-        return _stub_command("set-spec")
+        print("ralph set-spec: feature not yet implemented")
+        return 0
 
     print(f"ralph: unknown command '{args.command}'", file=sys.stderr)
     return 1
