@@ -2,11 +2,6 @@
 
 Implement the next pending task.
 
-## Log Location
-
-Ralph logs are stored in `/tmp/ralph-logs/<repo>/<branch>/<spec>/`.
-Logs are auto-cleared on system restart.
-
 ## Step 1: Get Task
 
 Run `ralph query` to get current state. The `next.task` field shows:
