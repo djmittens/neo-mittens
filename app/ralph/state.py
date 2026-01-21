@@ -73,6 +73,24 @@ class RalphState:
             return True
         return all(dep_id in self.completed_ids for dep_id in task.deps)
 
+    def add_task(self, task: Task) -> None:
+        """Add a task to the task list."""
+        self.tasks.append(task)
+
+    def get_task_by_id(self, task_id: str) -> Optional[Task]:
+        """Get a task by its ID."""
+        for task in self.tasks:
+            if task.id == task_id:
+                return task
+        return None
+
+    def add_tombstone(self, tombstone) -> None:
+        """Add a tombstone to the appropriate list."""
+        if tombstone.tombstone_type == "accept":
+            self.tombstones["accepted"].append(tombstone)
+        else:
+            self.tombstones["rejected"].append(tombstone)
+
     def to_dict(self) -> dict:
         """Serialize state to dict for JSON output."""
         return {

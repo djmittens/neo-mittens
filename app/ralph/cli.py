@@ -190,7 +190,20 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 "Usage: ralph task [add|done|accept|reject|delete|prioritize] <description>"
             )
             return 1
-        return _stub_command(f"task {args.action}")
+        from ralph.commands.task import cmd_task
+        from ralph.config import get_global_config
+        from pathlib import Path
+
+        global_config = get_global_config()
+        cwd = Path.cwd()
+        ralph_dir = cwd / "ralph"
+        plan_file = ralph_dir / "plan.jsonl"
+        config = {
+            "plan_file": plan_file,
+            "repo_root": cwd,
+            **global_config.__dict__,
+        }
+        return cmd_task(config, args.action, args.description, args.extra)
 
     if args.command == "issue":
         if not args.action:
