@@ -334,12 +334,14 @@ def load_state(path: Path) -> RalphState:
             else:
                 # Task was compacted (removed) but accept record remains
                 # Create a minimal synthetic task record for tracking
+                # Preserve the name from the accept record if available
                 synthetic_task = Task(
                     id=task_id,
-                    name=f"[Compacted] {task_id}",
+                    name=accept.get("name", f"[Compacted] {task_id}"),
                     spec=state.spec or "",
                     status="d",
                     done_at=accept.get("done_at"),
+                    notes=accept.get("notes"),
                 )
                 state.tasks.append(synthetic_task)
 
