@@ -335,9 +335,11 @@ append_require_if_missing "$NVIM_DIR/init.lua"
 install_path_block "$HOME/.profile" "$SCRIPT_DIR/powerplant"
 install_path_block "$HOME/.zshrc" "$SCRIPT_DIR/powerplant"
 
-# 4b) Add repo root to PYTHONPATH for ralph package imports
+# 4b) Add repo root and app/ to PYTHONPATH for ralph package imports
 install_pythonpath_block "$HOME/.profile" "$SCRIPT_DIR"
 install_pythonpath_block "$HOME/.zshrc" "$SCRIPT_DIR"
+install_pythonpath_block "$HOME/.profile" "$SCRIPT_DIR/app"
+install_pythonpath_block "$HOME/.zshrc" "$SCRIPT_DIR/app"
 
 # 5) Disable ohmyzsh auto-title to allow custom tmux pane titles
 disable_omz_auto_title
