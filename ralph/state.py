@@ -278,7 +278,8 @@ def load_state(path: Path) -> RalphState:
     """Load state from a plan.jsonl file.
 
     Parses the JSONL file line by line, creating appropriate objects
-    based on the record type ('t' field).
+    based on the record type ('t' field). Accept and reject records
+    are applied after all tasks are loaded to update task statuses.
 
     Args:
         path: Path to the plan.jsonl file.
@@ -290,6 +291,10 @@ def load_state(path: Path) -> RalphState:
 
     if not path.exists():
         return state
+
+    # Collect accept/reject records to apply after loading tasks
+    accepts: List[Dict] = []
+    rejects: List[Dict] = []
 
     try:
         content = path.read_text()
@@ -306,7 +311,9 @@ def load_state(path: Path) -> RalphState:
                 elif t == "issue":
                     state.issues.append(Issue.from_dict(d))
                 elif t == "reject":
-                    state.tombstones.append(Tombstone.from_dict(d))
+                    rejects.append(d)
+                elif t == "accept":
+                    accepts.append(d)
                 elif t == "config":
                     state.config = RalphPlanConfig.from_dict(d)
             except (json.JSONDecodeError, KeyError):
@@ -314,7 +321,114 @@ def load_state(path: Path) -> RalphState:
     except (OSError, IOError):
         pass
 
+    # Apply accept records: mark tasks as done, or create synthetic tasks for compacted accepts
+    for accept in accepts:
+        task_id = accept.get("id")
+        if task_id:
+            task = state.get_task_by_id(task_id)
+            if task:
+                # Task exists, mark it done
+                task.status = "d"
+                if accept.get("done_at"):
+                    task.done_at = accept.get("done_at")
+            else:
+                # Task was compacted (removed) but accept record remains
+                # Create a minimal synthetic task record for tracking
+                synthetic_task = Task(
+                    id=task_id,
+                    name=f"[Compacted] {task_id}",
+                    spec=state.spec or "",
+                    status="d",
+                    done_at=accept.get("done_at"),
+                )
+                state.tasks.append(synthetic_task)
+
+    # Apply reject records: create tombstones and reset task status to pending
+    for reject in rejects:
+        state.tombstones.append(Tombstone.from_dict(reject, "reject"))
+        # If a task was rejected, it should be back to pending (unless later accepted)
+        task_id = reject.get("id")
+        if task_id:
+            task = state.get_task_by_id(task_id)
+            if task and task.status != "d":  # Don't reset if later accepted
+                task.status = "p"
+                task.reject_reason = reject.get("reason")
+
+    # Also add accept tombstones for tracking (separate from task status updates)
+    for accept in accepts:
+        state.tombstones.append(Tombstone.from_dict(accept, "accept"))
+
     return state
+
+
+def validate_state(state: RalphState, valid_ids: Optional[Set[str]] = None) -> Dict:
+    """Validate state for common issues like dangling dependencies.
+
+    Checks for:
+    - Dangling dependencies (deps referencing non-existent tasks)
+    - Dangling parent references
+    - Invalid created_from references
+    - Circular dependencies
+
+    Args:
+        state: Current RalphState to validate.
+        valid_ids: Optional set of all valid task IDs (current + historical).
+            If None, only checks current state + tombstones.
+
+    Returns:
+        Dict with 'valid' (bool), 'errors' (list), and 'warnings' (list).
+    """
+    errors: List[str] = []
+    warnings: List[str] = []
+
+    if valid_ids is None:
+        valid_ids = {t.id for t in state.tasks}
+        valid_ids.update(t.id for t in state.tombstones)
+
+    current_task_ids = {t.id for t in state.tasks}
+
+    for task in state.pending:
+        if task.deps:
+            for dep_id in task.deps:
+                if dep_id not in valid_ids:
+                    errors.append(f"Task {task.id} has dangling dep: {dep_id}")
+
+    for task in state.tasks:
+        if task.parent and task.parent not in valid_ids:
+            warnings.append(f"Task {task.id} has dangling parent: {task.parent}")
+
+    for task in state.tasks:
+        if task.created_from:
+            if not task.created_from.startswith("i-"):
+                warnings.append(
+                    f"Task {task.id} has invalid created_from: {task.created_from}"
+                )
+
+    def has_cycle(task_id: str, visited: Set[str], path: Set[str]) -> bool:
+        if task_id in path:
+            return True
+        if task_id in visited:
+            return False
+        visited.add(task_id)
+        path.add(task_id)
+        task = next((t for t in state.tasks if t.id == task_id), None)
+        if task and task.deps:
+            for dep_id in task.deps:
+                if dep_id in current_task_ids and has_cycle(dep_id, visited, path):
+                    return True
+        path.remove(task_id)
+        return False
+
+    visited: Set[str] = set()
+    for task in state.pending:
+        if has_cycle(task.id, visited, set()):
+            errors.append(f"Circular dependency detected involving task {task.id}")
+
+    return {
+        "valid": len(errors) == 0,
+        "errors": errors,
+        "warnings": warnings,
+    }
 
 
 def save_state(state: RalphState, path: Path) -> None:

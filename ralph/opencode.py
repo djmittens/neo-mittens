@@ -330,6 +330,54 @@ def extract_metrics_from_line(line: str) -> Optional[tuple[float, int, int]]:
     return None
 
 
+def count_running_opencode(repo_root: Path) -> int:
+    """Count opencode processes spawned by ralph in this repo.
+
+    On macOS, uses pgrep to find opencode processes.
+    Note: This function checks /proc which only works on Linux. On macOS,
+    it falls back to just counting pgrep results without parent filtering.
+
+    Args:
+        repo_root: The repository root directory to check.
+
+    Returns:
+        Number of opencode processes running in this repo, or 0 if unable to determine.
+    """
+    import sys
+
+    count = 0
+    try:
+        result = subprocess.run(
+            ["pgrep", "-x", "opencode"],
+            capture_output=True,
+            text=True,
+        )
+        pids = [p for p in result.stdout.strip().split("\n") if p]
+
+        if sys.platform == "darwin":
+            return len(pids)
+
+        for pid in pids:
+            try:
+                cwd = Path(f"/proc/{pid}/cwd").resolve()
+                if not str(cwd).startswith(str(repo_root)):
+                    continue
+
+                ppid = Path(f"/proc/{pid}/stat").read_text().split()[3]
+                parent_cmdline = (
+                    Path(f"/proc/{ppid}/cmdline")
+                    .read_bytes()
+                    .decode("utf-8", errors="replace")
+                )
+                if "ralph" in parent_cmdline:
+                    count += 1
+            except (OSError, PermissionError, FileNotFoundError):
+                pass
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        pass
+    return count
+
+
 __all__ = [
     "OpenCodeMetrics",
     "OpenCodeEvent",
@@ -341,4 +389,5 @@ __all__ = [
     "parse_json_stream_iter",
     "extract_metrics",
     "extract_metrics_from_line",
+    "count_running_opencode",
 ]

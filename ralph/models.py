@@ -219,20 +219,22 @@ class Issue:
 
 @dataclass
 class Tombstone:
-    """A tombstone marking a rejected task.
+    """A tombstone marking an accepted or rejected task.
 
-    When a task is rejected by the VERIFY stage, a tombstone is created to
-    track the rejection reason and the commit where the task was marked done.
+    When a task is accepted or rejected by the VERIFY stage, a tombstone is
+    created to track the outcome and the commit where the task was marked done.
 
     Attributes:
-        id: Task ID that was rejected.
+        id: Task ID that was accepted/rejected.
         done_at: Commit hash where task was marked done.
-        reason: Why the task was rejected.
+        reason: Why the task was rejected (empty for accepts).
+        tombstone_type: "accept" or "reject" to distinguish outcomes.
     """
 
     id: str
     done_at: str
     reason: str
+    tombstone_type: str = "reject"
 
     def to_dict(self) -> dict:
         """Convert tombstone to a dictionary for JSONL serialization.
@@ -241,7 +243,7 @@ class Tombstone:
             Dictionary with tombstone data.
         """
         return {
-            "t": "reject",
+            "t": self.tombstone_type,
             "id": self.id,
             "done_at": self.done_at,
             "reason": self.reason,
@@ -256,28 +258,35 @@ class Tombstone:
         return json.dumps(self.to_dict())
 
     @classmethod
-    def from_dict(cls, d: dict) -> "Tombstone":
+    def from_dict(cls, d: dict, tombstone_type: str = "reject") -> "Tombstone":
         """Create a Tombstone from a dictionary.
 
         Args:
             d: Dictionary with tombstone data (from JSONL parsing).
+            tombstone_type: Type of tombstone ("accept" or "reject").
 
         Returns:
             A Tombstone instance.
         """
-        return cls(id=d["id"], done_at=d["done_at"], reason=d["reason"])
+        return cls(
+            id=d["id"],
+            done_at=d.get("done_at", ""),
+            reason=d.get("reason", ""),
+            tombstone_type=tombstone_type,
+        )
 
     @classmethod
-    def from_jsonl(cls, d: dict) -> "Tombstone":
+    def from_jsonl(cls, d: dict, tombstone_type: str = "reject") -> "Tombstone":
         """Create a Tombstone from a JSONL dictionary.
 
         Args:
             d: Dictionary parsed from JSONL.
+            tombstone_type: Type of tombstone ("accept" or "reject").
 
         Returns:
             A Tombstone instance.
         """
-        return cls.from_dict(d)
+        return cls.from_dict(d, tombstone_type)
 
 
 @dataclass
