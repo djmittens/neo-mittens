@@ -3577,6 +3577,7 @@ class DashboardState:
     last_kill_reason: str = ""
     last_kill_activity: str = ""
     skeleton_frame: Optional[int] = None  # Current skeleton animation frame (None = not showing)
+    ralph_state: Optional['RalphState'] = None  # Cached ralph state (to avoid loading every frame)
 
 
 # =============================================================================
@@ -4201,6 +4202,7 @@ class FallbackDashboard:
         self.last_kill_reason = ""
         self.last_kill_activity = ""
         self.skeleton_frame: Optional[int] = None  # Current skeleton animation frame
+        self.ralph_state: Optional[RalphState] = None  # Cached ralph state
     
     def get_input(self) -> Optional[str | tuple[str, int]]:
         """Non-blocking keyboard input with coalescing for scroll keys.
@@ -4336,7 +4338,8 @@ class FallbackDashboard:
             kills_context=self.kills_context,
             last_kill_reason=self.last_kill_reason,
             last_kill_activity=self.last_kill_activity,
-            skeleton_frame=self.skeleton_frame
+            skeleton_frame=self.skeleton_frame,
+            ralph_state=self.ralph_state
         )
         
         # Move cursor to top and render
@@ -4405,10 +4408,12 @@ class FallbackDashboard:
         ANIMATION_FPS = 30
         FRAME_DURATION = 1.0 / ANIMATION_FPS
         SKELETON_DELAY = 0.5
+        STATE_REFRESH_INTERVAL = 1.0  # Refresh ralph_state every 1s, not every frame
         
         last_activity_time = time.time()
         animation_start_time = 0.0
         last_output_count = len(self.output_lines)
+        last_state_refresh = 0.0
         
         self.enter()
         
@@ -4440,6 +4445,11 @@ class FallbackDashboard:
                         animation_start_time = now
                     elapsed = now - animation_start_time
                     self.skeleton_frame = int(elapsed * ANIMATION_FPS) % len(SKELETON_FRAMES)
+                
+                # Refresh ralph_state periodically (not every frame - expensive I/O)
+                if now - last_state_refresh >= STATE_REFRESH_INTERVAL:
+                    self.ralph_state = load_state(self.config)
+                    last_state_refresh = now
                 
                 # Update external state (metrics, etc.)
                 if update_state:
@@ -4512,8 +4522,8 @@ def render_dashboard(state: DashboardState, term_width: int, term_height: int) -
     add(f"{Colors.BLUE}{header_bar}{Colors.NC}")
     add()
     
-    # Load state data
-    ralph_state = load_state(state.config)
+    # Use cached ralph state if available, otherwise load (expensive)
+    ralph_state = state.ralph_state if state.ralph_state else load_state(state.config)
     
     # Build status lines to display next to Ralph
     status_lines = []
