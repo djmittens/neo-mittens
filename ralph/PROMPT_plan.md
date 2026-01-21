@@ -26,15 +26,7 @@ Compare the spec against the CURRENT codebase and generate a task list:
 
 ## Output
 
-**Preferred: Batch add (faster, single command):**
-```
-ralph task add '[
-  {"name": "Task 1", "notes": "Details...", "accept": "Verify..."},
-  {"name": "Task 2", "notes": "Details...", "accept": "Verify...", "deps": ["t-xxxx"]}
-]'
-```
-
-**Alternative: Single task add:**
+For each task identified, run:
 ```
 ralph task add '{"name": "Short task name", "notes": "Implementation details", "accept": "How to verify", "deps": ["t-xxxx"]}'
 ```
@@ -90,19 +82,7 @@ Rules:
 - `accept` MUST be measurable (command to run, expected output, exit code)
 - Use `deps` when a task requires another task to be done first
 
-## Iteration Strategy
-
-For complex specs, you may need multiple iterations:
-
-1. **First iteration**: Focus on core/foundational tasks (package structure, base modules)
-2. **Subsequent iterations**: Add dependent tasks, commands, tests, etc.
-
-Run `ralph query` at the start of each iteration to see what tasks already exist.
-Only add NEW tasks - don't duplicate tasks that were already added.
-
-When you've added all tasks for the spec, output:
+When done adding tasks, output:
 ```
 [RALPH] PLAN_COMPLETE: Added N tasks for {{SPEC_FILE}}
 ```
-
-If you need more iterations to finish planning, just stop - you'll continue in the next iteration.
