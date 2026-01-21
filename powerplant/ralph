@@ -2229,6 +2229,50 @@ def validate_task_notes(notes: str) -> tuple[bool, Optional[str]]:
     if not has_guidance:
         return False, "Task notes lack implementation guidance. Describe WHAT to do (add, modify, create, etc.) and HOW."
     
+    # Check for specific location references (line numbers, function names, or class names)
+    # This ensures notes contain concrete references for BUILD stage to find the right code
+    import re
+    
+    LINE_NUMBER_PATTERNS = [
+        r'line[s]?\s+\d+',           # "line 50" or "lines 100"
+        r'line[s]?\s+~?\d+\s*-\s*\d+',  # "lines 100-150" or "lines ~100-150"
+        r':\d+',                     # "file.py:50" (colon notation)
+        r'\(\s*line[s]?\s+\d+',      # "(line 50" or "(lines 100"
+    ]
+    
+    FUNCTION_CLASS_PATTERNS = [
+        r'function\s+\w+',           # "function foo"
+        r'method\s+\w+',             # "method bar"  
+        r'class\s+\w+',              # "class Baz"
+        r'def\s+\w+',                # "def foo"
+        r'\w+\(\)',                  # "foo()" - function call notation
+        r'\w+\.\w+\(\)',             # "obj.method()" - method call notation
+    ]
+    
+    has_line_ref = any(re.search(p, notes_lower) for p in LINE_NUMBER_PATTERNS)
+    has_func_ref = any(re.search(p, notes_lower) for p in FUNCTION_CLASS_PATTERNS)
+    
+    # Warn but don't reject if no specific location - some tasks legitimately create new files
+    # But for modification tasks, we strongly prefer line numbers
+    has_modify_verb = any(v in notes_lower for v in ['modify ', 'update ', 'change ', 'fix ', 'extract '])
+    if has_modify_verb and not (has_line_ref or has_func_ref):
+        return False, "Task notes mention modifying code but lack specific locations. Include line numbers (e.g., 'lines 100-150') or function/class names (e.g., 'function parse_config()')."
+    
+    # Check for context elements that help BUILD stage
+    CONTEXT_INDICATORS = [
+        'source:', 'from:', 'import', 'pattern:', 'similar to', 'follow',
+        'spec ref', 'see ', 'reference:', 'based on', 'like ',
+        'risk:', 'prerequisite', 'requires ', 'depends on', 'after ',
+    ]
+    
+    has_context = any(indicator in notes_lower for indicator in CONTEXT_INDICATORS)
+    
+    # For longer notes (likely complex tasks), require some context
+    if len(notes_stripped) > 150 and not has_context:
+        # This is a soft warning - complex tasks should have context
+        # But we don't reject, just note it's suboptimal
+        pass
+    
     return True, None
 
 
