@@ -20,7 +20,7 @@ class Task:
         notes: Implementation notes/context (how to do it).
         accept: Acceptance criteria / test plan (how to verify).
         deps: List of task IDs this depends on.
-        status: Current status ('p' = pending, 'd' = done).
+        status: Current status ('p' = pending, 'd' = done, 'a' = accepted).
         done_at: Commit hash when marked done.
         needs_decompose: True if task was killed and needs breakdown.
         kill_reason: 'timeout' or 'context' if killed.
@@ -234,25 +234,34 @@ class Tombstone:
         done_at: Commit hash where task was marked done.
         reason: Why the task was rejected (empty for accepts).
         tombstone_type: "accept" or "reject" to distinguish outcomes.
+        name: Task name (preserved for accepted tasks to avoid data loss).
+        notes: Task notes (preserved for accepted tasks).
     """
 
     id: str
     done_at: str
     reason: str
     tombstone_type: str = "reject"
+    name: Optional[str] = None
+    notes: Optional[str] = None
 
-    def to_dict(self) -> Dict[str, str]:
+    def to_dict(self) -> Dict[str, Any]:
         """Convert tombstone to a dictionary for JSONL serialization.
 
         Returns:
             Dictionary with tombstone data.
         """
-        return {
+        d: Dict[str, Any] = {
             "t": self.tombstone_type,
             "id": self.id,
             "done_at": self.done_at,
             "reason": self.reason,
         }
+        if self.name:
+            d["name"] = self.name
+        if self.notes:
+            d["notes"] = self.notes
+        return d
 
     def to_jsonl(self) -> str:
         """Convert tombstone to a JSON string for JSONL file.
@@ -280,6 +289,8 @@ class Tombstone:
             done_at=d.get("done_at", ""),
             reason=d.get("reason", ""),
             tombstone_type=tombstone_type,
+            name=d.get("name"),
+            notes=d.get("notes"),
         )
 
     @classmethod

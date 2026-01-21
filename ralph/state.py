@@ -55,12 +55,30 @@ class RalphState:
 
     @property
     def done_ids(self) -> Set[str]:
-        """Get IDs of all completed tasks.
+        """Get IDs of all completed tasks awaiting verification.
 
         Returns:
-            Set of task IDs for completed tasks.
+            Set of task IDs for done (not yet accepted) tasks.
         """
         return {t.id for t in self.tasks if t.status == "d"}
+
+    @property
+    def accepted(self) -> List[Task]:
+        """Get all accepted tasks.
+
+        Returns:
+            List of tasks with status 'a' (accepted/verified).
+        """
+        return [t for t in self.tasks if t.status == "a"]
+
+    @property
+    def accepted_ids(self) -> Set[str]:
+        """Get IDs of all accepted tasks.
+
+        Returns:
+            Set of task IDs for accepted tasks.
+        """
+        return {t.id for t in self.tasks if t.status == "a"}
 
     @property
     def task_ids(self) -> Set[str]:
@@ -228,6 +246,7 @@ class RalphState:
             "tasks": {
                 "pending": [t.to_dict() for t in self.pending],
                 "done": [t.to_dict() for t in self.done],
+                "accepted": [t.to_dict() for t in self.accepted],
             },
             "issues": [i.to_dict() for i in self.issues],
             "stage": self.get_stage(),
@@ -321,25 +340,26 @@ def load_state(path: Path) -> RalphState:
     except (OSError, IOError):
         pass
 
-    # Apply accept records: mark tasks as done, or create synthetic tasks for compacted accepts
+    # Apply accept records: mark tasks as accepted, or create synthetic tasks for display
+    # Use status "a" to distinguish accepted from done (awaiting verification)
     for accept in accepts:
         task_id = accept.get("id")
         if task_id:
             task = state.get_task_by_id(task_id)
             if task:
-                # Task exists, mark it done
-                task.status = "d"
+                # Task exists, mark it as accepted (not just done)
+                task.status = "a"
                 if accept.get("done_at"):
                     task.done_at = accept.get("done_at")
             else:
                 # Task was compacted (removed) but accept record remains
-                # Create a minimal synthetic task record for tracking
+                # Create a minimal synthetic task record for display/tracking
                 # Preserve the name from the accept record if available
                 synthetic_task = Task(
                     id=task_id,
                     name=accept.get("name", f"[Compacted] {task_id}"),
                     spec=state.spec or "",
-                    status="d",
+                    status="a",  # Accepted, not done - won't show in VERIFY queue
                     done_at=accept.get("done_at"),
                     notes=accept.get("notes"),
                 )

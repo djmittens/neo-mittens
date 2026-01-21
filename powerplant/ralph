@@ -1328,12 +1328,35 @@ class RalphState:
     
     @property
     def done(self) -> list:
+        """Tasks awaiting verification (status='d')."""
         return [t for t in self.tasks if t.status == "d"]
     
     @property
+    def accepted(self) -> list:
+        """Tasks that have been verified and accepted (status='a')."""
+        return [t for t in self.tasks if t.status == "a"]
+    
+    @property
     def done_ids(self) -> set:
-        """Set of completed task IDs."""
+        """Set of task IDs awaiting verification (status='d')."""
         return {t.id for t in self.done}
+    
+    @property
+    def accepted_ids(self) -> set:
+        """Set of accepted task IDs (status='a' or from tombstones)."""
+        # Combine task status 'a' and tombstones for comprehensive accepted set
+        from_tasks = {t.id for t in self.tasks if t.status == "a"}
+        from_tombstones = {t.id for t in self.tombstones if t.tombstone_type == "accept"}
+        return from_tasks | from_tombstones
+    
+    @property
+    def completed_ids(self) -> set:
+        """Set of all completed task IDs (done + accepted).
+        
+        This is used for dependency checking - a dependency is satisfied if
+        the task is either done (awaiting verification) or accepted (verified).
+        """
+        return self.done_ids | self.accepted_ids
     
     def get_next_task(self) -> Optional[Task]:
         """Get next task respecting dependencies, sorted by priority (high > medium > low > None).
@@ -1346,7 +1369,7 @@ class RalphState:
     
     def get_sorted_pending(self) -> list:
         """Return pending tasks sorted by priority (high > medium > low > None), then by topological order."""
-        done_ids = self.done_ids
+        completed_ids = self.completed_ids  # Includes both done and accepted tasks
         priority_order = {"high": 0, "medium": 1, "low": 2, None: 3}
         result = []
         remaining = [(idx, task) for idx, task in enumerate(self.pending)]
@@ -1359,7 +1382,7 @@ class RalphState:
             still_waiting = []
             
             for idx, task in remaining:
-                if not task.deps or all(dep in done_ids or dep in seen for dep in task.deps):
+                if not task.deps or all(dep in completed_ids or dep in seen for dep in task.deps):
                     ready.append((idx, task))
                 else:
                     still_waiting.append((idx, task))
@@ -1417,6 +1440,7 @@ class RalphState:
             "tasks": {
                 "pending": [task_to_dict(t) for t in self.get_sorted_pending()],
                 "done": [task_to_dict(t) for t in self.done],
+                "accepted": [task_to_dict(t) for t in self.accepted],
             },
             "issues": [{"id": i.id, "desc": i.desc} for i in self.issues],
             "tombstones": {
@@ -1875,6 +1899,13 @@ def load_state(config: RalphConfig) -> RalphState:
                 state.config = RalphPlanConfig.from_jsonl(d)
     except (json.JSONDecodeError, KeyError):
         pass
+    
+    # Post-process: mark tasks as accepted if they have accept tombstones
+    # This ensures done tasks with accept tombstones don't show in VERIFY queue
+    accepted_ids = {t.id for t in state.tombstones if t.tombstone_type == "accept"}
+    for task in state.tasks:
+        if task.id in accepted_ids and task.status == "d":
+            task.status = "a"  # Mark as accepted, not just done
     
     return state
 
@@ -6139,7 +6170,11 @@ def print_plan_report(state: RalphState, mode: str):
     
     # Build task ID to name map for dependency display
     task_names = {t.id: t.name for t in state.tasks}
-    done_ids = state.done_ids
+    # Also include accepted task names from tombstones
+    for tomb in state.tombstones:
+        if tomb.tombstone_type == "accept" and tomb.name:
+            task_names[tomb.id] = tomb.name
+    completed_ids = state.completed_ids  # Done + accepted
     
     # Show pending tasks in topological order with full details
     if state.pending:
@@ -6148,7 +6183,7 @@ def print_plan_report(state: RalphState, mode: str):
         print()
         for i, t in enumerate(sorted_pending, 1):
             # Check if task is blocked
-            blocked = t.deps and not all(dep in done_ids for dep in t.deps)
+            blocked = t.deps and not all(dep in completed_ids for dep in t.deps)
             if blocked:
                 print(f"  {Colors.DIM}{i}. {t.name}{Colors.NC} [{t.id}] {Colors.RED}(blocked){Colors.NC}")
             else:
@@ -6158,7 +6193,7 @@ def print_plan_report(state: RalphState, mode: str):
                 dep_strs = []
                 for dep in t.deps:
                     dep_name = task_names.get(dep, dep)[:30]
-                    if dep in done_ids:
+                    if dep in completed_ids:
                         dep_strs.append(f"{Colors.GREEN}✓ {dep_name}{Colors.NC}")
                     else:
                         dep_strs.append(f"{Colors.RED}○ {dep_name}{Colors.NC}")

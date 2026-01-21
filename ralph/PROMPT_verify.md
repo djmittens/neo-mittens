@@ -1,12 +1,16 @@
 # VERIFY Stage
 
-All tasks are done. Verify they meet their acceptance criteria.
+Done tasks need verification against their acceptance criteria.
 
-## Step 1: Get State
+## Step 1: Get Done Tasks
 
-Run `ralph query` to get:
-- `spec`: the current spec name (e.g., "construct-mode.md")
-- `tasks.done`: list of done tasks with their acceptance criteria
+Run `ralph query tasks --done` to get the list of done tasks that need verification.
+
+This returns a JSON array of done tasks, each with:
+- `id`: task ID (e.g., "t-abc123")
+- `name`: task name
+- `accept`: acceptance criteria to verify
+- `notes`: implementation notes (if any)
 
 ## Step 2: Verify Each Done Task
 
