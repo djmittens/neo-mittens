@@ -37,7 +37,7 @@ test_zsh_completion() {
 }
 
 # Test main command completions
-test_zsh_completion "" init plan build status watch stream query task issue set-spec log help 1 5 10 20 50
+test_zsh_completion "" init plan construct config status query task issue set-spec watch stream help 1 5 10 20 50
 test_zsh_completion "pl" plan
 test_zsh_completion "-" --max-cost --max-failures --completion-promise --no-ui
 
