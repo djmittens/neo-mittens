@@ -1,6 +1,5 @@
 {"t": "config", "timeout_ms": 300000, "max_iterations": 10, "context_warn": 0.7, "context_compact": 0.85, "context_kill": 0.95}
 {"t": "spec", "spec": "ralph-refactor.md"}
-{"t": "task", "id": "t-r9yj8k", "spec": "ralph-refactor.md", "name": "Extract stages/build.py", "s": "d", "notes": "Extract BUILD stage logic with run(state, config) -> StageResult function. Single responsibility for build phase.", "accept": "from ralph.stages.build import run works; run returns StageResult", "deps": ["t-r1rd5a"], "done_at": "62de226"}
 {"t": "task", "id": "t-sczvjn", "spec": "ralph-refactor.md", "name": "Extract stages/verify.py", "s": "p", "notes": "Extract VERIFY stage logic with run(state, config) -> StageResult function. Single responsibility for verification phase.", "accept": "from ralph.stages.verify import run works; run returns StageResult", "deps": ["t-r1rd5a"]}
 {"t": "task", "id": "t-sgsuyp", "spec": "ralph-refactor.md", "name": "Extract stages/decompose.py", "s": "p", "notes": "Extract DECOMPOSE stage logic with run(state, config) -> StageResult function. Single responsibility for decomposition phase.", "accept": "from ralph.stages.decompose import run works; run returns StageResult", "deps": ["t-r1rd5a"]}
 {"t": "task", "id": "t-skfdoh", "spec": "ralph-refactor.md", "name": "Create commands/__init__.py package", "s": "p", "notes": "Create commands package with __init__.py. Will export command functions as they are added.", "accept": "from ralph.commands import * works", "deps": ["t-qhrbem"]}
@@ -67,3 +66,4 @@
 {"t": "accept", "id": "t-rw8z73", "done_at": "408a19c", "reason": ""}
 {"t": "accept", "id": "t-r1rd5a", "done_at": "2193ff5", "reason": ""}
 {"t": "accept", "id": "t-r5dzxs", "done_at": "3072a8e", "reason": ""}
+{"t": "accept", "id": "t-r9yj8k", "done_at": "62de226", "reason": ""}
