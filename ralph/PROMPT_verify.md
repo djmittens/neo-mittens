@@ -50,14 +50,45 @@ Signs of architectural blocker:
 - Same rejection reason recurring
 - Requires changes outside this spec
 
-## Step 4: Check for Gaps
+## Step 4: Verify Spec Acceptance Criteria
 
 Read the spec's **Acceptance Criteria section only** (not entire spec):
 `ralph/specs/<spec-name>` - scroll to "## Acceptance Criteria"
 
-For any unchecked criteria (`- [ ]`) not covered by existing tasks, research what's needed and create a well-defined task:
+### 4a: Verify checked criteria still pass
+
+For each **checked** criterion (`- [x]`), spawn a subagent to verify it still holds:
+
 ```
-ralph task add '{"name": "<specific action>", "notes": "<DETAILED: file paths + approach>", "accept": "<measurable verification>"}\'
+Task: "Verify spec criterion still passes: '<criterion text>'
+
+1. Search codebase for the implementation
+2. Run any tests or commands that validate this criterion
+3. Check that the criterion is still satisfied
+
+Return JSON:
+{
+  \"criterion\": \"<criterion text>\",
+  \"passed\": true | false,
+  \"evidence\": \"<what you found>\",
+  \"reason\": \"<why it failed>\"  // only if passed=false
+}"
+```
+
+**Run all verifications in parallel.**
+
+If any checked criterion fails:
+- Uncheck it in the spec (`- [x]` → `- [ ]`)
+- Create a task to fix the regression:
+  ```
+  ralph task add '{"name": "Fix regression: <criterion>", "notes": "<DETAILED: what broke, file paths, approach>", "accept": "<measurable verification>"}'
+  ```
+
+### 4b: Check for uncovered criteria
+
+For any **unchecked** criteria (`- [ ]`) not covered by existing tasks, research what's needed and create a well-defined task:
+```
+ralph task add '{"name": "<specific action>", "notes": "<DETAILED: file paths + approach>", "accept": "<measurable verification>"}'
 ```
 
 **IMPORTANT**: 
