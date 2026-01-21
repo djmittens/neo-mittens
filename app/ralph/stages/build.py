@@ -5,6 +5,20 @@ from typing import Optional
 
 from ralph.config import GlobalConfig
 from ralph.models import Task, RalphPlanConfig
+
+# TODO: Ensure PYTHONPATH includes app/ directory for local imports
+import sys
+from pathlib import Path
+
+# Add project root to Python path if not already present
+project_root = Path(__file__).resolve().parents[3]
+if str(project_root) not in sys.path:
+    sys.path.insert(0, str(project_root))
+
+from typing import Optional
+from ralph.config import GlobalConfig
+from ralph.models import Task, RalphPlanConfig
+from ralph.context import Metrics  # Add explicit type import for Metrics
 from ralph.opencode import spawn_opencode, parse_json_stream, extract_metrics
 from ralph.prompts import load_prompt
 from ralph.stages.base import Stage, StageOutcome, StageResult
@@ -79,8 +93,12 @@ TASK DETAILS:
         output_str = process.stdout.read().decode("utf-8")
         output_list = list(parse_json_stream(output_str))
 
-        # Extract metrics
-        metrics = extract_metrics(output_str)
+        # Extract metrics with fallback
+        metrics: Metrics = Metrics()
+        try:
+            metrics = extract_metrics(output_str)
+        except Exception:
+            pass  # Fall back to default Metrics if extraction fails
     except Exception as e:
         return StageResult(
             stage=Stage.BUILD,
@@ -127,13 +145,11 @@ TASK DETAILS:
             error=f"Failed to process task outputs: {str(e)}",
         )
 
-    # Return a successful result
-    tokens_used = metrics.tokens_used if hasattr(metrics, "tokens_used") else 0
-    cost = metrics.total_cost if hasattr(metrics, "total_cost") else 0.0
+    # Return a successful result with explicit attribute access
     return StageResult(
         stage=Stage.BUILD,
         outcome=StageOutcome.SUCCESS,
         task_id=current_task.id,
-        tokens_used=tokens_used,
-        cost=cost,
+        tokens_used=metrics.tokens_used,
+        cost=metrics.total_cost,
     )
