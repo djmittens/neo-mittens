@@ -9,6 +9,8 @@ Usage: ralph [command] [options]
   ralph plan         - Plan mode, generate implementation plan
   ralph init         - Initialize ralph in current repo
   ralph status       - Show current status
+  ralph validate     - Check plan.jsonl for dangling deps and other issues
+  ralph compact      - Convert legacy accepted tasks to tombstones
   ralph watch        - Live dashboard with cost tracking
 
 Options:
@@ -1177,16 +1179,17 @@ class Issue:
 
 @dataclass
 class Tombstone:
-    id: str  # Task ID that was rejected
+    id: str  # Task ID that was accepted/rejected
     done_at: str  # Commit hash where task was marked done
-    reason: str  # Why the task was rejected
+    reason: str  # Why the task was rejected (empty for accept)
+    tombstone_type: str = "reject"  # "accept" or "reject"
     
     def to_jsonl(self) -> str:
-        return json.dumps({"t": "reject", "id": self.id, "done_at": self.done_at, "reason": self.reason})
+        return json.dumps({"t": self.tombstone_type, "id": self.id, "done_at": self.done_at, "reason": self.reason})
     
     @classmethod
-    def from_jsonl(cls, d: dict) -> 'Tombstone':
-        return cls(id=d["id"], done_at=d["done_at"], reason=d["reason"])
+    def from_jsonl(cls, d: dict, tombstone_type: str = "reject") -> 'Tombstone':
+        return cls(id=d["id"], done_at=d["done_at"], reason=d.get("reason", ""), tombstone_type=tombstone_type)
 
 
 @dataclass
@@ -1749,7 +1752,9 @@ def load_state(config: RalphConfig) -> RalphState:
             elif t == "issue":
                 state.issues.append(Issue.from_jsonl(d))
             elif t == "reject":
-                state.tombstones.append(Tombstone.from_jsonl(d))
+                state.tombstones.append(Tombstone.from_jsonl(d, "reject"))
+            elif t == "accept":
+                state.tombstones.append(Tombstone.from_jsonl(d, "accept"))
             elif t == "config":
                 state.config = RalphPlanConfig.from_jsonl(d)
     except (json.JSONDecodeError, KeyError):
@@ -1793,6 +1798,135 @@ def get_current_commit(config: RalphConfig) -> str:
         capture_output=True, text=True, cwd=config.repo_root
     )
     return result.stdout.strip() if result.returncode == 0 else "unknown"
+
+
+def validate_state(state: RalphState, config: RalphConfig = None) -> dict:
+    """Validate state for common issues like dangling dependencies.
+    
+    Args:
+        state: Current RalphState
+        config: RalphConfig for git history lookup (optional, but recommended)
+    
+    Returns dict with:
+        valid: bool - True if no errors found
+        errors: list - Critical issues that need fixing
+        warnings: list - Non-critical issues
+    
+    Note: Dependency validation considers git history because plan.jsonl
+    can be compacted (tombstones removed). A dep is valid if the task ID
+    exists in current state, tombstones, OR git history.
+    """
+    errors = []
+    warnings = []
+    
+    # Get all valid task IDs: current + tombstones + git history
+    # This handles compaction where accepted/rejected tasks are cleaned up
+    if config:
+        all_valid_ids = get_all_valid_task_ids(config, state)
+    else:
+        # Fallback: just use current state + tombstones
+        all_valid_ids = {t.id for t in state.tasks}
+        all_valid_ids.update(t.id for t in state.tombstones)
+    
+    # Current task IDs (for cycle detection)
+    current_task_ids = {t.id for t in state.tasks}
+    
+    # Check for dangling dependencies
+    for task in state.pending:
+        if task.deps:
+            for dep_id in task.deps:
+                if dep_id not in all_valid_ids:
+                    errors.append(f"Task {task.id} has dangling dep: {dep_id} (not in current state, tombstones, or git history)")
+    
+    # Check for dangling parent references
+    for task in state.tasks:
+        if task.parent and task.parent not in all_valid_ids:
+            warnings.append(f"Task {task.id} has dangling parent: {task.parent}")
+    
+    # Check for dangling created_from references
+    issue_ids = {i.id for i in state.issues}
+    for task in state.tasks:
+        if task.created_from:
+            # created_from can reference issues that are already cleared, so just warn
+            if not task.created_from.startswith('i-'):
+                warnings.append(f"Task {task.id} has invalid created_from: {task.created_from}")
+    
+    # Check for circular dependencies (simple cycle detection)
+    # Only check among current tasks, not historical ones
+    def has_cycle(task_id, visited, path):
+        if task_id in path:
+            return True
+        if task_id in visited:
+            return False
+        visited.add(task_id)
+        path.add(task_id)
+        task = next((t for t in state.tasks if t.id == task_id), None)
+        if task and task.deps:
+            for dep_id in task.deps:
+                if dep_id in current_task_ids and has_cycle(dep_id, visited, path):
+                    return True
+        path.remove(task_id)
+        return False
+    
+    visited = set()
+    for task in state.pending:
+        if has_cycle(task.id, visited, set()):
+            errors.append(f"Circular dependency detected involving task {task.id}")
+    
+    return {
+        'valid': len(errors) == 0,
+        'errors': errors,
+        'warnings': warnings
+    }
+
+
+def get_historical_task_ids(config: RalphConfig) -> set:
+    """Get all task IDs that have ever existed in plan.jsonl from git history.
+    
+    This is used to validate dependencies - a dep is valid if the task ID
+    exists in current state OR has ever existed (was accepted/compacted away).
+    
+    Uses git log to search for task IDs in the plan.jsonl history.
+    """
+    historical_ids = set()
+    
+    # Get task IDs from git history of plan.jsonl
+    # Use git log -p to get the diffs, then extract task IDs
+    try:
+        result = subprocess.run(
+            ['git', 'log', '-p', '--all', '--', 'ralph/plan.jsonl'],
+            cwd=config.repo_root, capture_output=True, text=True, timeout=30
+        )
+        if result.returncode == 0:
+            # Extract all task IDs from the history using regex
+            import re
+            # Match task IDs in format "t-" followed by alphanumeric chars
+            for match in re.finditer(r'"id":\s*"(t-[a-z0-9]+)"', result.stdout):
+                historical_ids.add(match.group(1))
+    except (subprocess.TimeoutExpired, Exception):
+        pass  # Fall back to current state only
+    
+    return historical_ids
+
+
+def get_all_valid_task_ids(config: RalphConfig, state: RalphState) -> set:
+    """Get all valid task IDs: current tasks + tombstones + git history.
+    
+    A task ID is valid as a dependency if:
+    1. It exists in current state.tasks (pending, done, or accepted)
+    2. It exists in tombstones (was accepted or rejected)
+    3. It existed in git history (plan was compacted)
+    """
+    # Current task IDs
+    valid_ids = {t.id for t in state.tasks}
+    
+    # Tombstone IDs (accepted and rejected)
+    valid_ids.update(t.id for t in state.tombstones)
+    
+    # Historical IDs from git (handles compaction)
+    valid_ids.update(get_historical_task_ids(config))
+    
+    return valid_ids
 
 
 def sync_with_remote(config: RalphConfig, branch: str) -> str:
@@ -2834,6 +2968,13 @@ def cmd_status(config: RalphConfig):
         print(f"  Status: {Colors.GREEN}Running{Colors.NC} ({running} process(es))")
     else:
         print(f"  Status: {Colors.YELLOW}Stopped{Colors.NC}")
+    
+    # Validation check
+    validation = validate_state(state, config)
+    if not validation['valid']:
+        print(f"  {Colors.RED}ERRORS: {len(validation['errors'])} validation issue(s){Colors.NC}")
+    if validation['warnings']:
+        print(f"  {Colors.YELLOW}Warnings: {len(validation['warnings'])}{Colors.NC}")
     print()
     
     # Tasks section
@@ -2920,6 +3061,101 @@ def cmd_status(config: RalphConfig):
     
     # Footer
     print(f"{Colors.DIM}Use 'ralph query' for JSON output, 'ralph watch' for live dashboard{Colors.NC}")
+
+
+def cmd_validate(config: RalphConfig):
+    """Validate plan.jsonl for common issues like dangling dependencies."""
+    if not config.ralph_dir.exists():
+        print(f"{Colors.YELLOW}Ralph not initialized. Run 'ralph init' first.{Colors.NC}")
+        return 1
+    
+    state = load_state(config)
+    validation = validate_state(state, config)
+    
+    print(f"{Colors.BLUE}{'='*60}{Colors.NC}")
+    print(f"{Colors.BLUE}RALPH VALIDATION{Colors.NC}")
+    print(f"{Colors.BLUE}{'='*60}{Colors.NC}")
+    print()
+    
+    if validation['valid'] and not validation['warnings']:
+        print(f"{Colors.GREEN}✓ No issues found{Colors.NC}")
+        print()
+        accepted_tombstones = len([t for t in state.tombstones if t.tombstone_type == "accept"])
+        rejected_tombstones = len([t for t in state.tombstones if t.tombstone_type == "reject"])
+        legacy_accepted = len([t for t in state.tasks if t.status == 'a'])
+        print(f"  Tasks: {len(state.pending)} pending, {len(state.done)} done")
+        if legacy_accepted:
+            print(f"  Legacy accepted (status=a): {legacy_accepted} {Colors.DIM}(consider running 'ralph compact'){Colors.NC}")
+        print(f"  Tombstones: {accepted_tombstones} accepted, {rejected_tombstones} rejected")
+        print(f"  Issues: {len(state.issues)}")
+        return 0
+    
+    if validation['errors']:
+        print(f"{Colors.RED}Errors ({len(validation['errors'])}){Colors.NC}")
+        print(f"{Colors.DIM}{'-'*60}{Colors.NC}")
+        for err in validation['errors']:
+            print(f"  {Colors.RED}✗{Colors.NC} {err}")
+        print()
+    
+    if validation['warnings']:
+        print(f"{Colors.YELLOW}Warnings ({len(validation['warnings'])}){Colors.NC}")
+        print(f"{Colors.DIM}{'-'*60}{Colors.NC}")
+        for warn in validation['warnings']:
+            print(f"  {Colors.YELLOW}!{Colors.NC} {warn}")
+        print()
+    
+    if validation['errors']:
+        print(f"{Colors.RED}Fix errors before running construct.{Colors.NC}")
+        print(f"{Colors.DIM}Dangling deps can be fixed by:{Colors.NC}")
+        print(f"{Colors.DIM}  1. Creating the missing task: ralph task add '{{\"id\": \"t-xxx\", ...}}'{Colors.NC}")
+        print(f"{Colors.DIM}  2. Or removing the dep from the task in plan.jsonl{Colors.NC}")
+        return 1
+    
+    return 0
+
+
+def cmd_compact(config: RalphConfig):
+    """Compact plan.jsonl by converting legacy accepted tasks to tombstones.
+    
+    This migrates tasks with status="a" to accept tombstones, then removes them.
+    The tombstones preserve task IDs for dependency validation.
+    """
+    if not config.ralph_dir.exists():
+        print(f"{Colors.YELLOW}Ralph not initialized. Run 'ralph init' first.{Colors.NC}")
+        return 1
+    
+    state = load_state(config)
+    
+    # Find legacy accepted tasks (status = "a")
+    legacy_accepted = [t for t in state.tasks if t.status == 'a']
+    
+    if not legacy_accepted:
+        print(f"{Colors.GREEN}Nothing to compact - no legacy accepted tasks found{Colors.NC}")
+        return 0
+    
+    print(f"{Colors.CYAN}Compacting plan.jsonl...{Colors.NC}")
+    print(f"  Found {len(legacy_accepted)} legacy accepted tasks")
+    
+    # Convert each to a tombstone
+    for task in legacy_accepted:
+        tombstone = Tombstone(
+            id=task.id, 
+            done_at=task.done_at or get_current_commit(config),
+            reason="",
+            tombstone_type="accept"
+        )
+        state.tombstones.append(tombstone)
+        print(f"  {Colors.GREEN}✓{Colors.NC} {task.id} - {task.name}")
+    
+    # Remove legacy accepted from tasks
+    legacy_ids = {t.id for t in legacy_accepted}
+    state.tasks = [t for t in state.tasks if t.id not in legacy_ids]
+    
+    save_state(config, state, f"ralph: compact plan (migrate {len(legacy_accepted)} accepted tasks to tombstones)")
+    
+    print()
+    print(f"{Colors.GREEN}Compacted {len(legacy_accepted)} tasks{Colors.NC}")
+    return 0
 
 
 def cmd_config():
@@ -5180,6 +5416,18 @@ def cmd_construct(config: RalphConfig, max_iterations: int, max_cost: float,
         print(f"{Colors.RED}Ralph not initialized. Run 'ralph init' first.{Colors.NC}")
         return 1
     
+    # Pre-flight check: validate state for dangling deps
+    state = load_state(config)
+    validation = validate_state(state, config)
+    if not validation['valid']:
+        print(f"{Colors.RED}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━{Colors.NC}")
+        print(f"{Colors.RED}VALIDATION ERRORS - Cannot start construct{Colors.NC}")
+        for err in validation['errors']:
+            print(f"  {Colors.RED}✗{Colors.NC} {err}")
+        print(f"{Colors.RED}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━{Colors.NC}")
+        print(f"{Colors.DIM}Run 'ralph validate' for details on how to fix.{Colors.NC}")
+        return 1
+    
     # Pre-flight check: verify opencode is available
     opencode_ok, opencode_error = check_opencode_available()
     if not opencode_ok:
@@ -6300,13 +6548,16 @@ def cmd_task(config: RalphConfig, action: str, desc: Optional[str] = None, arg3:
         else:
             task_id = _generate_id('t')
         
-        # Validate dependencies exist (warn but don't block)
+        # Validate dependencies exist (checks current state + tombstones + git history)
+        # This handles plan compaction where old tasks are removed
         if deps:
-            existing_ids = {t.id for t in state.tasks}
-            missing_deps = [d for d in deps if d not in existing_ids]
+            valid_ids = get_all_valid_task_ids(config, state)
+            missing_deps = [d for d in deps if d not in valid_ids]
             if missing_deps:
-                print(f"{Colors.YELLOW}WARNING: Dependencies not found: {', '.join(missing_deps)}{Colors.NC}")
-                print(f"  {Colors.DIM}This task will be blocked until these deps are created or removed.{Colors.NC}")
+                print(f"{Colors.RED}ERROR: Dependencies not found: {', '.join(missing_deps)}{Colors.NC}")
+                print(f"  {Colors.DIM}Not found in current tasks, tombstones, or git history.{Colors.NC}")
+                print(f"  {Colors.DIM}Create the dependency tasks first, or remove the invalid deps.{Colors.NC}")
+                return 1
         
         # Calculate decompose_depth from parent task
         decompose_depth = 0
@@ -6366,15 +6617,24 @@ def cmd_task(config: RalphConfig, action: str, desc: Optional[str] = None, arg3:
                 print(f"{Colors.RED}Task not found in done tasks: {task_id}{Colors.NC}")
                 print(f"  {Colors.DIM}Done tasks: {', '.join(t.id for t in done)}{Colors.NC}")
                 return 1
+            # Create accept tombstone and remove task
+            # Tombstone preserves task ID in history for dependency validation
+            tombstone = Tombstone(id=task.id, done_at=task.done_at or get_current_commit(config), 
+                                  reason="", tombstone_type="accept")
+            state.tombstones.append(tombstone)
             state.tasks = [t for t in state.tasks if t.id != task_id]
-            save_state(config, state)  # No auto-commit, let caller batch
+            save_state(config, state)
             print(f"{Colors.GREEN}Accepted task:{Colors.NC} {task_id} - {task.name}")
         else:
             count = len(done)
-            # Remove all done tasks from state.tasks
+            # Create accept tombstones for all done tasks
+            for task in done:
+                tombstone = Tombstone(id=task.id, done_at=task.done_at or get_current_commit(config),
+                                      reason="", tombstone_type="accept")
+                state.tombstones.append(tombstone)
             done_ids = {t.id for t in done}
             state.tasks = [t for t in state.tasks if t.id not in done_ids]
-            save_state(config, state)  # No auto-commit, let caller batch
+            save_state(config, state)
             print(f"{Colors.GREEN}Accepted {count} tasks{Colors.NC}")
         
     elif action == 'reject':
@@ -6856,6 +7116,10 @@ Examples:
         cmd_config()
     elif args.command == 'status':
         cmd_status(config)
+    elif args.command == 'validate':
+        cmd_validate(config)
+    elif args.command == 'compact':
+        cmd_compact(config)
     elif args.command == 'watch':
         cmd_watch(config)
     elif args.command == 'query':
