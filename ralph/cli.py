@@ -261,8 +261,9 @@ def cmd_task(
 
         tombstone = Tombstone(
             id=task.id,
+            done_at=task.done_at or "",
             reason=reason,
-            record_type="reject",
+            tombstone_type="reject",
         )
         state.add_tombstone(tombstone)
         task.status = "p"
