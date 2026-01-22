@@ -74,12 +74,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 
     if args.command == "plan":
         global_config = get_global_config()
-        cwd = Path.cwd()
-        config = {
-            "repo_root": cwd,
-            **global_config.__dict__,
-        }
-        return cmd_plan(config, args.spec, args)
+        return cmd_plan(global_config, args.spec, args)
 
     if args.command == "construct":
         global_config = get_global_config()
