@@ -70,21 +70,38 @@ class GlobalConfig:
     profile: str = "default"
 
     @classmethod
+    def _load_toml_data(cls, config_path: Path) -> Optional[dict]:
+        """Load TOML data from config file.
+
+        Handles file existence check, missing TOML parser check,
+        and TOML parsing with exception handling.
+
+        Args:
+            config_path: Path to the config.toml file.
+
+        Returns:
+            Parsed TOML data as dict, or None if loading fails.
+        """
+        if not config_path.exists():
+            return None
+
+        if tomllib is None:
+            # No TOML parser available
+            return None
+
+        try:
+            with open(config_path, "rb") as f:
+                return tomllib.load(f)
+        except Exception:
+            return None
+
+    @classmethod
     def load(cls) -> GlobalConfig:
         """Load config from ~/.config/ralph/config.toml with profile support."""
         config_path = Path.home() / ".config" / "ralph" / "config.toml"
 
-        if not config_path.exists():
-            return cls()
-
-        if tomllib is None:
-            # No TOML parser available, use defaults
-            return cls()
-
-        try:
-            with open(config_path, "rb") as f:
-                data = tomllib.load(f)
-        except Exception:
+        data = cls._load_toml_data(config_path)
+        if data is None:
             return cls()
 
         # Config priority:
