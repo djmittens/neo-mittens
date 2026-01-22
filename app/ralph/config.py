@@ -138,6 +138,18 @@ class GlobalConfig:
             config_dict["profile"] = profile_name
 
     @classmethod
+    def _apply_env_overrides(cls, config_dict: dict) -> None:
+        """Apply environment variable overrides to config dict.
+
+        Checks RALPH_ART_STYLE env var.
+
+        Args:
+            config_dict: Config dict to update in place.
+        """
+        if "RALPH_ART_STYLE" in os.environ:
+            config_dict["art_style"] = os.environ["RALPH_ART_STYLE"]
+
+    @classmethod
     def load(cls) -> GlobalConfig:
         """Load config from ~/.config/ralph/config.toml with profile support."""
         config_path = Path.home() / ".config" / "ralph" / "config.toml"
