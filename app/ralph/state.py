@@ -403,29 +403,26 @@ def _build_stage_record(state: RalphState) -> str:
     """Build the stage record JSON line."""
     stage_record: dict = {"t": "stage", "stage": state.stage}
 
-    # DECOMPOSE state
-    if state.decompose_target:
-        stage_record["decompose_target"] = state.decompose_target
-    if state.decompose_reason:
-        stage_record["decompose_reason"] = state.decompose_reason
-    if state.decompose_log:
-        stage_record["decompose_log"] = state.decompose_log
+    # Map of optional fields: (state_attr, record_key, include_condition)
+    # Fields are included if their value is truthy (or > 0 for batch_attempt)
+    optional_fields = [
+        ("decompose_target", "decompose_target"),
+        ("decompose_reason", "decompose_reason"),
+        ("decompose_log", "decompose_log"),
+        ("rescue_stage", "rescue_stage"),
+        ("rescue_batch", "rescue_batch"),
+        ("rescue_reason", "rescue_reason"),
+        ("rescue_log", "rescue_log"),
+        ("batch_items", "batch_items"),
+        ("batch_completed", "batch_completed"),
+    ]
 
-    # RESCUE state
-    if state.rescue_stage:
-        stage_record["rescue_stage"] = state.rescue_stage
-    if state.rescue_batch:
-        stage_record["rescue_batch"] = state.rescue_batch
-    if state.rescue_reason:
-        stage_record["rescue_reason"] = state.rescue_reason
-    if state.rescue_log:
-        stage_record["rescue_log"] = state.rescue_log
+    for attr, key in optional_fields:
+        value = getattr(state, attr, None)
+        if value:
+            stage_record[key] = value
 
-    # Batch tracking
-    if state.batch_items:
-        stage_record["batch_items"] = state.batch_items
-    if state.batch_completed:
-        stage_record["batch_completed"] = state.batch_completed
+    # batch_attempt uses > 0 check instead of truthy
     if state.batch_attempt > 0:
         stage_record["batch_attempt"] = state.batch_attempt
 
