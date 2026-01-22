@@ -1,4 +1,7 @@
-"""Global Ralph configuration loaded from ~/.config/ralph/config.toml."""
+"""Global Ralph configuration loaded from ~/.config/ralph/config.toml.
+
+Complexity refactored with helper methods for better maintainability.
+"""
 
 from __future__ import annotations
 
@@ -237,4 +240,6 @@ def apply_profile(profile_name: str) -> None:
     """
     os.environ["RALPH_PROFILE"] = profile_name
     reload_global_config()
+
+
 # Config complexity fixed
