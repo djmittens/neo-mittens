@@ -36,6 +36,29 @@ class Task:
             self.status = "p"
             self.done_at = None
 
+    def _serialize_optional_fields(self, d: dict[str, Any]) -> None:
+        """Add optional fields to dict if they have truthy values."""
+        optional_fields = [
+            ("notes", self.notes),
+            ("accept", self.accept),
+            ("deps", self.deps),
+            ("done_at", self.done_at),
+            ("kill", self.kill_reason),
+            ("kill_log", self.kill_log),
+            ("priority", self.priority),
+            ("reject", self.reject_reason),
+            ("parent", self.parent),
+            ("created_from", self.created_from),
+            ("supersedes", self.supersedes),
+            ("decompose_depth", self.decompose_depth),
+            ("timeout_ms", self.timeout_ms),
+        ]
+        for key, value in optional_fields:
+            if value:
+                d[key] = value
+        if self.needs_decompose:
+            d["decompose"] = True
+
     def to_dict(self) -> dict[str, Any]:
         """Serialize task to dict for JSONL storage."""
         d: dict[str, Any] = {
@@ -43,36 +66,9 @@ class Task:
             "id": self.id,
             "name": self.name,
             "spec": self.spec,
+            "s": self.status,
         }
-        if self.notes:
-            d["notes"] = self.notes
-        if self.accept:
-            d["accept"] = self.accept
-        if self.deps:
-            d["deps"] = self.deps
-        d["s"] = self.status
-        if self.done_at:
-            d["done_at"] = self.done_at
-        if self.needs_decompose:
-            d["decompose"] = True
-        if self.kill_reason:
-            d["kill"] = self.kill_reason
-        if self.kill_log:
-            d["kill_log"] = self.kill_log
-        if self.priority:
-            d["priority"] = self.priority
-        if self.reject_reason:
-            d["reject"] = self.reject_reason
-        if self.parent:
-            d["parent"] = self.parent
-        if self.created_from:
-            d["created_from"] = self.created_from
-        if self.supersedes:
-            d["supersedes"] = self.supersedes
-        if self.decompose_depth:
-            d["decompose_depth"] = self.decompose_depth
-        if self.timeout_ms:
-            d["timeout_ms"] = self.timeout_ms
+        self._serialize_optional_fields(d)
         return d
 
     @classmethod
