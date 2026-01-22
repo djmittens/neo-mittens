@@ -19,6 +19,7 @@ def run_ralph(*args: str, cwd: Path) -> subprocess.CompletedProcess:
         text=True,
         cwd=str(cwd),
         env=env,
+        timeout=30,
     )
 
 
