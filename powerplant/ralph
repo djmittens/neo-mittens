@@ -134,6 +134,10 @@ class GlobalConfig:
     # Decomposition
     max_decompose_depth: int = 3
     
+    # Bounded fork-join limits
+    verify_batch_size: int = 5      # Max tasks to verify in one batch
+    investigate_batch_size: int = 5  # Max issues to investigate in one batch
+    
     # Git settings
     commit_prefix: str = 'ralph:'
     recent_commits_display: int = 3
@@ -1028,6 +1032,7 @@ class RalphConfig:
     prompt_verify: Path
     prompt_investigate: Path
     prompt_decompose: Path
+    prompt_rescue: Path
     specs_dir: Path
     output_fifo: Path
     plan_file: Path
@@ -1081,6 +1086,7 @@ class RalphConfig:
             prompt_verify=ralph_dir / 'PROMPT_verify.md',
             prompt_investigate=ralph_dir / 'PROMPT_investigate.md',
             prompt_decompose=ralph_dir / 'PROMPT_decompose.md',
+            prompt_rescue=ralph_dir / 'PROMPT_rescue.md',
             specs_dir=ralph_dir / 'specs',
             output_fifo=log_dir / 'output.fifo',
             plan_file=ralph_dir / 'plan.jsonl',
@@ -1345,6 +1351,15 @@ class RalphState:
     decompose_target: Optional[str] = None  # Task ID that needs decomposition (set when transitioning to DECOMPOSE)
     decompose_reason: Optional[str] = None  # Why decomposition is needed: "timeout", "context", "rejected"
     decompose_log: Optional[str] = None  # Path to log file from failed iteration
+    # RESCUE state (step-centric recovery for batch failures)
+    rescue_stage: Optional[str] = None  # Stage that failed (VERIFY, INVESTIGATE)
+    rescue_batch: list = field(default_factory=list)  # Items in the failed batch
+    rescue_reason: Optional[str] = None  # Why rescue is needed: "timeout", "context"
+    rescue_log: Optional[str] = None  # Path to log file from failed batch
+    # Batch tracking for bounded fork-join (persisted to plan.jsonl)
+    batch_items: list = field(default_factory=list)  # IDs of items in current batch
+    batch_completed: list = field(default_factory=list)  # IDs of batches completed this stage
+    batch_attempt: int = 0  # Retry count for current batch
     # Runtime state (not persisted to plan.jsonl)
     current_task_id: Optional[str] = None  # Task ID currently assigned to BUILD stage
     
@@ -1539,25 +1554,51 @@ class RalphState:
         self.decompose_reason = reason
         self.decompose_log = log_path
     
+    def transition_to_rescue(self, stage: str, batch_items: list, reason: str, log_path: Optional[str] = None):
+        """Transition to RESCUE stage for step-centric recovery.
+        
+        Unlike DECOMPOSE which handles a single task, RESCUE handles batch/stage
+        failures like verify timeout or investigate timeout.
+        
+        Args:
+            stage: The stage that failed (VERIFY, INVESTIGATE)
+            batch_items: IDs of items in the failed batch
+            reason: Why rescue is needed ("timeout", "context")
+            log_path: Optional path to log file from failed batch
+        """
+        self.stage = "RESCUE"
+        self.rescue_stage = stage
+        self.rescue_batch = batch_items.copy()
+        self.rescue_reason = reason
+        self.rescue_log = log_path
+    
     def transition_to_investigate(self):
         """Transition to INVESTIGATE stage."""
         self.stage = "INVESTIGATE"
         self._clear_decompose_state()
+        self._clear_rescue_state()
+        self._clear_batch_state()
     
     def transition_to_build(self):
         """Transition to BUILD stage."""
         self.stage = "BUILD"
         self._clear_decompose_state()
+        self._clear_rescue_state()
+        self._clear_batch_state()
     
     def transition_to_verify(self):
         """Transition to VERIFY stage."""
         self.stage = "VERIFY"
         self._clear_decompose_state()
+        self._clear_rescue_state()
+        self._clear_batch_state()
     
     def transition_to_complete(self):
         """Transition to COMPLETE stage."""
         self.stage = "COMPLETE"
         self._clear_decompose_state()
+        self._clear_rescue_state()
+        self._clear_batch_state()
     
 
     
@@ -1566,6 +1607,79 @@ class RalphState:
         self.decompose_target = None
         self.decompose_reason = None
         self.decompose_log = None
+    
+    def _clear_rescue_state(self):
+        """Clear rescue-related state fields."""
+        self.rescue_stage = None
+        self.rescue_batch = []
+        self.rescue_reason = None
+        self.rescue_log = None
+    
+    def _clear_batch_state(self):
+        """Clear batch-related state fields."""
+        self.batch_items = []
+        self.batch_completed = []
+        self.batch_attempt = 0
+    
+    def get_next_batch(self, items: list, batch_size: int) -> list:
+        """Get the next batch of items to process.
+        
+        Args:
+            items: All items that need processing (task IDs or issue IDs)
+            batch_size: Maximum items per batch
+            
+        Returns:
+            List of item IDs for this batch, or empty list if all done
+        """
+        # Filter out already completed items
+        remaining = [i for i in items if i not in self.batch_completed]
+        
+        # If we have an in-progress batch, return it
+        if self.batch_items:
+            # Filter to only items still in remaining (in case some were completed)
+            still_pending = [i for i in self.batch_items if i in remaining]
+            if still_pending:
+                return still_pending
+            # Batch complete, clear it
+            self.batch_completed.extend(self.batch_items)
+            self.batch_items = []
+            self.batch_attempt = 0
+            remaining = [i for i in items if i not in self.batch_completed]
+        
+        # Start new batch
+        if not remaining:
+            return []
+        
+        self.batch_items = remaining[:batch_size]
+        self.batch_attempt = 1
+        return self.batch_items
+    
+    def mark_batch_complete(self):
+        """Mark the current batch as complete."""
+        if self.batch_items:
+            self.batch_completed.extend(self.batch_items)
+            self.batch_items = []
+            self.batch_attempt = 0
+    
+    def mark_batch_failed(self, max_retries: int = 2) -> bool:
+        """Mark the current batch as failed.
+        
+        Args:
+            max_retries: Maximum retry attempts per batch
+            
+        Returns:
+            True if should retry, False if max retries exceeded
+        """
+        self.batch_attempt += 1
+        return self.batch_attempt <= max_retries
+    
+    def get_batch_progress(self) -> dict:
+        """Get current batch progress info."""
+        return {
+            "current_batch": self.batch_items,
+            "completed_batches": len(self.batch_completed),
+            "attempt": self.batch_attempt
+        }
     
     def get_next(self) -> dict:
         """Get next action to take based on current stage."""
@@ -1592,9 +1706,41 @@ class RalphState:
             task = self.get_next_task()
             return {"action": "BUILD", "task": task_to_query_dict(task) if task else None}
         elif stage == "VERIFY":
-            return {"action": "VERIFY", "item": f"Verify {len(self.done)} completed tasks against spec"}
+            # Return batch info if batching is active
+            batch_tasks = []
+            if self.batch_items:
+                batch_tasks = [t for t in self.done if t.id in self.batch_items]
+            else:
+                batch_tasks = self.done
+            return {
+                "action": "VERIFY", 
+                "tasks": [task_to_query_dict(t) for t in batch_tasks],
+                "count": len(batch_tasks),
+                "total": len(self.done),
+                "batch_progress": self.get_batch_progress() if self.batch_items else None
+            }
         elif stage == "INVESTIGATE":
-            return {"action": "INVESTIGATE", "items": [{"id": i.id, "desc": i.desc} for i in self.issues], "count": len(self.issues)}
+            # Return batch info if batching is active
+            batch_issues = []
+            if self.batch_items:
+                batch_issues = [i for i in self.issues if i.id in self.batch_items]
+            else:
+                batch_issues = self.issues
+            return {
+                "action": "INVESTIGATE", 
+                "items": [{"id": i.id, "desc": i.desc} for i in batch_issues], 
+                "count": len(batch_issues),
+                "total": len(self.issues),
+                "batch_progress": self.get_batch_progress() if self.batch_items else None
+            }
+        elif stage == "RESCUE":
+            return {
+                "action": "RESCUE",
+                "failed_stage": self.rescue_stage,
+                "failed_batch": self.rescue_batch,
+                "reason": self.rescue_reason,
+                "log": self.rescue_log
+            }
         else:
             return {"action": "COMPLETE", "item": None}
 
@@ -1784,7 +1930,8 @@ class Stage(Enum):
     INVESTIGATE = auto()  # Turn issues into tasks
     BUILD = auto()        # Execute tasks
     VERIFY = auto()       # Verify done tasks against spec
-    DECOMPOSE = auto()    # Handle failures by breaking down work
+    DECOMPOSE = auto()    # Handle BUILD failures by breaking down task
+    RESCUE = auto()       # Handle stage/batch failures (step-centric recovery)
     COMPLETE = auto()     # Spec fully implemented
 
 
@@ -1874,6 +2021,8 @@ class ConstructStateMachine:
         # Dispatch based on explicit stage
         if state.stage == "DECOMPOSE":
             return self._run_decompose(state)
+        elif state.stage == "RESCUE":
+            return self._run_rescue(state)
         elif state.stage == "INVESTIGATE":
             return self._run_investigate(state)
         elif state.stage == "BUILD":
@@ -1904,8 +2053,43 @@ class ConstructStateMachine:
         save_state(self.config, state)
         return True, False
     
+    def _run_rescue(self, state: 'RalphState') -> tuple[bool, bool]:
+        """Run RESCUE stage for step-centric recovery.
+        
+        RESCUE handles batch/stage failures (unlike DECOMPOSE which handles task failures).
+        It analyzes the failure and provides recovery options.
+        """
+        print(f"\n{Colors.CYAN}═══ RESCUE: {state.rescue_stage} batch failure ═══{Colors.NC}")
+        print(f"{Colors.YELLOW}  Failed batch: {state.rescue_batch}{Colors.NC}")
+        print(f"{Colors.YELLOW}  Reason: {state.rescue_reason}{Colors.NC}")
+        if state.rescue_log:
+            print(f"{Colors.YELLOW}  Log: {state.rescue_log}{Colors.NC}")
+        
+        result = self._run_stage_with_state(Stage.RESCUE, state)
+        
+        if result.outcome == StageOutcome.FAILURE:
+            print(f"{Colors.RED}RESCUE failed: {result.error}{Colors.NC}")
+        
+        # RESCUE → back to the failed stage (with batch cleared so we can retry or skip)
+        state = load_state(self.config)
+        failed_stage = state.rescue_stage
+        state._clear_rescue_state()
+        state._clear_batch_state()  # Clear batch so we start fresh
+        
+        # Transition back to the stage that failed
+        if failed_stage == "VERIFY":
+            state.transition_to_verify()
+        elif failed_stage == "INVESTIGATE":
+            state.transition_to_investigate()
+        else:
+            # Fallback to investigate
+            state.transition_to_investigate()
+        
+        save_state(self.config, state)
+        return True, False
+    
     def _run_investigate(self, state: 'RalphState') -> tuple[bool, bool]:
-        """Run INVESTIGATE stage. Transitions to BUILD."""
+        """Run INVESTIGATE stage with bounded batching. Transitions to BUILD."""
         # Auto-generate issues from rejection patterns
         new_issues = run_rejection_analysis(self.config)
         if new_issues:
@@ -1913,14 +2097,38 @@ class ConstructStateMachine:
             state = load_state(self.config)
         
         if state.issues:
-            print(f"\n{Colors.CYAN}═══ INVESTIGATE ({len(state.issues)} issues) ═══{Colors.NC}")
-            result = self._run_stage_with_state(Stage.INVESTIGATE, state)
+            gcfg = get_global_config()
+            batch_size = gcfg.investigate_batch_size
+            all_issue_ids = [i.id for i in state.issues]
             
-            if result.outcome == StageOutcome.FAILURE:
-                self._handle_failure(result)
-                return True, False
-            
-            state = load_state(self.config)
+            # Process in batches until all done
+            while True:
+                batch = state.get_next_batch(all_issue_ids, batch_size)
+                if not batch:
+                    break  # All batches completed
+                
+                batch_num = len(state.batch_completed) // batch_size + 1
+                total_batches = (len(all_issue_ids) + batch_size - 1) // batch_size
+                print(f"\n{Colors.CYAN}═══ INVESTIGATE batch {batch_num}/{total_batches} ({len(batch)} issues) ═══{Colors.NC}")
+                
+                save_state(self.config, state)  # Persist batch state before running
+                result = self._run_stage_with_state(Stage.INVESTIGATE, state)
+                
+                if result.outcome == StageOutcome.FAILURE:
+                    # Batch failed - check if we should retry
+                    if state.mark_batch_failed(max_retries=2):
+                        print(f"{Colors.YELLOW}Batch failed, will retry (attempt {state.batch_attempt}){Colors.NC}")
+                        save_state(self.config, state)
+                        continue
+                    else:
+                        # Max retries exceeded - transition to rescue
+                        self._handle_batch_failure(result, state, "INVESTIGATE")
+                        return True, False
+                
+                # Batch succeeded
+                state.mark_batch_complete()
+                state = load_state(self.config)  # Reload to get any changes from the stage
+                state.batch_completed = state.batch_completed  # Preserve our batch tracking
         
         # INVESTIGATE → BUILD
         state.transition_to_build()
@@ -1945,18 +2153,44 @@ class ConstructStateMachine:
         return True, False
     
     def _run_verify(self, state: 'RalphState') -> tuple[bool, bool]:
-        """Run VERIFY stage. Transitions to INVESTIGATE or COMPLETE."""
+        """Run VERIFY stage with bounded batching. Transitions to INVESTIGATE or COMPLETE."""
         if state.done:
-            print(f"\n{Colors.CYAN}═══ VERIFY ({len(state.done)} done tasks) ═══{Colors.NC}")
-            result = self._run_stage_with_state(Stage.VERIFY, state)
+            gcfg = get_global_config()
+            batch_size = gcfg.verify_batch_size
+            all_task_ids = [t.id for t in state.done]
             
-            if result.outcome == StageOutcome.FAILURE:
-                self._handle_failure(result)
-                return True, False
-            
-            state = load_state(self.config)
+            # Process in batches until all done
+            while True:
+                batch = state.get_next_batch(all_task_ids, batch_size)
+                if not batch:
+                    break  # All batches completed
+                
+                batch_num = len(state.batch_completed) // batch_size + 1
+                total_batches = (len(all_task_ids) + batch_size - 1) // batch_size
+                print(f"\n{Colors.CYAN}═══ VERIFY batch {batch_num}/{total_batches} ({len(batch)} tasks) ═══{Colors.NC}")
+                
+                save_state(self.config, state)  # Persist batch state before running
+                result = self._run_stage_with_state(Stage.VERIFY, state)
+                
+                if result.outcome == StageOutcome.FAILURE:
+                    # Batch failed - check if we should retry
+                    if state.mark_batch_failed(max_retries=2):
+                        print(f"{Colors.YELLOW}Batch failed, will retry (attempt {state.batch_attempt}){Colors.NC}")
+                        save_state(self.config, state)
+                        continue
+                    else:
+                        # Max retries exceeded - transition to rescue
+                        self._handle_batch_failure(result, state, "VERIFY")
+                        return True, False
+                
+                # Batch succeeded
+                state.mark_batch_complete()
+                state = load_state(self.config)  # Reload to get any changes from the stage
+                # Recompute remaining tasks (some may have been accepted/rejected)
+                all_task_ids = [t.id for t in state.done]
         
         # Check if we're complete (nothing left to do in any stage)
+        state = load_state(self.config)
         if not state.done and not state.pending and not state.issues:
             state.transition_to_complete()
             save_state(self.config, state)
@@ -2001,6 +2235,27 @@ class ConstructStateMachine:
             print(f"{Colors.YELLOW}Task {result.task_id} marked for decomposition (reason: {result.kill_reason}){Colors.NC}")
         else:
             print(f"{Colors.YELLOW}Stage failed, transitioning to DECOMPOSE (reason: {result.kill_reason}){Colors.NC}")
+    
+    def _handle_batch_failure(self, result: StageResult, state: 'RalphState', stage_name: str):
+        """Handle a batch failure by transitioning to RESCUE state.
+        
+        Unlike DECOMPOSE which breaks down a single task, RESCUE handles
+        step-level failures like batch timeouts in VERIFY/INVESTIGATE.
+        """
+        state = load_state(self.config)
+        
+        # Transition to RESCUE stage with batch context
+        state.transition_to_rescue(
+            stage=stage_name,
+            batch_items=state.batch_items,
+            reason=result.kill_reason or "unknown",
+            log_path=result.kill_log
+        )
+        
+        save_state(self.config, state)
+        print(f"{Colors.YELLOW}{stage_name} batch failed after max retries, transitioning to RESCUE{Colors.NC}")
+        print(f"{Colors.YELLOW}  Batch: {state.batch_items}{Colors.NC}")
+        print(f"{Colors.YELLOW}  Reason: {result.kill_reason}{Colors.NC}")
 
 
 def load_state(config: RalphConfig) -> RalphState:
@@ -2034,6 +2289,15 @@ def load_state(config: RalphConfig) -> RalphState:
                 state.decompose_target = d.get("decompose_target")
                 state.decompose_reason = d.get("decompose_reason")
                 state.decompose_log = d.get("decompose_log")
+                # Batch tracking for bounded fork-join
+                state.batch_items = d.get("batch_items", [])
+                state.batch_completed = d.get("batch_completed", [])
+                state.batch_attempt = d.get("batch_attempt", 0)
+                # RESCUE state for step-centric recovery
+                state.rescue_stage = d.get("rescue_stage")
+                state.rescue_batch = d.get("rescue_batch", [])
+                state.rescue_reason = d.get("rescue_reason")
+                state.rescue_log = d.get("rescue_log")
     except (json.JSONDecodeError, KeyError):
         pass
     
@@ -2079,6 +2343,22 @@ def save_state(config: RalphConfig, state: RalphState, commit_msg: Optional[str]
         stage_record["decompose_reason"] = state.decompose_reason
     if state.decompose_log:
         stage_record["decompose_log"] = state.decompose_log
+    # Batch tracking for bounded fork-join
+    if state.batch_items:
+        stage_record["batch_items"] = state.batch_items
+    if state.batch_completed:
+        stage_record["batch_completed"] = state.batch_completed
+    if state.batch_attempt > 0:
+        stage_record["batch_attempt"] = state.batch_attempt
+    # RESCUE state for step-centric recovery
+    if state.rescue_stage:
+        stage_record["rescue_stage"] = state.rescue_stage
+    if state.rescue_batch:
+        stage_record["rescue_batch"] = state.rescue_batch
+    if state.rescue_reason:
+        stage_record["rescue_reason"] = state.rescue_reason
+    if state.rescue_log:
+        stage_record["rescue_log"] = state.rescue_log
     lines.append(json.dumps(stage_record))
     
     for task in state.tasks:
@@ -4215,6 +4495,12 @@ def cmd_config():
     print(f"  max_decompose_depth: {cfg.max_decompose_depth}")
     print()
     
+    # Bounded fork-join
+    print(f"{Colors.CYAN}Bounded Fork-Join{Colors.NC}")
+    print(f"  verify_batch_size:     {cfg.verify_batch_size}")
+    print(f"  investigate_batch_size: {cfg.investigate_batch_size}")
+    print()
+    
     # Git settings
     print(f"{Colors.CYAN}Git Settings{Colors.NC}")
     print(f"  commit_prefix:        {cfg.commit_prefix}")
@@ -5883,6 +6169,8 @@ def get_prompt_for_stage(config: RalphConfig, mode: str, stage) -> Path:
         return config.prompt_investigate
     elif stage_str == 'DECOMPOSE':
         return config.prompt_decompose
+    elif stage_str == 'RESCUE':
+        return config.prompt_rescue
     else:
         # BUILD, PLAN, COMPLETE all use build prompt
         return config.prompt_build

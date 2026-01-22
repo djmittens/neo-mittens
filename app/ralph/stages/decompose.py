@@ -23,216 +23,177 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
-def _validate_subtask(
-    data: Dict[str, Union[str, int, float, Dict]], parent_spec: str, parent_id: str
-) -> Optional[Task]:
-    """Validate a single subtask dictionary and create a Task."""
-    # Validate input is a dictionary
-    if not isinstance(data, dict):
-        logger.warning(f"Subtask must be a dictionary, got {type(data)}")
-        return None
-
-    # Validate name
+def _extract_name(data: Dict[str, Union[str, int, float, Dict]]) -> Optional[str]:
+    """Extract and validate name from subtask data. Returns None if invalid."""
     name_val = data.get("name")
-
-    # Handle invalid name cases
     if name_val is None:
         return None
 
-    # Convert to string and strip
     try:
         name_str = str(name_val).strip()
     except Exception:
         return None
 
-    # Check for empty strings or non-string representations
     if not name_str or isinstance(name_val, (dict, list)):
         if isinstance(name_val, (int, float)):
-            name_str = str(name_val)
-        else:
-            return None
+            return str(name_val)
+        return None
 
-    # Generate UUID if no id provided
-    subtask_id = str(data.get("id", f"t-{uuid.uuid4().hex[:8]}"))
+    return name_str
 
-    # Validate notes
-    notes = str(data.get("notes", ""))
 
-    # Validate and convert priority
+def _extract_priority(data: Dict[str, Union[str, int, float, Dict]]) -> str:
+    """Extract and normalize priority from subtask data."""
     priority_val = data.get("priority", "medium")
-
-    # Handle different priority input types
     try:
-        if priority_val is None:
-            priority = "medium"
-        elif isinstance(priority_val, str):
-            priority = priority_val
-        elif isinstance(priority_val, (int, float)):
-            priority = str(int(priority_val))
-        elif isinstance(priority_val, dict):
-            # Use default for dictionary type
-            priority = "medium"
-        else:
-            priority = "medium"
+        if priority_val is None or isinstance(priority_val, dict):
+            return "medium"
+        if isinstance(priority_val, str):
+            return priority_val.strip() or "medium"
+        if isinstance(priority_val, (int, float)):
+            return str(int(priority_val))
+        return "medium"
     except Exception:
-        priority = "medium"
+        return "medium"
 
-    # Validate priority
-    priority = priority.strip() if priority else "medium"
+
+def _validate_subtask(
+    data: Dict[str, Union[str, int, float, Dict]], parent_spec: str, parent_id: str
+) -> Optional[Task]:
+    """Validate a single subtask dictionary and create a Task."""
+    if not isinstance(data, dict):
+        logger.warning(f"Subtask must be a dictionary, got {type(data)}")
+        return None
+
+    name_str = _extract_name(data)
+    if name_str is None:
+        return None
 
     return Task(
-        id=subtask_id,
+        id=str(data.get("id", f"t-{uuid.uuid4().hex[:8]}")),
         name=name_str,
-        notes=notes,
+        notes=str(data.get("notes", "")),
         spec=parent_spec,
         deps=[parent_id],
         parent=parent_id,
-        priority=priority,
+        priority=_extract_priority(data),
     )
 
-    # Validate priority
-    priority = priority.strip() if priority else "medium"
 
-    return Task(
-        id=subtask_id,
-        name=name_str,
-        notes=notes,
-        spec=parent_spec,
-        deps=[parent_id],
-        parent=parent_id,
-        priority=priority,
-    )
+def _build_decompose_prompt() -> Optional[str]:
+    """Build the decompose prompt with rules. Returns None on failure."""
+    prompt_text = load_prompt("decompose")
+    try:
+        return build_prompt_with_rules(prompt_text, Path.cwd() / "app/ralph/AGENTS.md")
+    except Exception as e:
+        logger.error(f"Failed to build prompt: {e}")
+        return None
+
+
+def _spawn_and_communicate(
+    prompt: str, config: GlobalConfig, task: Task
+) -> Optional[str]:
+    """Spawn OpenCode and return output. Returns None on failure."""
+    decompose_context = {
+        "task": {
+            "id": task.id,
+            "name": task.name,
+            "notes": task.notes,
+            "kill_reason": getattr(task, "kill_reason", None),
+        }
+    }
+    try:
+        model = config.model if config.model else None
+        process = spawn_opencode(
+            prompt, cwd=Path.cwd(), timeout=config.timeout_ms, model=model
+        )
+        os.environ["OPENCODE_CONTEXT"] = json.dumps(decompose_context)
+    except Exception as e:
+        logger.error(f"Failed to spawn OpenCode process: {e}")
+        return None
+
+    try:
+        output_bytes, _ = process.communicate(timeout=config.timeout_ms // 1000)
+        return output_bytes.decode("utf-8", errors="replace")
+    except (subprocess.TimeoutExpired, UnicodeDecodeError) as e:
+        logger.error(f"Communication error: {e}")
+        return None
+
+
+def _parse_subtasks(output: str, parent_task: Task) -> List[Task]:
+    """Parse subtasks from OpenCode output."""
+    subtasks: List[Task] = []
+    for item in parse_json_stream(output):
+        try:
+            if not isinstance(item, dict) or "subtasks" not in item:
+                continue
+            raw_subtasks = item.get("subtasks", [])
+            if not isinstance(raw_subtasks, list):
+                logger.warning(f"Invalid subtasks format: {type(raw_subtasks)}")
+                break
+            for t in raw_subtasks:
+                task = _validate_subtask(t, parent_task.spec, parent_task.id)
+                if task is not None:
+                    subtasks.append(task)
+            break
+        except Exception as e:
+            logger.warning(f"Error processing subtasks item: {e}")
+    return subtasks
+
+
+def _extract_metrics_safe(output: str) -> Metrics:
+    """Extract metrics with fallback to empty Metrics."""
+    try:
+        return extract_metrics(output) or Metrics()
+    except Exception as e:
+        logger.warning(f"Failed to extract metrics: {e}")
+        return Metrics()
 
 
 def run(state: RalphState, config: GlobalConfig) -> StageResult:
     """Decompose stage breaks down complex or failed tasks into subtasks."""
-    try:
-        # Identify tasks to decompose (with kill_reason)
-        killed_tasks = [t for t in state.tasks if getattr(t, "kill_reason", None)]
+    killed_tasks = [t for t in state.tasks if getattr(t, "kill_reason", None)]
+    if not killed_tasks:
+        return StageResult(stage=Stage.DECOMPOSE, outcome=StageOutcome.SKIP)
 
-        if not killed_tasks:
-            return StageResult(stage=Stage.DECOMPOSE, outcome=StageOutcome.SKIP)
+    task = killed_tasks[0]
 
-        task_to_decompose = killed_tasks[0]
-        prompt_text = load_prompt("decompose")
-
-        # Safely build prompt
-        try:
-            prompt_with_rules = build_prompt_with_rules(
-                prompt_text, Path.cwd() / "app/ralph/AGENTS.md"
-            )
-        except Exception as e:
-            logger.error(f"Failed to build prompt: {e}")
-            return StageResult(
-                stage=Stage.DECOMPOSE,
-                outcome=StageOutcome.FAILURE,
-                error=f"Prompt build failed: {e}",
-            )
-
-        # Prepare context for decomposition
-        decompose_context = {
-            "task": {
-                "id": task_to_decompose.id,
-                "name": task_to_decompose.name,
-                "notes": task_to_decompose.notes,
-                "kill_reason": task_to_decompose.kill_reason,
-            }
-        }
-
-        # Spawn OpenCode process with timeouts and error handling
-        try:
-            model = config.model if config.model else None
-            process = spawn_opencode(
-                prompt_with_rules,
-                cwd=Path.cwd(),
-                timeout=config.timeout_ms,
-                model=model,
-            )
-            os.environ["OPENCODE_CONTEXT"] = json.dumps(decompose_context)
-        except Exception as e:
-            logger.error(f"Failed to spawn OpenCode process: {e}")
-            return StageResult(
-                stage=Stage.DECOMPOSE,
-                outcome=StageOutcome.FAILURE,
-                error=f"OpenCode spawn failed: {e}",
-            )
-
-        # Process communication with error handling
-        try:
-            output_bytes, _ = process.communicate(timeout=config.timeout_ms // 1000)
-            output = output_bytes.decode("utf-8", errors="replace")
-        except (subprocess.TimeoutExpired, UnicodeDecodeError) as e:
-            logger.error(f"Communication error: {e}")
-            return StageResult(
-                stage=Stage.DECOMPOSE,
-                outcome=StageOutcome.FAILURE,
-                error=f"Communication error: {e}",
-            )
-
-        # Parse subtasks with robust validation
-        subtasks: List[Task] = []
-        for item in parse_json_stream(output):
-            try:
-                if isinstance(item, dict) and "subtasks" in item:
-                    # Verify subtasks is a list
-                    if not isinstance(item.get("subtasks", []), list):
-                        logger.warning(
-                            f"Invalid subtasks format: {type(item.get('subtasks'))}"
-                        )
-                        break
-
-                    # Validate each subtask
-                    validated_subtasks = [
-                        task
-                        for task in [
-                            _validate_subtask(
-                                t, task_to_decompose.spec, task_to_decompose.id
-                            )
-                            for t in item["subtasks"]
-                        ]
-                        if task is not None
-                    ]
-
-                    subtasks.extend(validated_subtasks)
-                    break
-            except Exception as e:
-                logger.warning(f"Error processing subtasks item: {e}")
-
-        # Handle failure to decompose
-        if not subtasks:
-            return StageResult(
-                stage=Stage.DECOMPOSE,
-                outcome=StageOutcome.FAILURE,
-                task_id=task_to_decompose.id,
-                kill_reason=task_to_decompose.kill_reason,
-                kill_log=getattr(task_to_decompose, "kill_log", None),
-                error="No valid subtasks could be generated",
-            )
-
-        # Replace parent task with subtasks
-        state.tasks = [t for t in state.tasks if t.id != task_to_decompose.id]
-        state.tasks.extend(subtasks)
-
-        # Extract metrics with fallback
-        try:
-            metrics = extract_metrics(output) or Metrics()
-        except Exception as e:
-            logger.warning(f"Failed to extract metrics: {e}")
-            metrics = Metrics()
-
-        return StageResult(
-            stage=Stage.DECOMPOSE,
-            outcome=StageOutcome.SUCCESS,
-            task_id=task_to_decompose.id,
-            cost=metrics.total_cost,
-            tokens_used=metrics.total_tokens_in + metrics.total_tokens_out,
-            error=f"Decomposed task into {len(subtasks)} subtasks",
-        )
-
-    except Exception as e:
-        logger.error(f"Unexpected error in decompose stage: {e}")
+    prompt = _build_decompose_prompt()
+    if prompt is None:
         return StageResult(
             stage=Stage.DECOMPOSE,
             outcome=StageOutcome.FAILURE,
-            error=f"Unexpected error: {e}",
+            error="Prompt build failed",
         )
+
+    output = _spawn_and_communicate(prompt, config, task)
+    if output is None:
+        return StageResult(
+            stage=Stage.DECOMPOSE,
+            outcome=StageOutcome.FAILURE,
+            error="OpenCode communication failed",
+        )
+
+    subtasks = _parse_subtasks(output, task)
+    if not subtasks:
+        return StageResult(
+            stage=Stage.DECOMPOSE,
+            outcome=StageOutcome.FAILURE,
+            task_id=task.id,
+            kill_reason=getattr(task, "kill_reason", None),
+            kill_log=getattr(task, "kill_log", None),
+            error="No valid subtasks could be generated",
+        )
+
+    state.tasks = [t for t in state.tasks if t.id != task.id]
+    state.tasks.extend(subtasks)
+
+    metrics = _extract_metrics_safe(output)
+    return StageResult(
+        stage=Stage.DECOMPOSE,
+        outcome=StageOutcome.SUCCESS,
+        task_id=task.id,
+        cost=metrics.total_cost,
+        tokens_used=metrics.total_tokens_in + metrics.total_tokens_out,
+        error=f"Decomposed task into {len(subtasks)} subtasks",
+    )

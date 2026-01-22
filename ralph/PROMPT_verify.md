@@ -1,16 +1,20 @@
 # VERIFY Stage
 
-All tasks are done. Verify they meet their acceptance criteria.
+Verify that done tasks meet their acceptance criteria.
 
-## Step 1: Get State
+## Step 1: Get Current Batch
 
-Run `ralph query` to get:
-- `spec`: the current spec name (e.g., "construct-mode.md")
-- `tasks.done`: list of done tasks with their acceptance criteria
+Run `ralph query next` to get the current batch of tasks to verify:
+- `tasks`: list of tasks in THIS BATCH (may be a subset of all done tasks)
+- `count`: number of tasks in this batch
+- `total`: total done tasks across all batches
+- `batch_progress`: shows which batch this is
 
-## Step 2: Verify Each Done Task
+**IMPORTANT**: Only verify the tasks returned in `tasks`. Ralph processes tasks in batches to avoid context overflow.
 
-For EACH done task, spawn a subagent to verify:
+## Step 2: Verify Each Task in Batch
+
+For EACH task in the batch, spawn a subagent to verify:
 
 ```
 Task: "Verify task '{task.name}' meets its acceptance criteria: {task.accept}

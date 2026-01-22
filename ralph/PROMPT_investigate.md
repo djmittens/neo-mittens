@@ -1,14 +1,20 @@
 # INVESTIGATE Stage
 
-Issues were discovered during build. Research and resolve ALL of them in parallel.
+Issues were discovered during build. Research and resolve them in parallel.
 
-## Step 1: Get All Issues
+## Step 1: Get Current Batch
 
-Run `ralph query issues` to see all pending issues.
+Run `ralph query next` to get the current batch of issues to investigate:
+- `items`: list of issues in THIS BATCH (may be a subset of all issues)
+- `count`: number of issues in this batch
+- `total`: total issues across all batches
+- `batch_progress`: shows which batch this is
+
+**IMPORTANT**: Only investigate the issues returned in `items`. Ralph processes issues in batches to avoid context overflow.
 
 ## Step 2: Parallel Investigation
 
-Use the Task tool to investigate ALL issues in parallel. Launch one subagent per issue:
+Use the Task tool to investigate ALL issues in this batch in parallel. Launch one subagent per issue:
 
 ```
 For each issue, launch a Task with prompt:
@@ -49,15 +55,12 @@ ralph task add '{"name": "...", "notes": "...", "accept": "<measurable: command 
 ...
 ```
 
-2. Clear all issues in one command:
+2. Clear the issues from this batch:
 ```
-ralph issue done-all
+ralph issue done-ids <id1> <id2> <id3> ...
 ```
 
-Or if only clearing specific issues:
-```
-ralph issue done-ids i-abc1 i-def2 i-ghi3
-```
+**IMPORTANT**: Only clear the issues that were in THIS batch (from Step 1), not all issues.
 
 ## Step 4: Report Summary
 
@@ -98,8 +101,8 @@ If multiple tasks fail with "grep returns 0, expected 1" and they all involve `a
 
 ## IMPORTANT
 
-- Launch ALL investigations in parallel using multiple Task tool calls in a single message
+- Launch ALL investigations for THIS BATCH in parallel using multiple Task tool calls in a single message
 - Wait for all results before applying any changes
 - Do NOT make code changes during investigation - only create tasks
-- Use `ralph issue done-all` to clear all issues at once
-- EXIT after all issues are resolved
+- Only clear issues from THIS batch using `ralph issue done-ids`
+- EXIT after this batch is processed (Ralph will run another iteration for remaining batches)
