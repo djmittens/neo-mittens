@@ -19,6 +19,7 @@ from ..stages.base import (
     StageResult,
 )
 from ..state import RalphState, load_state, save_state
+from ..commands.init import cmd_init
 from ..utils import Colors
 
 __all__ = ["cmd_construct"]
@@ -148,7 +149,7 @@ def _run_stage(
 
 
 def _validate_config(
-    config: dict,
+    config: dict, args_spec: Optional[str] = None
 ) -> Tuple[Optional[Path], Optional[Path], Optional[Path], Optional[str]]:
     """Validate and extract paths from config dict.
 
@@ -160,12 +161,17 @@ def _validate_config(
     ralph_dir: Optional[Path] = config.get("ralph_dir")
 
     if not plan_file or not plan_file.exists():
-        return (
-            None,
-            None,
-            None,
-            "No plan file found. Run 'ralph init' or 'ralph plan' first.",
-        )
+        if args_spec:
+            # If spec is provided, initialize directory
+            cmd_init()
+            plan_file = config.get("plan_file")
+        else:
+            return (
+                None,
+                None,
+                None,
+                "No plan file found. Run 'ralph init' or 'ralph plan' first.",
+            )
     if not repo_root or not ralph_dir:
         return (
             None,
@@ -208,7 +214,9 @@ def _run_iterations(state_machine: ConstructStateMachine, max_iterations: int) -
 
 def cmd_construct(config: dict, iterations: int, args: argparse.Namespace) -> int:
     """Construct mode - main autonomous development loop."""
-    plan_file_opt, repo_root_opt, ralph_dir_opt, error = _validate_config(config)
+    plan_file_opt, repo_root_opt, ralph_dir_opt, error = _validate_config(
+        config, args.spec if hasattr(args, "spec") else None
+    )
     if error or not plan_file_opt or not repo_root_opt or not ralph_dir_opt:
         print(f"{Colors.RED}{error or 'Invalid configuration'}{Colors.NC}")
         return 1
@@ -218,11 +226,9 @@ def cmd_construct(config: dict, iterations: int, args: argparse.Namespace) -> in
     ralph_dir: Path = ralph_dir_opt
 
     state = load_state(plan_file)
-    if not state.spec:
-        print(
-            f"{Colors.RED}No spec set. Run 'ralph set-spec <spec.md>' first.{Colors.NC}"
-        )
-        return 1
+    # If no spec is set and a spec is provided in args, set the spec
+    if hasattr(args, "spec") and args.spec and not state.spec:
+        state.spec = Path(args.spec).read_text()
 
     _print_construct_header(state, iterations)
 
