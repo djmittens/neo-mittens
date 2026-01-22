@@ -58,7 +58,7 @@ def mock_state():
         tasks=tasks,
         issues=issues,
         tombstones={"accepted": [], "rejected": []},
-        config=RalphPlanConfig(stage="INVESTIGATE", current_task=tasks[0].id),
+        config=RalphPlanConfig(),
     )
 
 
