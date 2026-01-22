@@ -121,48 +121,58 @@ def _task_done(state, plan_file, config: dict, task_id: Optional[str]) -> int:
     return 0
 
 
+def _create_accept_tombstone(task: Task) -> Tombstone:
+    """Create an accept tombstone for a task."""
+    return Tombstone(
+        id=task.id,
+        done_at=task.done_at or "",
+        reason="",
+        tombstone_type="accept",
+        name=task.name,
+        notes=task.notes,
+    )
+
+
+def _update_state_on_accept(state, tasks_to_accept: list) -> None:
+    """Update state by creating tombstones and removing accepted tasks."""
+    task_ids = {t.id for t in tasks_to_accept}
+    for task in tasks_to_accept:
+        tombstone = _create_accept_tombstone(task)
+        state.add_tombstone(tombstone)
+    state.tasks = [t for t in state.tasks if t.id not in task_ids]
+
+
 def _task_accept(state, plan_file, task_id: Optional[str]) -> int:
     """Accept a done task (or all done tasks)."""
     if task_id:
-        task = state.get_task_by_id(task_id)
-        if not task:
-            print(f"{Colors.RED}Task not found: {task_id}{Colors.NC}")
-            return 1
-        if task.status != "d":
-            print(f"{Colors.RED}Task not done: {task_id}{Colors.NC}")
-            return 1
-        # Create accept tombstone to preserve task metadata
-        tombstone = Tombstone(
-            id=task.id,
-            done_at=task.done_at or "",
-            reason="",
-            tombstone_type="accept",
-            name=task.name,
-            notes=task.notes,
-        )
-        state.add_tombstone(tombstone)
-        state.tasks = [t for t in state.tasks if t.id != task_id]
-        save_state(state, plan_file)
-        print(f"{Colors.GREEN}Task accepted:{Colors.NC} {task_id}")
-    else:
-        done_tasks = state.done
-        if not done_tasks:
-            print(f"{Colors.YELLOW}No done tasks to accept{Colors.NC}")
-            return 1
-        # Create accept tombstones for all done tasks
-        for task in done_tasks:
-            tombstone = Tombstone(
-                id=task.id,
-                done_at=task.done_at or "",
-                reason="",
-                tombstone_type="accept",
-                name=task.name,
-                notes=task.notes,
-            )
-            state.add_tombstone(tombstone)
-        state.tasks = [t for t in state.tasks if t.status != "d"]
-        save_state(state, plan_file)
-        print(f"{Colors.GREEN}Accepted {len(done_tasks)} tasks{Colors.NC}")
+        return _accept_single_task(state, plan_file, task_id)
+    return _accept_all_done_tasks(state, plan_file)
+
+
+def _accept_single_task(state, plan_file, task_id: str) -> int:
+    """Accept a single task by ID."""
+    task = state.get_task_by_id(task_id)
+    if not task:
+        print(f"{Colors.RED}Task not found: {task_id}{Colors.NC}")
+        return 1
+    if task.status != "d":
+        print(f"{Colors.RED}Task not done: {task_id}{Colors.NC}")
+        return 1
+    _update_state_on_accept(state, [task])
+    save_state(state, plan_file)
+    print(f"{Colors.GREEN}Task accepted:{Colors.NC} {task_id}")
+    return 0
+
+
+def _accept_all_done_tasks(state, plan_file) -> int:
+    """Accept all done tasks."""
+    done_tasks = state.done
+    if not done_tasks:
+        print(f"{Colors.YELLOW}No done tasks to accept{Colors.NC}")
+        return 1
+    _update_state_on_accept(state, done_tasks)
+    save_state(state, plan_file)
+    print(f"{Colors.GREEN}Accepted {len(done_tasks)} tasks{Colors.NC}")
     return 0
 
 
