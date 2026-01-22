@@ -39,11 +39,11 @@ def test_version_output():
 def test_subcommand_parsing():
     """Test that subcommands are parsed correctly."""
     # Commands that should succeed even without initialization
+    # Note: watch and stream are excluded - they are interactive commands
+    # with infinite loops that would hang the test
     subcommands = [
         "init",
         "config",
-        "watch",
-        "stream",
         "query",
         "validate",
         "compact",
