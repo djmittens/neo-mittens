@@ -2,6 +2,8 @@
 
 Run with: pytest ralph/tests/e2e/test_construct_flow.py -v --timeout=60
 See also: test_construct_mock.py for mocked opencode tests.
+
+Note: File split to keep under 500 line limit.
 """
 
 import os
