@@ -1640,9 +1640,15 @@ def analyze_rejection_patterns(state: 'RalphState', config: 'RalphConfig') -> li
     """
     from collections import defaultdict
     
+    # Get set of accepted task IDs - these rejections are no longer relevant
+    accepted_ids = state.accepted_ids
+    
+    # Filter to only unresolved rejections (tasks that were rejected but not later accepted)
+    unresolved_rejections = [t for t in state.tombstones if t.id not in accepted_ids]
+    
     # Count rejections per task
     rejections_by_task = defaultdict(list)
-    for tomb in state.tombstones:
+    for tomb in unresolved_rejections:
         rejections_by_task[tomb.id].append(tomb.reason)
     
     # Look for common error patterns across all rejections
@@ -1662,7 +1668,7 @@ def analyze_rejection_patterns(state: 'RalphState', config: 'RalphConfig') -> li
         'missing',
     ]
     
-    for tomb in state.tombstones:
+    for tomb in unresolved_rejections:
         reason_lower = tomb.reason.lower()
         for keyword in PATTERN_KEYWORDS:
             if keyword in reason_lower:
