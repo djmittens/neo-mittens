@@ -25,7 +25,127 @@ from .commands.stream import cmd_stream
 from .commands.plan import cmd_plan
 from .commands.query import cmd_query
 from .commands.issue import cmd_issue
-from .config import get_global_config
+from .config import get_global_config, GlobalConfig
+
+
+def _build_config(global_config: GlobalConfig, include_ralph_dir: bool = True) -> dict:
+    """Build config dict with common paths and global config."""
+    cwd = Path.cwd()
+    ralph_dir = cwd / "ralph"
+    plan_file = ralph_dir / "plan.jsonl"
+    config = {
+        "plan_file": plan_file,
+        "repo_root": cwd,
+        **global_config.__dict__,
+    }
+    if include_ralph_dir:
+        config["ralph_dir"] = ralph_dir
+    return config
+
+
+def _handle_init(args) -> int:
+    return cmd_init()
+
+
+def _handle_status(args) -> int:
+    config = _build_config(get_global_config())
+    return cmd_status(config)
+
+
+def _handle_config(args) -> int:
+    return cmd_config()
+
+
+def _handle_watch(args) -> int:
+    config = _build_config(get_global_config())
+    return cmd_watch(config)
+
+
+def _handle_stream(args) -> int:
+    return cmd_stream()
+
+
+def _handle_plan(args) -> int:
+    return cmd_plan(get_global_config(), args.spec, args)
+
+
+def _handle_construct(args) -> int:
+    config = _build_config(get_global_config())
+    iterations = (
+        args.max_iterations
+        if args.max_iterations is not None
+        else (args.iterations or 0)
+    )
+    return cmd_construct(config, iterations, args)
+
+
+def _handle_query(args) -> int:
+    config = _build_config(get_global_config())
+    return cmd_query(config, args.subquery, args.done)
+
+
+def _handle_task(args) -> int:
+    if not args.action:
+        print(
+            "Usage: ralph task [add|done|accept|reject|delete|prioritize] <description>"
+        )
+        return 1
+    config = _build_config(get_global_config(), include_ralph_dir=False)
+    return cmd_task(config, args.action, args.description, args.extra)
+
+
+def _handle_issue(args) -> int:
+    if not args.action:
+        print("Usage: ralph issue [add|done|done-all|done-ids] <description>")
+        return 1
+    config = _build_config(get_global_config(), include_ralph_dir=False)
+    return cmd_issue(config, args.action, args.description)
+
+
+def _handle_validate(args) -> int:
+    return cmd_validate(get_global_config(), args)
+
+
+def _handle_compact(args) -> int:
+    cmd_compact(get_global_config(), args)
+    return 0
+
+
+def _handle_log(args) -> int:
+    print("ralph log: feature not yet implemented")
+    return 0
+
+
+def _handle_set_spec(args) -> int:
+    print("ralph set-spec: feature not yet implemented")
+    return 0
+
+
+_COMMAND_HANDLERS = {
+    "init": _handle_init,
+    "status": _handle_status,
+    "config": _handle_config,
+    "watch": _handle_watch,
+    "stream": _handle_stream,
+    "plan": _handle_plan,
+    "construct": _handle_construct,
+    "query": _handle_query,
+    "task": _handle_task,
+    "issue": _handle_issue,
+    "validate": _handle_validate,
+    "compact": _handle_compact,
+    "log": _handle_log,
+    "set-spec": _handle_set_spec,
+}
+
+
+def _dispatch_command(command: str, args) -> int:
+    """Dispatch to appropriate command handler."""
+    handler = _COMMAND_HANDLERS.get(command)
+    if handler is None:
+        print(f"ralph: unknown command '{command}'", file=sys.stderr)
+        return 1
+    return handler(args)
 
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
@@ -37,135 +157,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         parser.print_help()
         return 0
 
-    if args.command == "init":
-        return cmd_init()
-
-    if args.command == "status":
-        global_config = get_global_config()
-        cwd = Path.cwd()
-        ralph_dir = cwd / "ralph"
-        plan_file = ralph_dir / "plan.jsonl"
-        config = {
-            "plan_file": plan_file,
-            "repo_root": cwd,
-            "ralph_dir": ralph_dir,
-            **global_config.__dict__,
-        }
-        return cmd_status(config)
-
-    if args.command == "config":
-        return cmd_config()
-
-    if args.command == "watch":
-        global_config = get_global_config()
-        cwd = Path.cwd()
-        ralph_dir = cwd / "ralph"
-        plan_file = ralph_dir / "plan.jsonl"
-        config = {
-            "plan_file": plan_file,
-            "repo_root": cwd,
-            "ralph_dir": ralph_dir,
-            **global_config.__dict__,
-        }
-        return cmd_watch(config)
-
-    if args.command == "stream":
-        return cmd_stream()
-
-    if args.command == "plan":
-        global_config = get_global_config()
-        return cmd_plan(global_config, args.spec, args)
-
-    if args.command == "construct":
-        global_config = get_global_config()
-        cwd = Path.cwd()
-        ralph_dir = cwd / "ralph"
-        plan_file = ralph_dir / "plan.jsonl"
-
-        # Determine spec and iterations
-        spec_file = args.spec
-
-        config = {
-            "plan_file": plan_file,
-            "repo_root": cwd,
-            "ralph_dir": ralph_dir,
-            **global_config.__dict__,
-        }
-
-        # Use max_iterations if provided, otherwise use iterations
-        iterations = 0
-        if args.max_iterations is not None:
-            iterations = args.max_iterations
-        elif args.iterations is not None:
-            iterations = args.iterations
-
-        return cmd_construct(config, iterations, args)
-
-    if args.command == "query":
-        global_config = get_global_config()
-        cwd = Path.cwd()
-        ralph_dir = cwd / "ralph"
-        plan_file = ralph_dir / "plan.jsonl"
-        config = {
-            "plan_file": plan_file,
-            "repo_root": cwd,
-            "ralph_dir": ralph_dir,
-            **global_config.__dict__,
-        }
-        return cmd_query(config, args.subquery, args.done)
-
-    if args.command == "task":
-        if not args.action:
-            print(
-                "Usage: ralph task [add|done|accept|reject|delete|prioritize] <description>"
-            )
-            return 1
-
-        global_config = get_global_config()
-        cwd = Path.cwd()
-        ralph_dir = cwd / "ralph"
-        plan_file = ralph_dir / "plan.jsonl"
-        config = {
-            "plan_file": plan_file,
-            "repo_root": cwd,
-            **global_config.__dict__,
-        }
-        return cmd_task(config, args.action, args.description, args.extra)
-
-    if args.command == "issue":
-        if not args.action:
-            print("Usage: ralph issue [add|done|done-all|done-ids] <description>")
-            return 1
-        global_config = get_global_config()
-        cwd = Path.cwd()
-        ralph_dir = cwd / "ralph"
-        plan_file = ralph_dir / "plan.jsonl"
-        config = {
-            "plan_file": plan_file,
-            "repo_root": cwd,
-            **global_config.__dict__,
-        }
-        return cmd_issue(config, args.action, args.description)
-
-    if args.command == "validate":
-        global_config = get_global_config()
-        return cmd_validate(global_config, args)
-
-    if args.command == "compact":
-        global_config = get_global_config()
-        cmd_compact(global_config, args)
-        return 0
-
-    if args.command == "log":
-        print("ralph log: feature not yet implemented")
-        return 0
-
-    if args.command == "set-spec":
-        print("ralph set-spec: feature not yet implemented")
-        return 0
-
-    print(f"ralph: unknown command '{args.command}'", file=sys.stderr)
-    return 1
+    return _dispatch_command(args.command, args)
 
 
 def _create_parser() -> argparse.ArgumentParser:
