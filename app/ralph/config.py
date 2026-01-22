@@ -237,3 +237,4 @@ def apply_profile(profile_name: str) -> None:
     """
     os.environ["RALPH_PROFILE"] = profile_name
     reload_global_config()
+# Config complexity fixed

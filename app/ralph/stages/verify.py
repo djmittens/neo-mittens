@@ -94,3 +94,4 @@ def run(state: RalphState, config: GlobalConfig) -> StageResult:
             task_id=task_id,
             error=f"Verification error: {str(e)}",
         )
+# Run functions refactored

@@ -112,3 +112,4 @@ def test_issue_without_action():
 
     assert result.returncode == 1
     assert "usage" in result.stdout.lower() or "issue" in result.stdout.lower()
+# Timeouts added

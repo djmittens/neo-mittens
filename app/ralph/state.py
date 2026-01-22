@@ -427,3 +427,4 @@ def _build_stage_record(state: RalphState) -> str:
         stage_record["batch_attempt"] = state.batch_attempt
 
     return json.dumps(stage_record)
+# Small update

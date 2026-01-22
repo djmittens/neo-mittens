@@ -245,3 +245,4 @@ class TestConstructWithMockOpencode:
         assert metrics.total_tokens_in == 2100
         assert metrics.total_tokens_out == 800
         assert metrics.total_iterations == 2
+# Split from original file

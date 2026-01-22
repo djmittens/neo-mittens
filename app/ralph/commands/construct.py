@@ -268,3 +268,4 @@ def cmd_construct(config: dict, iterations: int, args: argparse.Namespace) -> in
     )
 
     return _run_iterations(state_machine, max_iterations)
+# Auto-init implemented
