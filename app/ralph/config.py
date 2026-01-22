@@ -167,9 +167,8 @@ class GlobalConfig:
         # Apply profile overlay
         cls._apply_profile_overlay(config_dict, data)
 
-        # Also check RALPH_ART_STYLE env var for backward compatibility
-        if "RALPH_ART_STYLE" in os.environ:
-            config_dict["art_style"] = os.environ["RALPH_ART_STYLE"]
+        # Apply environment variable overrides
+        cls._apply_env_overrides(config_dict)
 
         # Build config object with only valid fields
         valid_fields = {k: v for k, v in config_dict.items() if hasattr(cls, k)}
