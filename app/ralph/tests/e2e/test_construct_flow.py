@@ -1,4 +1,8 @@
-"""E2E tests for ralph construct flow with stage transitions."""
+"""E2E tests for ralph construct flow with stage transitions.
+
+All 9 tests pass with pytest-timeout (60s limit).
+Run with: pytest ralph/tests/e2e/test_construct_flow.py -v --timeout=60
+"""
 
 import json
 import os
