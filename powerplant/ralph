@@ -2177,41 +2177,6 @@ def create_tombstone(
     )
 
 
-def get_current_task_file(config: RalphConfig) -> Path:
-    """Get path to the current task lock file."""
-    return config.ralph_dir / ".current_task"
-
-
-def save_current_task(config: RalphConfig, task_id: str) -> None:
-    """Save the currently assigned task ID to a runtime lock file.
-    
-    This file is NOT tracked by git - it's runtime state that tracks
-    which task BUILD is currently working on, so `ralph task done`
-    knows which task to mark as complete.
-    """
-    lock_file = get_current_task_file(config)
-    lock_file.write_text(task_id)
-
-
-def load_current_task(config: RalphConfig) -> Optional[str]:
-    """Load the currently assigned task ID from the runtime lock file.
-    
-    Returns None if no task is currently assigned.
-    """
-    lock_file = get_current_task_file(config)
-    if lock_file.exists():
-        task_id = lock_file.read_text().strip()
-        return task_id if task_id else None
-    return None
-
-
-def clear_current_task(config: RalphConfig) -> None:
-    """Clear the current task lock file."""
-    lock_file = get_current_task_file(config)
-    if lock_file.exists():
-        lock_file.unlink()
-
-
 def validate_state(state: RalphState, config: RalphConfig = None) -> dict:
     """Validate state for common issues like dangling dependencies.
     
@@ -5971,10 +5936,7 @@ def run_single_stage(config: RalphConfig, stage: Stage, state: RalphState,
         current_task_id = current_task.id
         current_task_name = current_task.name
     
-    # For BUILD stage, save the assigned task ID so `ralph task done` knows which task to mark
-    # This prevents the "wrong task marked done" bug when task ordering changes mid-iteration
-    if stage == Stage.BUILD and current_task_id:
-        save_current_task(config, current_task_id)
+
     
     output_buffer = OutputBuffer()
     
@@ -6917,11 +6879,6 @@ def cmd_run(config: RalphConfig, mode: str, max_iterations: int, max_cost: float
                 current_task_id = current_task.id
                 current_task_name = current_task.name
             
-            # For BUILD stage, save the assigned task ID so `ralph task done` knows which task to mark
-            # This prevents the "wrong task marked done" bug when task ordering changes mid-iteration
-            if stage == 'BUILD' and current_task_id:
-                save_current_task(config, current_task_id)
-            
             output_buffer = OutputBuffer()
 
             gcfg = get_global_config()
@@ -7541,10 +7498,6 @@ def cmd_query(config: RalphConfig, subquery: Optional[str] = None, done_only: bo
         output = state.to_dict()
         output["stage"] = state.get_stage()
         output["next"] = state.get_next()
-        # Include currently assigned task if BUILD is in progress
-        assigned_task_id = load_current_task(config)
-        if assigned_task_id:
-            output["current_task"] = assigned_task_id
         print(json.dumps(output, indent=2))
 
 
@@ -7701,24 +7654,9 @@ def cmd_task(config: RalphConfig, action: str, desc: Optional[str] = None, arg3:
                 return 1
             task_source = "explicit"
         else:
-            # First, check if there's a current task assigned by BUILD stage
-            # This prevents the "wrong task marked done" bug when task ordering changes
-            assigned_task_id = load_current_task(config)
-            if assigned_task_id:
-                task = next((t for t in state.pending if t.id == assigned_task_id), None)
-                if task:
-                    # Found the assigned task - use it
-                    task_source = "assigned"
-                else:
-                    # Assigned task no longer pending (weird state) - fall back to get_next_task
-                    print(f"{Colors.YELLOW}Warning: Assigned task {assigned_task_id} not in pending, using next task{Colors.NC}")
-                    task = state.get_next_task()
-                    task_source = "fallback"
-            else:
-                # No assigned task - fall back to get_next_task()
-                # This respects priority and dependency ordering
-                task = state.get_next_task()
-                task_source = "next"
+            # Use get_next_task() which respects priority and dependency ordering
+            task = state.get_next_task()
+            task_source = "next"
             
             if not task:
                 print(f"{Colors.YELLOW}No pending tasks{Colors.NC}")
@@ -7774,17 +7712,10 @@ def cmd_task(config: RalphConfig, action: str, desc: Optional[str] = None, arg3:
         commit_msg = f"ralph: task done - {task.name[:50]}"
         subprocess.run(['git', 'commit', '-m', commit_msg], cwd=config.repo_root, capture_output=True)
         
-        # Clear the current task lock file since task is now done
-        clear_current_task(config)
-        
         print(f"{Colors.GREEN}Task done:{Colors.NC} {task.id} - {task.name}")
         # Show how the task was selected for transparency
-        if task_source == "assigned":
-            print(f"  {Colors.DIM}(from BUILD stage assignment){Colors.NC}")
-        elif task_source == "explicit":
+        if task_source == "explicit":
             print(f"  {Colors.DIM}(explicit task ID){Colors.NC}")
-        elif task_source == "fallback":
-            print(f"  {Colors.DIM}(fallback - assigned task not found){Colors.NC}")
         # Don't print anything for "next" - it's the default behavior
         print(f"  {Colors.DIM}Changed files: {', '.join(sorted(all_changed)[:5])}{Colors.NC}")
         if len(all_changed) > 5:
