@@ -351,6 +351,7 @@ class TestConstructStageTransitions:
             if stage == Stage.INVESTIGATE:
                 current_state = load_state(plan_path)
                 current_state.issues = []
+                current_state.batch_completed.append("i-test01")
                 save_state(current_state, plan_path)
 
             if stage == Stage.BUILD:
@@ -362,6 +363,7 @@ class TestConstructStageTransitions:
             if stage == Stage.VERIFY:
                 current_state = load_state(plan_path)
                 current_state.tasks = []
+                current_state.batch_completed.append("t-test01")
                 save_state(current_state, plan_path)
 
             return StageResult(stage=stage, outcome=StageOutcome.SUCCESS)
