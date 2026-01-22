@@ -71,11 +71,7 @@ def _handle_plan(args) -> int:
 
 def _handle_construct(args) -> int:
     config = _build_config(get_global_config())
-    iterations = (
-        args.max_iterations
-        if args.max_iterations is not None
-        else (args.iterations or 0)
-    )
+    iterations = args.max_iterations or 0
     return cmd_construct(config, iterations, args)
 
 
@@ -193,10 +189,7 @@ def _create_parser() -> argparse.ArgumentParser:
     construct_parser = subparsers.add_parser(
         "construct", help="Run autonomous construction"
     )
-    construct_parser.add_argument("spec", nargs="?", help="Spec file to construct")
-    construct_parser.add_argument(
-        "iterations", nargs="?", type=int, help="Max iterations"
-    )
+    construct_parser.add_argument("spec", help="Spec file to construct")
     construct_parser.add_argument(
         "--max-cost", type=float, default=0, help="Stop when cost exceeds $N"
     )
