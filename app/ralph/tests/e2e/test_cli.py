@@ -11,6 +11,7 @@ def run_ralph(*args: str) -> subprocess.CompletedProcess:
         capture_output=True,
         text=True,
         cwd=".",
+        timeout=30,
     )
 
 
