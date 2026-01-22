@@ -54,6 +54,10 @@ class GlobalConfig:
     # Decomposition
     max_decompose_depth: int = 3
 
+    # Bounded fork-join limits
+    verify_batch_size: int = 5  # Max tasks to verify in one batch
+    investigate_batch_size: int = 5  # Max issues to investigate in one batch
+
     # Git settings
     commit_prefix: str = "ralph:"
     recent_commits_display: int = 3

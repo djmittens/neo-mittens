@@ -313,12 +313,14 @@ class TestSaveState:
         assert '"t": "reject"' in content
 
     def test_save_state_empty(self, tmp_path):
-        """Test saving empty state."""
+        """Test saving empty state still writes stage record."""
         plan_path = tmp_path / "plan.jsonl"
         state = RalphState()
         save_state(state, plan_path)
         content = plan_path.read_text()
-        assert content == ""
+        # Empty state still has stage record
+        assert '"t": "stage"' in content
+        assert '"stage": "PLAN"' in content
 
 
 class TestStateRoundtrip:
