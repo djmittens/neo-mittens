@@ -162,9 +162,17 @@ def _validate_config(
 
     if not plan_file or not plan_file.exists():
         if args_spec:
-            # If spec is provided, initialize directory
+            # If spec is provided, initialize directory and create state with spec
             cmd_init()
-            plan_file = config.get("plan_file")
+            # After init, compute paths from current directory
+            repo_root = Path.cwd()
+            global_config = GlobalConfig.load()
+            ralph_dir = repo_root / global_config.ralph_dir
+            plan_file = ralph_dir / "plan.jsonl"
+            # Update config dict for caller
+            config["plan_file"] = plan_file
+            config["repo_root"] = repo_root
+            config["ralph_dir"] = ralph_dir
         else:
             return (
                 None,

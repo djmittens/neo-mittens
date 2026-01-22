@@ -156,6 +156,72 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     return _dispatch_command(args.command, args)
 
 
+def _add_simple_parsers(subparsers) -> None:
+    """Add simple single-line subcommand parsers."""
+    subparsers.add_parser("init", help="Initialize a new ralph project")
+    subparsers.add_parser("status", help="Show current project status")
+    subparsers.add_parser("config", help="Configure Ralph settings")
+    subparsers.add_parser("watch", help="Watch for plan changes and sync")
+    subparsers.add_parser("stream", help="Stream construct output")
+    subparsers.add_parser("validate", help="Validate plan for issues")
+    subparsers.add_parser("compact", help="Compact plan file")
+    subparsers.add_parser("log", help="Show state change history")
+
+
+def _add_construct_parser(subparsers) -> None:
+    """Add construct subcommand with all its options."""
+    p = subparsers.add_parser("construct", help="Run autonomous construction")
+    p.add_argument("spec", help="Spec file to construct")
+    p.add_argument(
+        "--max-cost", type=float, default=0, help="Stop when cost exceeds $N"
+    )
+    p.add_argument("--max-failures", type=int, help="Stop after N consecutive failures")
+    p.add_argument(
+        "--completion-promise", default="", help="Stop when output contains this text"
+    )
+    p.add_argument("--timeout", type=int, help="Kill stage after N milliseconds")
+    p.add_argument("--context-limit", type=int, help="Context window size in tokens")
+    p.add_argument("--no-ui", action="store_true", help="Disable interactive dashboard")
+    p.add_argument(
+        "--max-iterations", type=int, help="Max iterations (alternative syntax)"
+    )
+    p.add_argument(
+        "--profile",
+        "-p",
+        help="Cost profile: budget, balanced, hybrid, cost_smart, quality",
+    )
+
+
+def _add_entity_parsers(subparsers) -> None:
+    """Add task, query, issue, plan, and set-spec parsers."""
+    plan_p = subparsers.add_parser("plan", help="Generate plan from spec")
+    plan_p.add_argument("spec", help="Spec file to plan from")
+
+    task_p = subparsers.add_parser("task", help="Manage tasks")
+    task_p.add_argument(
+        "action",
+        nargs="?",
+        help="Action: add, done, accept, reject, delete, prioritize",
+    )
+    task_p.add_argument("description", nargs="?", help="Task description or ID")
+    task_p.add_argument("extra", nargs="?", help="Extra argument (e.g., reject reason)")
+
+    query_p = subparsers.add_parser("query", help="Query current state as JSON")
+    query_p.add_argument(
+        "subquery", nargs="?", help="Subquery: stage, iteration, tasks, issues, next"
+    )
+    query_p.add_argument("--done", action="store_true", help="Show only done tasks")
+
+    issue_p = subparsers.add_parser("issue", help="Manage issues")
+    issue_p.add_argument(
+        "action", nargs="?", help="Action: add, done, done-all, done-ids"
+    )
+    issue_p.add_argument("description", nargs="?", help="Issue description or IDs")
+
+    set_spec_p = subparsers.add_parser("set-spec", help="Set current spec")
+    set_spec_p.add_argument("spec", help="Spec file to set")
+
+
 def _create_parser() -> argparse.ArgumentParser:
     """Create argument parser with all subcommands."""
     parser = argparse.ArgumentParser(
@@ -165,93 +231,9 @@ def _create_parser() -> argparse.ArgumentParser:
     subparsers = parser.add_subparsers(
         dest="command", help="Ralph commands", required=False
     )
-
-    # init
-    subparsers.add_parser("init", help="Initialize a new ralph project")
-
-    # status
-    subparsers.add_parser("status", help="Show current project status")
-
-    # config
-    subparsers.add_parser("config", help="Configure Ralph settings")
-
-    # watch
-    subparsers.add_parser("watch", help="Watch for plan changes and sync")
-
-    # stream
-    subparsers.add_parser("stream", help="Stream construct output")
-
-    # plan
-    plan_parser = subparsers.add_parser("plan", help="Generate plan from spec")
-    plan_parser.add_argument("spec", help="Spec file to plan from")
-
-    # construct
-    construct_parser = subparsers.add_parser(
-        "construct", help="Run autonomous construction"
-    )
-    construct_parser.add_argument("spec", help="Spec file to construct")
-    construct_parser.add_argument(
-        "--max-cost", type=float, default=0, help="Stop when cost exceeds $N"
-    )
-    construct_parser.add_argument(
-        "--max-failures", type=int, help="Stop after N consecutive failures"
-    )
-    construct_parser.add_argument(
-        "--completion-promise", default="", help="Stop when output contains this text"
-    )
-    construct_parser.add_argument(
-        "--timeout", type=int, help="Kill stage after N milliseconds"
-    )
-    construct_parser.add_argument(
-        "--context-limit", type=int, help="Context window size in tokens"
-    )
-    construct_parser.add_argument(
-        "--no-ui", action="store_true", help="Disable interactive dashboard"
-    )
-    construct_parser.add_argument(
-        "--max-iterations", type=int, help="Max iterations (alternative syntax)"
-    )
-    construct_parser.add_argument(
-        "--profile",
-        "-p",
-        help="Cost profile: budget, balanced, hybrid, cost_smart, quality",
-    )
-
-    # task
-    task_parser = subparsers.add_parser("task", help="Manage tasks")
-    task_parser.add_argument(
-        "action",
-        nargs="?",
-        help="Action: add, done, accept, reject, delete, prioritize",
-    )
-    task_parser.add_argument("description", nargs="?", help="Task description or ID")
-    task_parser.add_argument(
-        "extra", nargs="?", help="Extra argument (e.g., reject reason)"
-    )
-
-    # query
-    query_parser = subparsers.add_parser("query", help="Query current state as JSON")
-    query_parser.add_argument(
-        "subquery", nargs="?", help="Subquery: stage, iteration, tasks, issues, next"
-    )
-    query_parser.add_argument(
-        "--done", action="store_true", help="Show only done tasks"
-    )
-
-    # issue
-    issue_parser = subparsers.add_parser("issue", help="Manage issues")
-    issue_parser.add_argument(
-        "action", nargs="?", help="Action: add, done, done-all, done-ids"
-    )
-    issue_parser.add_argument("description", nargs="?", help="Issue description or IDs")
-
-    # Additional parsers with minimal setup
-    subparsers.add_parser("validate", help="Validate plan for issues")
-    subparsers.add_parser("compact", help="Compact plan file")
-    subparsers.add_parser("log", help="Show state change history")
-    set_spec_parser = subparsers.add_parser("set-spec", help="Set current spec")
-    set_spec_parser.add_argument("spec", help="Spec file to set")
-
+    _add_simple_parsers(subparsers)
+    _add_construct_parser(subparsers)
+    _add_entity_parsers(subparsers)
     return parser
 
 

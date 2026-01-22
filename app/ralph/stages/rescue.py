@@ -40,26 +40,37 @@ def _extract_metrics_safe(output: str) -> Metrics:
         return Metrics()
 
 
+def _spawn_and_communicate(
+    prompt: str, config: GlobalConfig
+) -> tuple[Optional[str], Optional[StageResult]]:
+    """Spawn OpenCode and get output. Returns (output, error_result)."""
+    try:
+        model = config.model if config.model else None
+        process = spawn_opencode(
+            prompt, cwd=Path.cwd(), timeout=config.timeout_ms, model=model
+        )
+    except Exception as e:
+        logger.error(f"Failed to spawn OpenCode process: {e}")
+        return None, StageResult(
+            stage=Stage.RESCUE,
+            outcome=StageOutcome.FAILURE,
+            error=f"OpenCode spawn failed: {e}",
+        )
+
+    try:
+        output_bytes, _ = process.communicate(timeout=config.timeout_ms // 1000)
+        return output_bytes.decode("utf-8", errors="replace"), None
+    except Exception as e:
+        logger.error(f"Communication error: {e}")
+        return None, StageResult(
+            stage=Stage.RESCUE,
+            outcome=StageOutcome.FAILURE,
+            error=f"OpenCode communication failed: {e}",
+        )
+
+
 def run(state: RalphState, config: GlobalConfig) -> StageResult:
-    """RESCUE stage handles batch/stage failures (step-centric recovery).
-
-    Unlike DECOMPOSE which handles a single task that was too complex,
-    RESCUE handles failures at the step level - e.g., a batch of tasks
-    timing out during VERIFY, or a batch of issues timing out during INVESTIGATE.
-
-    The RESCUE stage:
-    1. Reads the failure context (which stage, which batch, why it failed)
-    2. Analyzes the log to understand what went wrong
-    3. Takes recovery action (retry, skip, escalate, etc.)
-
-    Args:
-        state: Current Ralph state with rescue_* fields populated
-        config: Global configuration
-
-    Returns:
-        StageResult indicating success/failure of the rescue attempt
-    """
-    # Check if we have rescue context
+    """RESCUE stage: handles batch/stage failures with step-centric recovery."""
     if not state.rescue_stage:
         logger.warning("RESCUE called without rescue context")
         return StageResult(
@@ -69,8 +80,7 @@ def run(state: RalphState, config: GlobalConfig) -> StageResult:
         )
 
     logger.info(
-        f"RESCUE: {state.rescue_stage} batch failed - "
-        f"{len(state.rescue_batch)} items, reason: {state.rescue_reason}"
+        f"RESCUE: {state.rescue_stage} batch failed - {len(state.rescue_batch)} items, reason: {state.rescue_reason}"
     )
 
     prompt = _build_rescue_prompt()
@@ -81,35 +91,11 @@ def run(state: RalphState, config: GlobalConfig) -> StageResult:
             error="Prompt build failed",
         )
 
-    # Spawn OpenCode to run the rescue analysis
-    try:
-        model = config.model if config.model else None
-        process = spawn_opencode(
-            prompt, cwd=Path.cwd(), timeout=config.timeout_ms, model=model
-        )
-    except Exception as e:
-        logger.error(f"Failed to spawn OpenCode process: {e}")
-        return StageResult(
-            stage=Stage.RESCUE,
-            outcome=StageOutcome.FAILURE,
-            error=f"OpenCode spawn failed: {e}",
-        )
+    output, error_result = _spawn_and_communicate(prompt, config)
+    if error_result:
+        return error_result
 
-    try:
-        output_bytes, _ = process.communicate(timeout=config.timeout_ms // 1000)
-        output = output_bytes.decode("utf-8", errors="replace")
-    except Exception as e:
-        logger.error(f"Communication error: {e}")
-        return StageResult(
-            stage=Stage.RESCUE,
-            outcome=StageOutcome.FAILURE,
-            error=f"OpenCode communication failed: {e}",
-        )
-
-    metrics = _extract_metrics_safe(output)
-
-    # RESCUE always "succeeds" in the sense that it completes.
-    # The actual recovery actions are taken by the LLM during execution.
+    metrics = _extract_metrics_safe(output or "")
     return StageResult(
         stage=Stage.RESCUE,
         outcome=StageOutcome.SUCCESS,

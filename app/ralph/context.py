@@ -115,49 +115,57 @@ class CompactedContext:
     key_decisions: list = field(default_factory=list)
     tool_summaries: Optional[ToolSummaries] = None
 
-    def to_prompt(self) -> str:
-        """Generate the compacted context prompt."""
-        lines = ["## Compacted Context", ""]
-        lines.append(f"**Task:** {self.task_name}")
-
+    def _format_header(self) -> list[str]:
+        """Format the header section with task info."""
+        lines = ["## Compacted Context", "", f"**Task:** {self.task_name}"]
         if self.task_notes:
             lines.append(f"**Notes:** {self.task_notes}")
         if self.task_accept:
             lines.append(f"**Accept Criteria:** {self.task_accept}")
-
         lines.append("")
+        return lines
 
+    def _format_body(self) -> list[str]:
+        """Format the body section with progress and state."""
+        lines = []
         if self.progress_summary:
             lines.append(f"**Progress:** {self.progress_summary}")
-
         if self.uncommitted_changes:
             lines.append(f"**Uncommitted Changes:** {self.uncommitted_changes}")
+        return lines
 
-        if self.key_files:
-            lines.append("**Key Files:**")
-            for f in self.key_files:
-                lines.append(f"  - {f}")
+    def _format_lists(self) -> list[str]:
+        """Format list sections: key files, blockers, decisions."""
+        lines = []
+        for label, items in [
+            ("Key Files", self.key_files),
+            ("Blockers", self.blockers),
+            ("Key Decisions", self.key_decisions),
+        ]:
+            if items:
+                lines.append(f"**{label}:**")
+                lines.extend(f"  - {item}" for item in items)
+        return lines
 
-        if self.blockers:
-            lines.append("**Blockers:**")
-            for b in self.blockers:
-                lines.append(f"  - {b}")
-
-        if self.key_decisions:
-            lines.append("**Key Decisions:**")
-            for d in self.key_decisions:
-                lines.append(f"  - {d}")
-
+    def _format_footer(self) -> list[str]:
+        """Format the footer with next step and tool summaries."""
+        lines = []
         if self.next_step:
             lines.append(f"**Next Step:** {self.next_step}")
-
         if self.tool_summaries:
             ts = self.tool_summaries
             if ts.files_edited:
                 lines.append(f"**Files Edited:** {', '.join(ts.files_edited)}")
             if ts.tests_run:
                 lines.append(f"**Tests Run:** {len(ts.tests_run)} test(s)")
+        return lines
 
+    def to_prompt(self) -> str:
+        """Generate the compacted context prompt."""
+        lines = self._format_header()
+        lines.extend(self._format_body())
+        lines.extend(self._format_lists())
+        lines.extend(self._format_footer())
         return "\n".join(lines)
 
 
