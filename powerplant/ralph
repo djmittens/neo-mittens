@@ -1491,33 +1491,26 @@ class RalphState:
         - transition_to_build()
         - transition_to_verify()
         - transition_to_complete()
-        - compute_next_stage() - auto-compute based on state (for legacy/init)
+        - compute_initial_stage() - auto-compute for migration from old format
         """
         return self.stage
     
-    def compute_next_stage(self) -> str:
-        """Compute what stage should be next based on current state.
+    def compute_initial_stage(self) -> str:
+        """Compute initial stage for migration from old format.
         
-        Used for initialization and after completing a stage to determine
-        what comes next. This is the "default" transition logic.
-        
-        Priority order:
-        1. DECOMPOSE - if decompose_target is set
-        2. INVESTIGATE - if there are issues
-        3. BUILD - if there are pending tasks
-        4. VERIFY - if there are done tasks
-        5. COMPLETE - nothing left to do
+        Only used when loading a plan.jsonl that doesn't have a stage record.
+        For normal operation, stages are set explicitly via transition methods.
         """
         if self.spec is None:
             return "PLAN"
         if self.decompose_target:
             return "DECOMPOSE"
+        if self.done:
+            return "VERIFY"
         if self.issues:
             return "INVESTIGATE"
         if self.pending:
             return "BUILD"
-        if self.done:
-            return "VERIFY"
         return "COMPLETE"
     
     def get_decompose_task(self) -> Optional['Task']:
@@ -1566,15 +1559,7 @@ class RalphState:
         self.stage = "COMPLETE"
         self._clear_decompose_state()
     
-    def transition_to_next(self):
-        """Transition to the next appropriate stage based on state.
-        
-        Call this after completing a stage to automatically move to the next.
-        """
-        self.stage = self.compute_next_stage()
-        # Clear decompose state if we're not in DECOMPOSE
-        if self.stage != "DECOMPOSE":
-            self._clear_decompose_state()
+
     
     def _clear_decompose_state(self):
         """Clear decompose-related state fields."""
@@ -1591,12 +1576,18 @@ class RalphState:
             task = self.get_decompose_task()
             if task:
                 task_dict = task_to_query_dict(task, include_decompose_info=False)
-                # Add decompose info from state, not from task
                 task_dict["kill_reason"] = self.decompose_reason
                 if self.decompose_log:
                     task_dict["kill_log"] = self.decompose_log
                 return {"action": "DECOMPOSE", "task": task_dict}
-            return {"action": "DECOMPOSE", "task": None}
+            # Stage failure (no specific task) - provide context for DECOMPOSE to analyze
+            return {
+                "action": "DECOMPOSE",
+                "task": None,
+                "stage_failure": True,
+                "kill_reason": self.decompose_reason,
+                "kill_log": self.decompose_log
+            }
         elif stage == "BUILD":
             task = self.get_next_task()
             return {"action": "BUILD", "task": task_to_query_dict(task) if task else None}
@@ -1844,10 +1835,17 @@ class ConstructStateMachine:
         """
         Run a single iteration of the construct loop.
         
-        The state machine now has an explicit stage field. Each iteration:
-        1. Loads state and checks the current stage
-        2. Runs the appropriate stage handler
-        3. Transitions to the next stage on success, or DECOMPOSE on failure
+        The state machine has an explicit stage field. Each iteration:
+        1. Loads state and reads the current stage
+        2. Runs ONLY that stage
+        3. Explicit transition to the next stage
+        
+        Stage flow:
+        - DECOMPOSE → BUILD (after breaking down failed task)
+        - INVESTIGATE → BUILD (after converting issues to tasks)
+        - BUILD → VERIFY (after marking tasks done)
+        - VERIFY → BUILD or COMPLETE (after accepting/rejecting tasks)
+        - Any failure → DECOMPOSE
         
         Args:
             iteration: Current iteration number
@@ -1859,7 +1857,7 @@ class ConstructStateMachine:
         """
         state = load_state(self.config)
         
-        # Check for terminal states first
+        # Check for terminal states
         if not state.spec:
             print(f"{Colors.YELLOW}No spec configured - run 'ralph plan <spec.md>' first{Colors.NC}")
             return False, False
@@ -1867,55 +1865,65 @@ class ConstructStateMachine:
         if state.stage == "COMPLETE":
             return False, True
         
-        # Handle DECOMPOSE stage - highest priority, must complete before other work
+        # Dispatch based on explicit stage
         if state.stage == "DECOMPOSE":
-            task = state.get_decompose_task()
-            task_name = task.name if task else state.decompose_target
-            print(f"\n{Colors.CYAN}═══ DECOMPOSE: {task_name} ═══{Colors.NC}")
-            result = self._run_stage_with_state(Stage.DECOMPOSE, state)
-            
-            if result.outcome == StageOutcome.FAILURE:
-                print(f"{Colors.RED}DECOMPOSE failed: {result.error}{Colors.NC}")
-                # DECOMPOSE failed - this is bad, but we still need to transition out
-                # to avoid infinite loop. Transition to next stage anyway.
-            
-            # After DECOMPOSE, transition to next stage based on state
-            state = load_state(self.config)
-            state.transition_to_next()
-            save_state(self.config, state)
-            return True, False
+            return self._run_decompose(state)
+        elif state.stage == "INVESTIGATE":
+            return self._run_investigate(state)
+        elif state.stage == "BUILD":
+            return self._run_build(state)
+        elif state.stage == "VERIFY":
+            return self._run_verify(state)
+        else:
+            print(f"{Colors.RED}Unknown stage: {state.stage}{Colors.NC}")
+            return False, False
+    
+    def _run_decompose(self, state: 'RalphState') -> tuple[bool, bool]:
+        """Run DECOMPOSE stage. Transitions to INVESTIGATE on completion."""
+        task = state.get_decompose_task()
+        if task:
+            print(f"\n{Colors.CYAN}═══ DECOMPOSE: {task.name} ═══{Colors.NC}")
+        else:
+            print(f"\n{Colors.CYAN}═══ DECOMPOSE: stage failure analysis ═══{Colors.NC}")
         
-        # Analyze rejection patterns and auto-create issues for recurring problems
-        # This runs BEFORE INVESTIGATE so the AI can address them
+        result = self._run_stage_with_state(Stage.DECOMPOSE, state)
+        
+        if result.outcome == StageOutcome.FAILURE:
+            print(f"{Colors.RED}DECOMPOSE failed: {result.error}{Colors.NC}")
+        
+        # DECOMPOSE → INVESTIGATE (rejoin the cycle)
+        state = load_state(self.config)
+        state._clear_decompose_state()
+        state.transition_to_investigate()
+        save_state(self.config, state)
+        return True, False
+    
+    def _run_investigate(self, state: 'RalphState') -> tuple[bool, bool]:
+        """Run INVESTIGATE stage. Transitions to BUILD."""
+        # Auto-generate issues from rejection patterns
         new_issues = run_rejection_analysis(self.config)
         if new_issues:
-            print(f"{Colors.YELLOW}Created {new_issues} issues from rejection pattern analysis{Colors.NC}")
-            state = load_state(self.config)  # Reload state with new issues
+            print(f"{Colors.YELLOW}Created {new_issues} issues from rejection patterns{Colors.NC}")
+            state = load_state(self.config)
         
-        # Handle INVESTIGATE stage
-        if state.stage == "INVESTIGATE" or (state.issues and state.stage == "BUILD"):
-            # If we have issues but stage is BUILD, auto-transition to INVESTIGATE first
-            if state.issues:
-                print(f"\n{Colors.CYAN}═══ INVESTIGATE ({len(state.issues)} issues) ═══{Colors.NC}")
-                state.transition_to_investigate()
-                save_state(self.config, state)
-                
-                result = self._run_stage_with_state(Stage.INVESTIGATE, state)
-                
-                if result.outcome == StageOutcome.FAILURE:
-                    self._handle_failure(result)
-                    return True, False
-                
-                # Transition to next stage
-                state = load_state(self.config)
-                state.transition_to_next()
-                save_state(self.config, state)
+        if state.issues:
+            print(f"\n{Colors.CYAN}═══ INVESTIGATE ({len(state.issues)} issues) ═══{Colors.NC}")
+            result = self._run_stage_with_state(Stage.INVESTIGATE, state)
+            
+            if result.outcome == StageOutcome.FAILURE:
+                self._handle_failure(result)
+                return True, False
+            
+            state = load_state(self.config)
         
-        # Reload and check current stage
-        state = load_state(self.config)
-        
-        # Handle BUILD stage
-        if state.stage == "BUILD" and state.pending:
+        # INVESTIGATE → BUILD
+        state.transition_to_build()
+        save_state(self.config, state)
+        return True, False
+    
+    def _run_build(self, state: 'RalphState') -> tuple[bool, bool]:
+        """Run BUILD stage. Transitions to VERIFY."""
+        if state.pending:
             print(f"\n{Colors.CYAN}═══ BUILD ({len(state.pending)} tasks) ═══{Colors.NC}")
             result = self._run_stage_with_state(Stage.BUILD, state)
             
@@ -1923,38 +1931,34 @@ class ConstructStateMachine:
                 self._handle_failure(result)
                 return True, False
             
-            # Transition to next stage
             state = load_state(self.config)
-            state.transition_to_next()
+        
+        # BUILD → VERIFY
+        state.transition_to_verify()
+        save_state(self.config, state)
+        return True, False
+    
+    def _run_verify(self, state: 'RalphState') -> tuple[bool, bool]:
+        """Run VERIFY stage. Transitions to INVESTIGATE or COMPLETE."""
+        if state.done:
+            print(f"\n{Colors.CYAN}═══ VERIFY ({len(state.done)} done tasks) ═══{Colors.NC}")
+            result = self._run_stage_with_state(Stage.VERIFY, state)
+            
+            if result.outcome == StageOutcome.FAILURE:
+                self._handle_failure(result)
+                return True, False
+            
+            state = load_state(self.config)
+        
+        # Check if we're complete (nothing left to do in any stage)
+        if not state.done and not state.pending and not state.issues:
+            state.transition_to_complete()
             save_state(self.config, state)
-        
-        # Reload and check current stage
-        state = load_state(self.config)
-        
-        # Handle VERIFY stage
-        if state.stage == "VERIFY" or (state.done and not state.pending):
-            if state.done:
-                print(f"\n{Colors.CYAN}═══ VERIFY ({len(state.done)} done tasks) ═══{Colors.NC}")
-                state.transition_to_verify()
-                save_state(self.config, state)
-                
-                result = self._run_stage_with_state(Stage.VERIFY, state)
-                
-                if result.outcome == StageOutcome.FAILURE:
-                    self._handle_failure(result)
-                    return True, False
-                
-                # Transition to next stage
-                state = load_state(self.config)
-                state.transition_to_next()
-                save_state(self.config, state)
-        
-        # Final state check
-        state = load_state(self.config)
-        if state.stage == "COMPLETE":
             return False, True
         
-        # More work to do
+        # VERIFY → INVESTIGATE (cycle continues)
+        state.transition_to_investigate()
+        save_state(self.config, state)
         return True, False
     
     def _run_stage_with_state(self, stage: Stage, state: 'RalphState') -> StageResult:
@@ -1966,24 +1970,31 @@ class ConstructStateMachine:
     
     def _handle_failure(self, result: StageResult):
         """Handle a stage failure by transitioning to DECOMPOSE state."""
+        state = load_state(self.config)
+        
+        # Transition to DECOMPOSE stage
+        # If we have a specific task that failed, target it
+        # Otherwise, DECOMPOSE will analyze the log to figure out what went wrong
+        target_task_id = result.task_id or "__stage_failure__"
+        
+        state.transition_to_decompose(
+            task_id=target_task_id,
+            reason=result.kill_reason or "unknown",
+            log_path=result.kill_log
+        )
+        
+        # If a specific task failed, reset its status to pending
         if result.task_id:
-            state = load_state(self.config)
-            
-            # Transition to DECOMPOSE stage with explicit target
-            state.transition_to_decompose(
-                task_id=result.task_id,
-                reason=result.kill_reason or "unknown",
-                log_path=result.kill_log
-            )
-            
-            # Also reset the task status to pending (a killed task is NOT done)
             task = next((t for t in state.tasks if t.id == result.task_id), None)
             if task:
                 task.status = "p"
                 task.done_at = None
-            
-            save_state(self.config, state)
+        
+        save_state(self.config, state)
+        if result.task_id:
             print(f"{Colors.YELLOW}Task {result.task_id} marked for decomposition (reason: {result.kill_reason}){Colors.NC}")
+        else:
+            print(f"{Colors.YELLOW}Stage failed, transitioning to DECOMPOSE (reason: {result.kill_reason}){Colors.NC}")
 
 
 def load_state(config: RalphConfig) -> RalphState:
@@ -2039,7 +2050,7 @@ def load_state(config: RalphConfig) -> RalphState:
             state.decompose_reason = killed_task.kill_reason
             state.decompose_log = killed_task.kill_log
         else:
-            state.stage = state.compute_next_stage()
+            state.stage = state.compute_initial_stage()
     
     return state
 
@@ -7902,11 +7913,11 @@ def cmd_task(config: RalphConfig, action: str, desc: Optional[str] = None, arg3:
         task_name = task.name
         state.tasks = [t for t in state.tasks if t.id != task_id]
         
-        # If this task was the decompose target, clear decompose state and transition
+        # If this task was the decompose target, clear decompose state and go to BUILD
         if state.decompose_target == task_id:
             state._clear_decompose_state()
-            state.transition_to_next()
-            print(f"{Colors.YELLOW}Decompose target deleted, transitioning to {state.stage}{Colors.NC}")
+            state.transition_to_build()
+            print(f"{Colors.YELLOW}Decompose target deleted, transitioning to BUILD{Colors.NC}")
         
         save_state(config, state)
         print(f"{Colors.GREEN}Task deleted:{Colors.NC} {task_id} - {task_name}")
