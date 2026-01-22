@@ -1,5 +1,8 @@
 #!/usr/bin/env python3
-"""Ralph CLI - argparse setup and command dispatch."""
+"""Ralph CLI - argparse setup and command dispatch.
+
+Parser creation refactored into helper functions for maintainability.
+"""
 
 import argparse
 import os
