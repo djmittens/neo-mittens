@@ -26,6 +26,11 @@ def is_task_too_old(task_date_str: Optional[str], threshold_date: datetime) -> b
         # Parse the task date
         task_date = datetime.fromisoformat(task_date_str)
 
+        # Normalize to naive datetime for comparison
+        # (strip timezone info to avoid aware/naive comparison errors)
+        if task_date.tzinfo is not None:
+            task_date = task_date.replace(tzinfo=None)
+
         # Return True if task is older than the threshold
         return task_date < threshold_date
     except (ValueError, TypeError):
