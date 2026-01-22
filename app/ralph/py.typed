@@ -1,1 +1,2 @@
 # PEP 561 marker - this package supports type checking
+# Indicates this package has inline type annotations
