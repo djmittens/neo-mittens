@@ -96,6 +96,32 @@ class GlobalConfig:
             return None
 
     @classmethod
+    def _extract_base_config(cls, data: dict) -> dict:
+        """Extract base config from TOML data.
+
+        Loops over data keys (excluding 'profiles' and 'default'),
+        then overlays [default] section for backward compatibility.
+
+        Args:
+            data: Parsed TOML data.
+
+        Returns:
+            Merged config dict with base and default values.
+        """
+        config_dict: dict = {}
+
+        # First, load top-level keys (excluding 'profiles' and 'default' sections)
+        for key, value in data.items():
+            if key not in ("profiles", "default") and not isinstance(value, dict):
+                config_dict[key] = value
+
+        # Then overlay [default] section if it exists (backward compat)
+        if "default" in data:
+            config_dict.update(data["default"])
+
+        return config_dict
+
+    @classmethod
     def load(cls) -> GlobalConfig:
         """Load config from ~/.config/ralph/config.toml with profile support."""
         config_path = Path.home() / ".config" / "ralph" / "config.toml"
@@ -108,16 +134,7 @@ class GlobalConfig:
         # 1. Top-level keys (not in [default] or [profiles])
         # 2. [default] section (deprecated, for backward compat)
         # 3. RALPH_PROFILE overlay (if set)
-        config_dict: dict = {}
-
-        # First, load top-level keys (excluding 'profiles' and 'default' sections)
-        for key, value in data.items():
-            if key not in ("profiles", "default") and not isinstance(value, dict):
-                config_dict[key] = value
-
-        # Then overlay [default] section if it exists (backward compat)
-        if "default" in data:
-            config_dict.update(data["default"])
+        config_dict = cls._extract_base_config(data)
 
         # Apply profile if RALPH_PROFILE is set
         profile_name = os.environ.get("RALPH_PROFILE", "")
