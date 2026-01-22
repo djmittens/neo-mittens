@@ -2335,6 +2335,19 @@ def save_state(config: RalphConfig, state: RalphState, commit_msg: Optional[str]
     if state.spec:
         lines.append(json.dumps({"t": "spec", "spec": state.spec}))
     
+    # Validate batch_items against current stage to prevent stale references
+    # BUILD doesn't use batching; INVESTIGATE uses issue IDs; VERIFY uses task IDs
+    valid_batch_items = []
+    if state.batch_items:
+        if state.stage == "INVESTIGATE":
+            issue_ids = {i.id for i in state.issues}
+            valid_batch_items = [b for b in state.batch_items if b in issue_ids]
+        elif state.stage == "VERIFY":
+            task_ids = {t.id for t in state.tasks if t.status == "d"}
+            valid_batch_items = [b for b in state.batch_items if b in task_ids]
+        # BUILD and other stages don't use batching - leave empty
+        state.batch_items = valid_batch_items
+    
     # Write explicit stage record
     stage_record = {"t": "stage", "stage": state.stage}
     if state.decompose_target:

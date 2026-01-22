@@ -49,7 +49,7 @@ def mock_state():
         Issue(
             id=f"i-{uuid.uuid4().hex[:8]}",
             spec="test_spec.md",
-            description=f"Test issue {i}",
+            desc=f"Test issue {i}",
         )
         for i in range(2)
     ]
