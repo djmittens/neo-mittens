@@ -141,7 +141,7 @@ class GlobalConfig:
     def _apply_env_overrides(cls, config_dict: dict) -> None:
         """Apply environment variable overrides to config dict.
 
-        Checks RALPH_ART_STYLE env var.
+        Checks RALPH_ART_STYLE env var and updates art_style in config_dict.
 
         Args:
             config_dict: Config dict to update in place.
