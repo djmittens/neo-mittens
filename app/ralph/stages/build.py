@@ -121,16 +121,21 @@ def _process_output(
 def run(state: RalphState, config: GlobalConfig) -> StageResult:
     """Run the BUILD stage for the current task."""
     current_task, error_result = _get_current_task(state)
-    if error_result:
-        return error_result
+    if error_result or current_task is None:
+        return error_result or StageResult(
+            stage=Stage.BUILD,
+            outcome=StageOutcome.SKIP,
+            task_id=None,
+            error="No current task",
+        )
 
     full_prompt, prompt_error = _build_prompt(current_task)
-    if prompt_error:
+    if prompt_error or full_prompt is None:
         return StageResult(
             stage=Stage.BUILD,
             outcome=StageOutcome.FAILURE,
             task_id=current_task.id,
-            error=prompt_error,
+            error=prompt_error or "Failed to build prompt",
         )
 
     output_list, metrics, spawn_error = _spawn_and_parse(
@@ -160,6 +165,6 @@ def run(state: RalphState, config: GlobalConfig) -> StageResult:
         stage=Stage.BUILD,
         outcome=StageOutcome.SUCCESS,
         task_id=current_task.id,
-        tokens_used=metrics.tokens_used,
-        cost=metrics.total_cost,
+        tokens_used=metrics.tokens_used if metrics else 0,
+        cost=metrics.total_cost if metrics else 0.0,
     )
