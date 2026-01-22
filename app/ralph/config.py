@@ -122,6 +122,22 @@ class GlobalConfig:
         return config_dict
 
     @classmethod
+    def _apply_profile_overlay(cls, config_dict: dict, data: dict) -> None:
+        """Apply profile overlay to config if RALPH_PROFILE env var is set.
+
+        Checks RALPH_PROFILE env var via os.getenv, looks up profile in
+        data['profiles'], and updates config_dict in place.
+
+        Args:
+            config_dict: Config dict to update in place.
+            data: Parsed TOML data containing profiles section.
+        """
+        profile_name = os.getenv("RALPH_PROFILE", "")
+        if profile_name and "profiles" in data and profile_name in data["profiles"]:
+            config_dict.update(data["profiles"][profile_name])
+            config_dict["profile"] = profile_name
+
+    @classmethod
     def load(cls) -> GlobalConfig:
         """Load config from ~/.config/ralph/config.toml with profile support."""
         config_path = Path.home() / ".config" / "ralph" / "config.toml"
@@ -136,11 +152,8 @@ class GlobalConfig:
         # 3. RALPH_PROFILE overlay (if set)
         config_dict = cls._extract_base_config(data)
 
-        # Apply profile if RALPH_PROFILE is set
-        profile_name = os.environ.get("RALPH_PROFILE", "")
-        if profile_name and "profiles" in data and profile_name in data["profiles"]:
-            config_dict.update(data["profiles"][profile_name])
-            config_dict["profile"] = profile_name
+        # Apply profile overlay
+        cls._apply_profile_overlay(config_dict, data)
 
         # Also check RALPH_ART_STYLE env var for backward compatibility
         if "RALPH_ART_STYLE" in os.environ:
