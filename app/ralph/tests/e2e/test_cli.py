@@ -1,16 +1,23 @@
 """E2E tests for ralph CLI."""
 
+import os
 import subprocess
 import sys
+from pathlib import Path
+
+APP_DIR = Path(__file__).parent.parent.parent.parent
 
 
-def run_ralph(*args: str) -> subprocess.CompletedProcess:
+def run_ralph(*args: str, cwd: str | Path = ".") -> subprocess.CompletedProcess:
     """Run ralph as subprocess and return result."""
+    env = os.environ.copy()
+    env["PYTHONPATH"] = str(APP_DIR) + os.pathsep + env.get("PYTHONPATH", "")
     return subprocess.run(
         [sys.executable, "-m", "ralph", *args],
         capture_output=True,
         text=True,
-        cwd=".",
+        cwd=str(cwd),
+        env=env,
         timeout=30,
     )
 
@@ -58,9 +65,9 @@ def test_subcommand_parsing():
         )
 
 
-def test_status_not_initialized():
+def test_status_not_initialized(tmp_path: Path):
     """Test that status returns 1 when ralph is not initialized."""
-    result = run_ralph("status")
+    result = run_ralph("status", cwd=tmp_path)
     # status returns 1 when not initialized, which is expected behavior
     assert result.returncode == 1
     assert "not initialized" in result.stdout.lower() or "init" in result.stdout.lower()
