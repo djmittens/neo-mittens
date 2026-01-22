@@ -153,6 +153,7 @@ class TestConstructStageTransitions:
         """Test transition from BUILD to VERIFY stage.
 
         Start at VERIFY with done task, verify VERIFY stage runs.
+        The mock stage clears the task to simulate successful verification.
         """
         plan_path = init_ralph_with_git(tmp_path)
 
@@ -178,6 +179,11 @@ class TestConstructStageTransitions:
             config, stage, st, metrics, timeout_ms, ctx_limit
         ) -> StageResult:
             stages_run.append(stage)
+            if stage == Stage.VERIFY:
+                current_state = load_state(plan_path)
+                current_state.tasks = []
+                current_state.batch_completed.append("t-test01")
+                save_state(current_state, plan_path)
             return StageResult(stage=stage, outcome=StageOutcome.SUCCESS)
 
         def load_state_fn() -> RalphState:
@@ -401,7 +407,7 @@ class TestConstructWithMockOpencode:
             spec="test-spec.md",
             notes="Test notes",
             accept="echo ok",
-            status="pending",
+            status="p",
         )
         create_test_state(
             plan_path,
@@ -435,7 +441,7 @@ class TestConstructWithMockOpencode:
             spec="test-spec.md",
             notes="Test notes",
             accept="echo ok",
-            status="pending",
+            status="p",
         )
         create_test_state(
             plan_path,
