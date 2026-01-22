@@ -116,7 +116,7 @@ class CompactedContext:
     tool_summaries: Optional[ToolSummaries] = None
 
     def _format_header(self) -> list[str]:
-        """Format the header section with task info."""
+        """Format the header section with task info and metadata."""
         lines = ["## Compacted Context", "", f"**Task:** {self.task_name}"]
         if self.task_notes:
             lines.append(f"**Notes:** {self.task_notes}")
