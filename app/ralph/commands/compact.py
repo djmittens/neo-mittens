@@ -1,105 +1,89 @@
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Optional, Union
+from typing import Optional, List, Tuple
 
 from ralph.config import GlobalConfig
-from ralph.models import Task
+from ralph.models import Task, Tombstone
 from ralph.state import load_state, save_state, RalphState
 
 
 def is_task_too_old(task_date_str: Optional[str], threshold_date: datetime) -> bool:
-    """
-    Check if a task's timestamp is older than the given threshold.
-
-    Args:
-        task_date_str (Optional[str]): Timestamp of the task
-        threshold_date (datetime): Cutoff date for old tasks
-
-    Returns:
-        bool: True if task is too old, False otherwise
-    """
-    # No date means task isn't too old
+    """Check if a task's timestamp is older than the given threshold."""
     if not task_date_str:
         return False
 
     try:
-        # Parse the task date
         task_date = datetime.fromisoformat(task_date_str)
-
-        # Normalize to naive datetime for comparison
-        # (strip timezone info to avoid aware/naive comparison errors)
         if task_date.tzinfo is not None:
             task_date = task_date.replace(tzinfo=None)
-
-        # Return True if task is older than the threshold
         return task_date < threshold_date
     except (ValueError, TypeError):
         return False
 
 
-def cmd_compact(config: GlobalConfig, args: Optional[object] = None) -> None:
-    """
-    Compact plan.jsonl by removing completed tasks older than threshold
-    and archiving accepted tombstones.
-
-    Args:
-        config (GlobalConfig): Global configuration
-        args (Optional[object]): Optional command arguments (reserved for future use)
-    """
-    # Load the current state from plan.jsonl
-    state_file = Path("plan.jsonl")
-    state = load_state(state_file)
-
-    # Remove completed tasks older than 30 days
-    threshold_days = 30
-    now = datetime.now()
-    threshold_date = now - timedelta(days=threshold_days)
-
-    # Create a new RalphState to rebuild the state from scratch
-    compact_state = RalphState()
-    compact_state.config = state.config
-    compact_state.spec = state.spec
-    compact_state.current_task_id = state.current_task_id
-
-    # Track if state changed
-    state_changed = False
-
-    # Rebuild tasks
-    for task in state.tasks:
-        # Aggressive compaction: filter out old done tasks
-        if task.status != "DONE" or (
-            task.done_at and not is_task_too_old(task.done_at, threshold_date)
-        ):
-            compact_state.tasks.append(task)
+def _filter_old_tasks(
+    tasks: List[Task], threshold_date: datetime
+) -> Tuple[List[Task], bool]:
+    """Filter out old done tasks, return (kept_tasks, had_removals)."""
+    kept = []
+    removed_any = False
+    for task in tasks:
+        is_done = task.status == "DONE"
+        is_old = is_task_too_old(task.done_at, threshold_date)
+        if is_done and is_old:
+            removed_any = True
         else:
-            # Mark state as changed if we remove a task
-            state_changed = True
+            kept.append(task)
+    return kept, removed_any
 
-    # Keep issues
-    compact_state.issues = state.issues
 
-    # Limit accepted tombstones, remove old ones
-    compact_tombstones = [
-        tombstone
-        for tombstone in state.tombstones.get("accepted", [])
-        if tombstone.tombstone_type == "accept"
-        and (
-            not tombstone.done_at
-            or not is_task_too_old(tombstone.done_at, threshold_date)
-        )
-    ][-100:]
-    compact_state.tombstones["accepted"] = compact_tombstones
+def _filter_old_tombstones(
+    tombstones: List[Tombstone], threshold_date: datetime, limit: int = 100
+) -> Tuple[List[Tombstone], bool]:
+    """Filter old accepted tombstones and limit count, return (kept, had_removals)."""
+    original_count = len(tombstones)
+    kept = [
+        t
+        for t in tombstones
+        if t.tombstone_type == "accept"
+        and not is_task_too_old(t.done_at, threshold_date)
+    ][-limit:]
+    return kept, len(kept) < original_count
 
-    # Track tombstone changes
-    if len(compact_tombstones) < len(state.tombstones.get("accepted", [])):
-        state_changed = True
 
-    # Copy rejected tombstones
-    compact_state.tombstones["rejected"] = state.tombstones.get("rejected", [])
-
-    # Only save if state actually changed
-    if state_changed:
-        save_state(compact_state, state_file)
+def _report_compaction(removed: bool, threshold_days: int) -> None:
+    """Print compaction result message."""
+    if removed:
         print(f"Compact completed. Removed tasks older than {threshold_days} days.")
     else:
         print("No tasks to compact.")
+
+
+def cmd_compact(config: GlobalConfig, args: Optional[object] = None) -> None:
+    """Compact plan.jsonl by removing old completed tasks and tombstones."""
+    state_file = Path("plan.jsonl")
+    state = load_state(state_file)
+
+    threshold_days = 30
+    threshold_date = datetime.now() - timedelta(days=threshold_days)
+
+    # Filter tasks and tombstones
+    kept_tasks, tasks_removed = _filter_old_tasks(state.tasks, threshold_date)
+    kept_tombstones, tombstones_removed = _filter_old_tombstones(
+        state.tombstones.get("accepted", []), threshold_date
+    )
+
+    state_changed = tasks_removed or tombstones_removed
+
+    if state_changed:
+        compact_state = RalphState()
+        compact_state.config = state.config
+        compact_state.spec = state.spec
+        compact_state.current_task_id = state.current_task_id
+        compact_state.tasks = kept_tasks
+        compact_state.issues = state.issues
+        compact_state.tombstones["accepted"] = kept_tombstones
+        compact_state.tombstones["rejected"] = state.tombstones.get("rejected", [])
+        save_state(compact_state, state_file)
+
+    _report_compaction(state_changed, threshold_days)
