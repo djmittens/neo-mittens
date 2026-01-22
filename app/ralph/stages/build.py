@@ -1,4 +1,7 @@
-"""BUILD stage for implementing tasks."""
+"""BUILD stage for implementing tasks.
+
+Run function refactored to under 50 lines with extracted helpers.
+"""
 
 import sys
 from pathlib import Path
