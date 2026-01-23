@@ -234,9 +234,10 @@ def cmd_construct(config: dict, iterations: int, args: argparse.Namespace) -> in
     ralph_dir: Path = ralph_dir_opt
 
     state = load_state(plan_file)
-    # If no spec is set and a spec is provided in args, set the spec
+    # If no spec is set and a spec is provided in args, set the spec name
     if hasattr(args, "spec") and args.spec and not state.spec:
-        state.spec = Path(args.spec).read_text()
+        state.spec = args.spec
+        save_state(state, plan_file)
 
     _print_construct_header(state, iterations)
 
@@ -268,4 +269,6 @@ def cmd_construct(config: dict, iterations: int, args: argparse.Namespace) -> in
     )
 
     return _run_iterations(state_machine, max_iterations)
+
+
 # Auto-init implemented
