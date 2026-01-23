@@ -220,30 +220,22 @@ def _run_iterations(state_machine: ConstructStateMachine, max_iterations: int) -
     return 0
 
 
-def cmd_construct(config: dict, iterations: int, args: argparse.Namespace) -> int:
-    """Construct mode - main autonomous development loop."""
-    plan_file_opt, repo_root_opt, ralph_dir_opt, error = _validate_config(
-        config, args.spec if hasattr(args, "spec") else None
-    )
-    if error or not plan_file_opt or not repo_root_opt or not ralph_dir_opt:
-        print(f"{Colors.RED}{error or 'Invalid configuration'}{Colors.NC}")
-        return 1
+def _get_spec_from_args(args: argparse.Namespace) -> Optional[str]:
+    """Extract spec from args if present."""
+    return args.spec if hasattr(args, "spec") else None
 
-    plan_file: Path = plan_file_opt
-    repo_root: Path = repo_root_opt
-    ralph_dir: Path = ralph_dir_opt
 
-    state = load_state(plan_file)
-    # If no spec is set and a spec is provided in args, set the spec name
-    if hasattr(args, "spec") and args.spec and not state.spec:
-        state.spec = args.spec
+def _setup_state_with_spec(
+    state: RalphState, spec: Optional[str], plan_file: Path
+) -> None:
+    """Set spec on state if provided and not already set."""
+    if spec and not state.spec:
+        state.spec = spec
         save_state(state, plan_file)
 
-    _print_construct_header(state, iterations)
 
-    global_config = GlobalConfig.load()
-    metrics = Metrics()
-    max_iterations = iterations if iterations > 0 else 1000
+def _create_stage_wrapper(repo_root: Path, ralph_dir: Path):
+    """Create a stage wrapper function for the state machine."""
 
     def run_stage_wrapper(
         cfg: GlobalConfig,
@@ -258,12 +250,32 @@ def cmd_construct(config: dict, iterations: int, args: argparse.Namespace) -> in
             cfg, stage, st, met, timeout_ms, ctx_limit, repo_root, ralph_dir
         )
 
+    return run_stage_wrapper
+
+
+def cmd_construct(config: dict, iterations: int, args: argparse.Namespace) -> int:
+    """Construct mode - main autonomous development loop."""
+    spec = _get_spec_from_args(args)
+    plan_file_opt, repo_root_opt, ralph_dir_opt, error = _validate_config(config, spec)
+
+    if error or not plan_file_opt or not repo_root_opt or not ralph_dir_opt:
+        print(f"{Colors.RED}{error or 'Invalid configuration'}{Colors.NC}")
+        return 1
+
+    plan_file, repo_root, ralph_dir = plan_file_opt, repo_root_opt, ralph_dir_opt
+    state = load_state(plan_file)
+    _setup_state_with_spec(state, spec, plan_file)
+    _print_construct_header(state, iterations)
+
+    global_config = GlobalConfig.load()
+    max_iterations = iterations if iterations > 0 else 1000
+
     state_machine = ConstructStateMachine(
         config=global_config,
-        metrics=metrics,
+        metrics=Metrics(),
         stage_timeout_ms=global_config.stage_timeout_ms,
         context_limit=global_config.context_window,
-        run_stage_fn=run_stage_wrapper,
+        run_stage_fn=_create_stage_wrapper(repo_root, ralph_dir),
         load_state_fn=lambda: load_state(plan_file),
         save_state_fn=lambda st: save_state(st, plan_file),
     )

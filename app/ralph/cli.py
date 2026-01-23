@@ -28,6 +28,8 @@ from .commands.stream import cmd_stream
 from .commands.plan import cmd_plan
 from .commands.query import cmd_query
 from .commands.issue import cmd_issue
+from .commands.log import cmd_log
+from .commands.set_spec import cmd_set_spec
 from .config import get_global_config, GlobalConfig
 
 
@@ -111,13 +113,17 @@ def _handle_compact(args) -> int:
 
 
 def _handle_log(args) -> int:
-    print("ralph log: feature not yet implemented")
-    return 0
+    config = _build_config(get_global_config())
+    show_all = getattr(args, "all", False)
+    spec_filter = getattr(args, "spec", None)
+    branch_filter = getattr(args, "branch", None)
+    since = getattr(args, "since", None)
+    return cmd_log(config, show_all, spec_filter, branch_filter, since)
 
 
 def _handle_set_spec(args) -> int:
-    print("ralph set-spec: feature not yet implemented")
-    return 0
+    config = _build_config(get_global_config())
+    return cmd_set_spec(config, args.spec)
 
 
 _COMMAND_HANDLERS = {
@@ -168,7 +174,12 @@ def _add_simple_parsers(subparsers) -> None:
     subparsers.add_parser("stream", help="Stream construct output")
     subparsers.add_parser("validate", help="Validate plan for issues")
     subparsers.add_parser("compact", help="Compact plan file")
-    subparsers.add_parser("log", help="Show state change history")
+
+    log_p = subparsers.add_parser("log", help="Show state change history")
+    log_p.add_argument("--all", action="store_true", help="Show all history")
+    log_p.add_argument("--spec", help="Filter by spec")
+    log_p.add_argument("--branch", help="Filter by branch")
+    log_p.add_argument("--since", help="Filter since date/commit")
 
 
 def _add_construct_parser(subparsers) -> None:
