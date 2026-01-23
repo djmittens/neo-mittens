@@ -335,9 +335,11 @@ append_require_if_missing "$NVIM_DIR/init.lua"
 install_path_block "$HOME/.profile" "$SCRIPT_DIR/powerplant"
 install_path_block "$HOME/.zshrc" "$SCRIPT_DIR/powerplant"
 
-# 4b) Add repo root to PYTHONPATH for ralph package imports
+# 4b) Add repo root and app/ to PYTHONPATH for ralph package imports
 install_pythonpath_block "$HOME/.profile" "$SCRIPT_DIR"
 install_pythonpath_block "$HOME/.zshrc" "$SCRIPT_DIR"
+install_pythonpath_block "$HOME/.profile" "$SCRIPT_DIR/app"
+install_pythonpath_block "$HOME/.zshrc" "$SCRIPT_DIR/app"
 
 # 5) Disable ohmyzsh auto-title to allow custom tmux pane titles
 disable_omz_auto_title
@@ -498,6 +500,40 @@ install_ralph_textual() {
 }
 
 install_ralph_textual
+
+# 17b) Install mypy for type checking (optional, best-effort)
+install_mypy() {
+  # Check if mypy is already available (either as module or binary)
+  if command -v mypy >/dev/null 2>&1; then
+    echo "OK: mypy already installed"
+    return 0
+  fi
+
+  # On macOS, prefer brew to avoid externally-managed-environment issues
+  if command -v brew >/dev/null 2>&1; then
+    echo "Installing mypy via brew..."
+    brew install mypy 2>/dev/null && echo "OK: mypy installed via brew" && return 0
+  fi
+
+  # Try various pip methods
+  local pip_cmd=""
+  if command -v pip3 >/dev/null 2>&1; then
+    pip_cmd="pip3"
+  elif command -v pip >/dev/null 2>&1; then
+    pip_cmd="pip"
+  elif python3 -m pip --version >/dev/null 2>&1; then
+    pip_cmd="python3 -m pip"
+  fi
+
+  if [ -n "$pip_cmd" ]; then
+    echo "Installing mypy for type checking..."
+    $pip_cmd install --user mypy 2>/dev/null && echo "OK: mypy installed" || echo "SKIP: mypy install failed"
+  else
+    echo "SKIP: No pip/brew found, install mypy manually with: brew install mypy"
+  fi
+}
+
+install_mypy
 
 # 18) Install global OpenCode tools (to ~/.config/opencode/tools/)
 OPENCODE_CONFIG_DIR="$HOME/.config/opencode"

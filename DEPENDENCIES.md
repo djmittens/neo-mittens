@@ -27,6 +27,12 @@ This document lists the hard dependencies required for neo-mittens to function p
 | **gcloud** | Optional | Google Cloud SDK for custom tools | [cloud.google.com/sdk](https://cloud.google.com/sdk) |
 | **textual** | Optional | Enhanced TUI for ralph | `pip3 install --user textual` |
 
+## Development Dependencies
+
+| Dependency | Required | Purpose | Install |
+|------------|----------|---------|---------|
+| **mypy** | Optional | Static type checking for Python | `brew install mypy` / `pip3 install --user mypy` |
+
 ## Platform-Specific (Linux/Hyprland)
 
 | Dependency | Required | Purpose | Install |

@@ -4,38 +4,50 @@ Ralph Wiggum - Autonomous AI Development Loop
 https://ghuntley.com/ralph/
 
 Usage: ralph [command] [options]
-  ralph              - Construct mode, unlimited iterations
-  ralph 10           - Construct mode, max 10 iterations
-  ralph plan         - Plan mode, generate implementation plan
-  ralph init         - Initialize ralph in current repo
-  ralph status       - Show current status
-  ralph validate     - Check plan.jsonl for dangling deps and other issues
-  ralph compact      - Convert legacy accepted tasks to tombstones
-  ralph watch        - Live dashboard with cost tracking
+  ralph                    - Construct mode, unlimited iterations
+  ralph 10                 - Construct mode, max 10 iterations
+  ralph plan <spec.md>     - Plan mode, generate tasks from spec
+  ralph init               - Initialize ralph in current repo
+  ralph config             - Show global config (model, timeouts, etc.)
+  ralph status             - Show current status
+  ralph query              - Show current state as JSON
+  ralph query stage        - Show current stage (PLAN/BUILD/VERIFY/etc)
+  ralph task done          - Mark first pending task as done
+  ralph task add "desc"    - Add a new task
+  ralph issue add "desc"   - Add a discovered issue
+  ralph set-spec <spec.md> - Set current spec file
+  ralph log                - Show state change history
+  ralph watch              - Live dashboard with cost tracking
+  ralph stream             - Pipe opencode JSON for pretty output
+  ralph validate           - Check plan.jsonl for dangling deps
+  ralph compact            - Convert legacy accepted tasks to tombstones
 
 Options:
-  --profile, -p PROFILE    Cost profile: budget, balanced, hybrid, cost_smart, quality
+  --profile, -p PROFILE    Cost profile: budget, balanced, hybrid, cost_smart
   --max-cost N             Stop when cumulative cost exceeds $N
   --max-failures N         Circuit breaker: stop after N consecutive failures (default: 3)
-  --timeout N              Kill iteration after N milliseconds (default: 900000)
+  --timeout N              Kill stage after N milliseconds (default: 900000)
   --context-limit N        Context window size in tokens (default: 200000)
   --completion-promise T   Stop when output contains TEXT
+  --no-ui                  Disable interactive dashboard
 
 Cost Profiles (use --profile or RALPH_PROFILE env var):
-  opus   - Full power, best results (use when you have quota)
-  sonnet - Balanced fallback (when Opus quota exhausted)
-  haiku  - Budget mode (Haiku for BUILD, Sonnet for reasoning stages)
+  budget     - Cheapest option, Haiku for BUILD
+  balanced   - Default, Sonnet for all stages
+  hybrid     - Sonnet for reasoning, Haiku for BUILD
+  cost_smart - Dynamic selection based on task complexity
   
   If no profile is specified, you will be prompted to select one.
   Skip the prompt by setting --profile <name> or RALPH_PROFILE=<name>.
   
-  Example: ralph -p haiku 50
-           RALPH_PROFILE=sonnet ralph
+  Example: ralph -p budget 50
+           RALPH_PROFILE=balanced ralph
 
 Safety Features:
-  - Iterations are killed if they exceed the timeout (prevents stuck agents)
-  - Iterations are killed if context usage exceeds 80% (prevents context overflow)
-  - A warning is shown when context usage exceeds 50%
+  - Stages are killed if they exceed the timeout (prevents stuck agents)
+  - Stages are killed if context usage exceeds 95% (prevents context overflow)
+  - Context is compacted when usage exceeds 85%
+  - A warning is shown when context usage exceeds 70%
   - After a kill, the next iteration receives guidance to break down the problem
 """
 
@@ -121,6 +133,10 @@ class GlobalConfig:
     
     # Decomposition
     max_decompose_depth: int = 3
+    
+    # Bounded fork-join limits
+    verify_batch_size: int = 5      # Max tasks to verify in one batch
+    investigate_batch_size: int = 5  # Max issues to investigate in one batch
     
     # Git settings
     commit_prefix: str = 'ralph:'
@@ -1016,6 +1032,7 @@ class RalphConfig:
     prompt_verify: Path
     prompt_investigate: Path
     prompt_decompose: Path
+    prompt_rescue: Path
     specs_dir: Path
     output_fifo: Path
     plan_file: Path
@@ -1069,6 +1086,7 @@ class RalphConfig:
             prompt_verify=ralph_dir / 'PROMPT_verify.md',
             prompt_investigate=ralph_dir / 'PROMPT_investigate.md',
             prompt_decompose=ralph_dir / 'PROMPT_decompose.md',
+            prompt_rescue=ralph_dir / 'PROMPT_rescue.md',
             specs_dir=ralph_dir / 'specs',
             output_fifo=log_dir / 'output.fifo',
             plan_file=ralph_dir / 'plan.jsonl',
@@ -1160,6 +1178,15 @@ class Task:
     supersedes: Optional[str] = None  # Task ID this replaces (when rejection leads to new approach)
     decompose_depth: int = 0  # How many times this task's lineage has been decomposed (max 3)
     timeout_ms: Optional[int] = None  # Per-task timeout override (None = use stage default)
+    
+    def __post_init__(self):
+        """Validate task state consistency after initialization."""
+        # A killed task cannot be marked as done - these states are mutually exclusive
+        # If both are set, prioritize kill_reason (task needs decomposition, not acceptance)
+        # This prevents the DECOMPOSE loop bug where a task has status="d" + kill_reason
+        if self.kill_reason and self.status == "d":
+            self.status = "p"
+            self.done_at = None
     
     def to_jsonl(self) -> str:
         d = {"t": "task", "id": self.id, "spec": self.spec, "name": self.name, "s": self.status}
@@ -1319,6 +1346,20 @@ class RalphState:
     issues: list = field(default_factory=list)  # List of Issue
     tombstones: list = field(default_factory=list)  # List of Tombstone
     config: Optional[RalphPlanConfig] = None  # Optional config record from plan.jsonl
+    # Explicit state machine fields (persisted to plan.jsonl)
+    stage: str = "PLAN"  # Current stage: PLAN, INVESTIGATE, BUILD, VERIFY, DECOMPOSE, COMPLETE
+    decompose_target: Optional[str] = None  # Task ID that needs decomposition (set when transitioning to DECOMPOSE)
+    decompose_reason: Optional[str] = None  # Why decomposition is needed: "timeout", "context", "rejected"
+    decompose_log: Optional[str] = None  # Path to log file from failed iteration
+    # RESCUE state (step-centric recovery for batch failures)
+    rescue_stage: Optional[str] = None  # Stage that failed (VERIFY, INVESTIGATE)
+    rescue_batch: list = field(default_factory=list)  # Items in the failed batch
+    rescue_reason: Optional[str] = None  # Why rescue is needed: "timeout", "context"
+    rescue_log: Optional[str] = None  # Path to log file from failed batch
+    # Batch tracking for bounded fork-join (persisted to plan.jsonl)
+    batch_items: list = field(default_factory=list)  # IDs of items in current batch
+    batch_completed: list = field(default_factory=list)  # IDs of batches completed this stage
+    batch_attempt: int = 0  # Retry count for current batch
     # Runtime state (not persisted to plan.jsonl)
     current_task_id: Optional[str] = None  # Task ID currently assigned to BUILD stage
     
@@ -1328,12 +1369,35 @@ class RalphState:
     
     @property
     def done(self) -> list:
+        """Tasks awaiting verification (status='d')."""
         return [t for t in self.tasks if t.status == "d"]
     
     @property
+    def accepted(self) -> list:
+        """Tasks that have been verified and accepted (status='a')."""
+        return [t for t in self.tasks if t.status == "a"]
+    
+    @property
     def done_ids(self) -> set:
-        """Set of completed task IDs."""
+        """Set of task IDs awaiting verification (status='d')."""
         return {t.id for t in self.done}
+    
+    @property
+    def accepted_ids(self) -> set:
+        """Set of accepted task IDs (status='a' or from tombstones)."""
+        # Combine task status 'a' and tombstones for comprehensive accepted set
+        from_tasks = {t.id for t in self.tasks if t.status == "a"}
+        from_tombstones = {t.id for t in self.tombstones if t.tombstone_type == "accept"}
+        return from_tasks | from_tombstones
+    
+    @property
+    def completed_ids(self) -> set:
+        """Set of all completed task IDs (done + accepted).
+        
+        This is used for dependency checking - a dependency is satisfied if
+        the task is either done (awaiting verification) or accepted (verified).
+        """
+        return self.done_ids | self.accepted_ids
     
     def get_next_task(self) -> Optional[Task]:
         """Get next task respecting dependencies, sorted by priority (high > medium > low > None).
@@ -1346,7 +1410,7 @@ class RalphState:
     
     def get_sorted_pending(self) -> list:
         """Return pending tasks sorted by priority (high > medium > low > None), then by topological order."""
-        done_ids = self.done_ids
+        completed_ids = self.completed_ids  # Includes both done and accepted tasks
         priority_order = {"high": 0, "medium": 1, "low": 2, None: 3}
         result = []
         remaining = [(idx, task) for idx, task in enumerate(self.pending)]
@@ -1359,7 +1423,7 @@ class RalphState:
             still_waiting = []
             
             for idx, task in remaining:
-                if not task.deps or all(dep in done_ids or dep in seen for dep in task.deps):
+                if not task.deps or all(dep in completed_ids or dep in seen for dep in task.deps):
                     ready.append((idx, task))
                 else:
                     still_waiting.append((idx, task))
@@ -1390,6 +1454,12 @@ class RalphState:
                 d["done_at"] = t.done_at
             if t.priority:
                 d["priority"] = t.priority
+            if t.kill_reason:
+                d["killed"] = t.kill_reason
+            if t.kill_log:
+                d["kill_log"] = t.kill_log
+            if t.parent:
+                d["parent"] = t.parent
             return d
         
         def tombstone_to_dict(tomb: Tombstone) -> dict:
@@ -1417,6 +1487,7 @@ class RalphState:
             "tasks": {
                 "pending": [task_to_dict(t) for t in self.get_sorted_pending()],
                 "done": [task_to_dict(t) for t in self.done],
+                "accepted": [task_to_dict(t) for t in self.accepted],
             },
             "issues": [{"id": i.id, "desc": i.desc} for i in self.issues],
             "tombstones": {
@@ -1426,58 +1497,250 @@ class RalphState:
         }
     
     def get_stage(self) -> str:
-        """Compute current stage based on state.
+        """Return the current stage from explicit state.
         
-        State machine per construct-mode.md spec (lines 630-640):
-        | State                                | Stage       |
-        |--------------------------------------|-------------|
-        | Has issues                           | INVESTIGATE |
-        | Has pending tasks                    | BUILD       |
-        | Has done tasks, no pending           | VERIFY      |
-        | Has task with kill_reason            | DECOMPOSE   |
-        | Empty (no tasks, no issues)          | COMPLETE    |
+        The stage is now stored explicitly, not computed. Use transition methods
+        to change stages:
+        - transition_to_decompose(task_id, reason, log_path)
+        - transition_to_investigate()
+        - transition_to_build()
+        - transition_to_verify()
+        - transition_to_complete()
+        - compute_initial_stage() - auto-compute for migration from old format
+        """
+        return self.stage
+    
+    def compute_initial_stage(self) -> str:
+        """Compute initial stage for migration from old format.
         
-        Note: DECOMPOSE takes priority - a killed task must be decomposed
-        before continuing to BUILD more tasks.
+        Only used when loading a plan.jsonl that doesn't have a stage record.
+        For normal operation, stages are set explicitly via transition methods.
         """
         if self.spec is None:
             return "PLAN"
-        # INVESTIGATE takes priority - process all issues before building
-        if self.issues:
-            return "INVESTIGATE"
-        # DECOMPOSE: any task (pending or done) with kill_reason needs breakdown
-        # This covers both execution failures (timeout/context) during BUILD
-        # and rejected tasks that failed due to being too large
-        if any(t.kill_reason for t in self.tasks):
+        if self.decompose_target:
             return "DECOMPOSE"
-        if self.pending:
-            return "BUILD"
         if self.done:
             return "VERIFY"
+        if self.issues:
+            return "INVESTIGATE"
+        if self.pending:
+            return "BUILD"
         return "COMPLETE"
     
-    def get_task_needing_decompose(self) -> Optional['Task']:
-        """Get first task that needs decomposition (has kill_reason set)."""
+    def get_decompose_task(self) -> Optional['Task']:
+        """Get the task that needs decomposition based on decompose_target."""
+        if not self.decompose_target:
+            return None
         for t in self.tasks:
-            if t.kill_reason:
+            if t.id == self.decompose_target:
                 return t
         return None
     
+    # =========================================================================
+    # State Transition Methods
+    # =========================================================================
+    
+    def transition_to_decompose(self, task_id: str, reason: str, log_path: Optional[str] = None):
+        """Transition to DECOMPOSE stage for a specific task.
+        
+        Args:
+            task_id: ID of the task that needs decomposition
+            reason: Why decomposition is needed ("timeout", "context", "rejected")
+            log_path: Optional path to log file from failed iteration
+        """
+        self.stage = "DECOMPOSE"
+        self.decompose_target = task_id
+        self.decompose_reason = reason
+        self.decompose_log = log_path
+    
+    def transition_to_rescue(self, stage: str, batch_items: list, reason: str, log_path: Optional[str] = None):
+        """Transition to RESCUE stage for step-centric recovery.
+        
+        Unlike DECOMPOSE which handles a single task, RESCUE handles batch/stage
+        failures like verify timeout or investigate timeout.
+        
+        Args:
+            stage: The stage that failed (VERIFY, INVESTIGATE)
+            batch_items: IDs of items in the failed batch
+            reason: Why rescue is needed ("timeout", "context")
+            log_path: Optional path to log file from failed batch
+        """
+        self.stage = "RESCUE"
+        self.rescue_stage = stage
+        self.rescue_batch = batch_items.copy()
+        self.rescue_reason = reason
+        self.rescue_log = log_path
+    
+    def transition_to_investigate(self):
+        """Transition to INVESTIGATE stage."""
+        self.stage = "INVESTIGATE"
+        self._clear_decompose_state()
+        self._clear_rescue_state()
+        self._clear_batch_state()
+    
+    def transition_to_build(self):
+        """Transition to BUILD stage."""
+        self.stage = "BUILD"
+        self._clear_decompose_state()
+        self._clear_rescue_state()
+        self._clear_batch_state()
+    
+    def transition_to_verify(self):
+        """Transition to VERIFY stage."""
+        self.stage = "VERIFY"
+        self._clear_decompose_state()
+        self._clear_rescue_state()
+        self._clear_batch_state()
+    
+    def transition_to_complete(self):
+        """Transition to COMPLETE stage."""
+        self.stage = "COMPLETE"
+        self._clear_decompose_state()
+        self._clear_rescue_state()
+        self._clear_batch_state()
+    
+
+    
+    def _clear_decompose_state(self):
+        """Clear decompose-related state fields."""
+        self.decompose_target = None
+        self.decompose_reason = None
+        self.decompose_log = None
+    
+    def _clear_rescue_state(self):
+        """Clear rescue-related state fields."""
+        self.rescue_stage = None
+        self.rescue_batch = []
+        self.rescue_reason = None
+        self.rescue_log = None
+    
+    def _clear_batch_state(self):
+        """Clear batch-related state fields."""
+        self.batch_items = []
+        self.batch_completed = []
+        self.batch_attempt = 0
+    
+    def get_next_batch(self, items: list, batch_size: int) -> list:
+        """Get the next batch of items to process.
+        
+        Args:
+            items: All items that need processing (task IDs or issue IDs)
+            batch_size: Maximum items per batch
+            
+        Returns:
+            List of item IDs for this batch, or empty list if all done
+        """
+        # Filter out already completed items
+        remaining = [i for i in items if i not in self.batch_completed]
+        
+        # If we have an in-progress batch, return it
+        if self.batch_items:
+            # Filter to only items still in remaining (in case some were completed)
+            still_pending = [i for i in self.batch_items if i in remaining]
+            if still_pending:
+                return still_pending
+            # Batch complete, clear it
+            self.batch_completed.extend(self.batch_items)
+            self.batch_items = []
+            self.batch_attempt = 0
+            remaining = [i for i in items if i not in self.batch_completed]
+        
+        # Start new batch
+        if not remaining:
+            return []
+        
+        self.batch_items = remaining[:batch_size]
+        self.batch_attempt = 1
+        return self.batch_items
+    
+    def mark_batch_complete(self):
+        """Mark the current batch as complete."""
+        if self.batch_items:
+            self.batch_completed.extend(self.batch_items)
+            self.batch_items = []
+            self.batch_attempt = 0
+    
+    def mark_batch_failed(self, max_retries: int = 2) -> bool:
+        """Mark the current batch as failed.
+        
+        Args:
+            max_retries: Maximum retry attempts per batch
+            
+        Returns:
+            True if should retry, False if max retries exceeded
+        """
+        self.batch_attempt += 1
+        return self.batch_attempt <= max_retries
+    
+    def get_batch_progress(self) -> dict:
+        """Get current batch progress info."""
+        return {
+            "current_batch": self.batch_items,
+            "completed_batches": len(self.batch_completed),
+            "attempt": self.batch_attempt
+        }
+    
     def get_next(self) -> dict:
-        """Get next action to take."""
-        stage = self.get_stage()
+        """Get next action to take based on current stage."""
+        stage = self.stage
         if stage == "PLAN":
             return {"action": "PLAN", "item": None}
         elif stage == "DECOMPOSE":
-            task = self.get_task_needing_decompose()
-            return {"action": "DECOMPOSE", "task": task_to_query_dict(task, include_decompose_info=True) if task else None}
+            task = self.get_decompose_task()
+            if task:
+                task_dict = task_to_query_dict(task, include_decompose_info=False)
+                task_dict["kill_reason"] = self.decompose_reason
+                if self.decompose_log:
+                    task_dict["kill_log"] = self.decompose_log
+                return {"action": "DECOMPOSE", "task": task_dict}
+            # Stage failure (no specific task) - provide context for DECOMPOSE to analyze
+            return {
+                "action": "DECOMPOSE",
+                "task": None,
+                "stage_failure": True,
+                "kill_reason": self.decompose_reason,
+                "kill_log": self.decompose_log
+            }
         elif stage == "BUILD":
             task = self.get_next_task()
             return {"action": "BUILD", "task": task_to_query_dict(task) if task else None}
         elif stage == "VERIFY":
-            return {"action": "VERIFY", "item": f"Verify {len(self.done)} completed tasks against spec"}
+            # Return batch info if batching is active
+            batch_tasks = []
+            if self.batch_items:
+                batch_tasks = [t for t in self.done if t.id in self.batch_items]
+            else:
+                batch_tasks = self.done
+            return {
+                "action": "VERIFY", 
+                "tasks": [task_to_query_dict(t) for t in batch_tasks],
+                "count": len(batch_tasks),
+                "total": len(self.done),
+                "batch_progress": self.get_batch_progress() if self.batch_items else None
+            }
         elif stage == "INVESTIGATE":
-            return {"action": "INVESTIGATE", "items": [{"id": i.id, "desc": i.desc} for i in self.issues], "count": len(self.issues)}
+            # Return batch info if batching is active
+            batch_issues = []
+            if self.batch_items:
+                batch_issues = [i for i in self.issues if i.id in self.batch_items]
+            else:
+                batch_issues = self.issues
+            return {
+                "action": "INVESTIGATE", 
+                "items": [{"id": i.id, "desc": i.desc} for i in batch_issues], 
+                "count": len(batch_issues),
+                "total": len(self.issues),
+                "batch_progress": self.get_batch_progress() if self.batch_items else None
+            }
+        elif stage == "RESCUE":
+            return {
+                "action": "RESCUE",
+                "failed_stage": self.rescue_stage,
+                "failed_batch": self.rescue_batch,
+                "reason": self.rescue_reason,
+                "log": self.rescue_log
+            }
         else:
             return {"action": "COMPLETE", "item": None}
 
@@ -1523,9 +1786,15 @@ def analyze_rejection_patterns(state: 'RalphState', config: 'RalphConfig') -> li
     """
     from collections import defaultdict
     
+    # Get set of accepted task IDs - these rejections are no longer relevant
+    accepted_ids = state.accepted_ids
+    
+    # Filter to only unresolved rejections (tasks that were rejected but not later accepted)
+    unresolved_rejections = [t for t in state.tombstones if t.id not in accepted_ids]
+    
     # Count rejections per task
     rejections_by_task = defaultdict(list)
-    for tomb in state.tombstones:
+    for tomb in unresolved_rejections:
         rejections_by_task[tomb.id].append(tomb.reason)
     
     # Look for common error patterns across all rejections
@@ -1545,7 +1814,7 @@ def analyze_rejection_patterns(state: 'RalphState', config: 'RalphConfig') -> li
         'missing',
     ]
     
-    for tomb in state.tombstones:
+    for tomb in unresolved_rejections:
         reason_lower = tomb.reason.lower()
         for keyword in PATTERN_KEYWORDS:
             if keyword in reason_lower:
@@ -1661,7 +1930,8 @@ class Stage(Enum):
     INVESTIGATE = auto()  # Turn issues into tasks
     BUILD = auto()        # Execute tasks
     VERIFY = auto()       # Verify done tasks against spec
-    DECOMPOSE = auto()    # Handle failures by breaking down work
+    DECOMPOSE = auto()    # Handle BUILD failures by breaking down task
+    RESCUE = auto()       # Handle stage/batch failures (step-centric recovery)
     COMPLETE = auto()     # Spec fully implemented
 
 
@@ -1713,19 +1983,22 @@ class ConstructStateMachine:
         self.stage_timeout_ms = stage_timeout_ms
         self.context_limit = context_limit
         self.run_stage = run_stage_fn
-        
-        # Track if we need to run DECOMPOSE before next iteration
-        self._pending_decompose = False
-        self._decompose_task_id: Optional[str] = None
-        self._decompose_kill_reason: Optional[str] = None
-        self._decompose_kill_log: Optional[str] = None
     
     def run_iteration(self, iteration: int) -> tuple[bool, bool]:
         """
         Run a single iteration of the construct loop.
         
-        Per spec: INVESTIGATE -> BUILD -> VERIFY (sequentially)
-        DECOMPOSE runs if there's a pending failure from previous stage.
+        The state machine has an explicit stage field. Each iteration:
+        1. Loads state and reads the current stage
+        2. Runs ONLY that stage
+        3. Explicit transition to the next stage
+        
+        Stage flow:
+        - DECOMPOSE → BUILD (after breaking down failed task)
+        - INVESTIGATE → BUILD (after converting issues to tasks)
+        - BUILD → VERIFY (after marking tasks done)
+        - VERIFY → BUILD or COMPLETE (after accepting/rejecting tasks)
+        - Any failure → DECOMPOSE
         
         Args:
             iteration: Current iteration number
@@ -1737,90 +2010,195 @@ class ConstructStateMachine:
         """
         state = load_state(self.config)
         
-        # If we have a pending decompose from a failure, run it first
-        if self._pending_decompose:
-            print(f"{Colors.YELLOW}Running DECOMPOSE for failed task...{Colors.NC}")
-            result = self._run_stage_with_state(Stage.DECOMPOSE, state)
-            self._pending_decompose = False
-            self._decompose_task_id = None
-            self._decompose_kill_reason = None
-            self._decompose_kill_log = None
-            
-            if result.outcome == StageOutcome.FAILURE:
-                # DECOMPOSE itself failed - this is bad, but continue
-                print(f"{Colors.RED}DECOMPOSE failed: {result.error}{Colors.NC}")
-            
-            # After DECOMPOSE, start fresh iteration rather than continuing
-            # This prevents running VERIFY immediately after DECOMPOSE
-            return True, False
-        
-        # Also check for tasks with kill_reason in persisted state (from previous run)
-        if any(t.kill_reason for t in state.tasks):
-            print(f"{Colors.YELLOW}Running DECOMPOSE for previously killed task...{Colors.NC}")
-            result = self._run_stage_with_state(Stage.DECOMPOSE, state)
-            
-            if result.outcome == StageOutcome.FAILURE:
-                print(f"{Colors.RED}DECOMPOSE failed: {result.error}{Colors.NC}")
-            
-            # After DECOMPOSE, start fresh iteration
-            return True, False
-        
-        # Check for terminal state
+        # Check for terminal states
         if not state.spec:
             print(f"{Colors.YELLOW}No spec configured - run 'ralph plan <spec.md>' first{Colors.NC}")
             return False, False
         
-        # Analyze rejection patterns and auto-create issues for recurring problems
-        # This runs BEFORE INVESTIGATE so the AI can address them
+        if state.stage == "COMPLETE":
+            return False, True
+        
+        # Dispatch based on explicit stage
+        if state.stage == "DECOMPOSE":
+            return self._run_decompose(state)
+        elif state.stage == "RESCUE":
+            return self._run_rescue(state)
+        elif state.stage == "INVESTIGATE":
+            return self._run_investigate(state)
+        elif state.stage == "BUILD":
+            return self._run_build(state)
+        elif state.stage == "VERIFY":
+            return self._run_verify(state)
+        else:
+            print(f"{Colors.RED}Unknown stage: {state.stage}{Colors.NC}")
+            return False, False
+    
+    def _run_decompose(self, state: 'RalphState') -> tuple[bool, bool]:
+        """Run DECOMPOSE stage. Transitions to INVESTIGATE on completion."""
+        task = state.get_decompose_task()
+        if task:
+            print(f"\n{Colors.CYAN}═══ DECOMPOSE: {task.name} ═══{Colors.NC}")
+        else:
+            print(f"\n{Colors.CYAN}═══ DECOMPOSE: stage failure analysis ═══{Colors.NC}")
+        
+        result = self._run_stage_with_state(Stage.DECOMPOSE, state)
+        
+        if result.outcome == StageOutcome.FAILURE:
+            print(f"{Colors.RED}DECOMPOSE failed: {result.error}{Colors.NC}")
+        
+        # DECOMPOSE → INVESTIGATE (rejoin the cycle)
+        state = load_state(self.config)
+        state._clear_decompose_state()
+        state.transition_to_investigate()
+        save_state(self.config, state)
+        return True, False
+    
+    def _run_rescue(self, state: 'RalphState') -> tuple[bool, bool]:
+        """Run RESCUE stage for step-centric recovery.
+        
+        RESCUE handles batch/stage failures (unlike DECOMPOSE which handles task failures).
+        It analyzes the failure and provides recovery options.
+        """
+        print(f"\n{Colors.CYAN}═══ RESCUE: {state.rescue_stage} batch failure ═══{Colors.NC}")
+        print(f"{Colors.YELLOW}  Failed batch: {state.rescue_batch}{Colors.NC}")
+        print(f"{Colors.YELLOW}  Reason: {state.rescue_reason}{Colors.NC}")
+        if state.rescue_log:
+            print(f"{Colors.YELLOW}  Log: {state.rescue_log}{Colors.NC}")
+        
+        result = self._run_stage_with_state(Stage.RESCUE, state)
+        
+        if result.outcome == StageOutcome.FAILURE:
+            print(f"{Colors.RED}RESCUE failed: {result.error}{Colors.NC}")
+        
+        # RESCUE → back to the failed stage (with batch cleared so we can retry or skip)
+        state = load_state(self.config)
+        failed_stage = state.rescue_stage
+        state._clear_rescue_state()
+        state._clear_batch_state()  # Clear batch so we start fresh
+        
+        # Transition back to the stage that failed
+        if failed_stage == "VERIFY":
+            state.transition_to_verify()
+        elif failed_stage == "INVESTIGATE":
+            state.transition_to_investigate()
+        else:
+            # Fallback to investigate
+            state.transition_to_investigate()
+        
+        save_state(self.config, state)
+        return True, False
+    
+    def _run_investigate(self, state: 'RalphState') -> tuple[bool, bool]:
+        """Run INVESTIGATE stage with bounded batching. Transitions to BUILD."""
+        # Auto-generate issues from rejection patterns
         new_issues = run_rejection_analysis(self.config)
         if new_issues:
-            print(f"{Colors.YELLOW}Created {new_issues} issues from rejection pattern analysis{Colors.NC}")
-            state = load_state(self.config)  # Reload state with new issues
-        
-        # Phase 1: INVESTIGATE (if issues exist)
-        if state.issues:
-            print(f"\n{Colors.CYAN}═══ INVESTIGATE ({len(state.issues)} issues) ═══{Colors.NC}")
-            result = self._run_stage_with_state(Stage.INVESTIGATE, state)
-            
-            if result.outcome == StageOutcome.FAILURE:
-                self._handle_failure(result)
-                return True, False  # Continue to next iteration (with DECOMPOSE)
-            
-            # Reload state after investigate
+            print(f"{Colors.YELLOW}Created {new_issues} issues from rejection patterns{Colors.NC}")
             state = load_state(self.config)
         
-        # Phase 2: BUILD (execute tasks until none remain)
+        if state.issues:
+            gcfg = get_global_config()
+            batch_size = gcfg.investigate_batch_size
+            all_issue_ids = [i.id for i in state.issues]
+            
+            # Process in batches until all done
+            while True:
+                batch = state.get_next_batch(all_issue_ids, batch_size)
+                if not batch:
+                    break  # All batches completed
+                
+                batch_num = len(state.batch_completed) // batch_size + 1
+                total_batches = (len(all_issue_ids) + batch_size - 1) // batch_size
+                print(f"\n{Colors.CYAN}═══ INVESTIGATE batch {batch_num}/{total_batches} ({len(batch)} issues) ═══{Colors.NC}")
+                
+                save_state(self.config, state)  # Persist batch state before running
+                result = self._run_stage_with_state(Stage.INVESTIGATE, state)
+                
+                if result.outcome == StageOutcome.FAILURE:
+                    # Batch failed - check if we should retry
+                    if state.mark_batch_failed(max_retries=2):
+                        print(f"{Colors.YELLOW}Batch failed, will retry (attempt {state.batch_attempt}){Colors.NC}")
+                        save_state(self.config, state)
+                        continue
+                    else:
+                        # Max retries exceeded - transition to rescue
+                        self._handle_batch_failure(result, state, "INVESTIGATE")
+                        return True, False
+                
+                # Batch succeeded
+                state.mark_batch_complete()
+                state = load_state(self.config)  # Reload to get any changes from the stage
+                state.batch_completed = state.batch_completed  # Preserve our batch tracking
+        
+        # INVESTIGATE → BUILD
+        state.transition_to_build()
+        save_state(self.config, state)
+        return True, False
+    
+    def _run_build(self, state: 'RalphState') -> tuple[bool, bool]:
+        """Run BUILD stage. Transitions to VERIFY."""
         if state.pending:
             print(f"\n{Colors.CYAN}═══ BUILD ({len(state.pending)} tasks) ═══{Colors.NC}")
-            
-            # BUILD processes tasks one at a time, but can fail mid-way
-            # The BUILD prompt handles looping through tasks internally
             result = self._run_stage_with_state(Stage.BUILD, state)
             
             if result.outcome == StageOutcome.FAILURE:
                 self._handle_failure(result)
-                return True, False  # Continue to next iteration (with DECOMPOSE)
+                return True, False
             
-            # Reload state after build
             state = load_state(self.config)
         
-        # Phase 3: VERIFY (if done tasks exist)
+        # BUILD → VERIFY
+        state.transition_to_verify()
+        save_state(self.config, state)
+        return True, False
+    
+    def _run_verify(self, state: 'RalphState') -> tuple[bool, bool]:
+        """Run VERIFY stage with bounded batching. Transitions to INVESTIGATE or COMPLETE."""
         if state.done:
-            print(f"\n{Colors.CYAN}═══ VERIFY ({len(state.done)} done tasks) ═══{Colors.NC}")
-            result = self._run_stage_with_state(Stage.VERIFY, state)
+            gcfg = get_global_config()
+            batch_size = gcfg.verify_batch_size
+            all_task_ids = [t.id for t in state.done]
             
-            if result.outcome == StageOutcome.FAILURE:
-                self._handle_failure(result)
-                return True, False  # Continue to next iteration (with DECOMPOSE)
-            
-            # Reload state after verify
-            state = load_state(self.config)
+            # Process in batches until all done
+            while True:
+                batch = state.get_next_batch(all_task_ids, batch_size)
+                if not batch:
+                    break  # All batches completed
+                
+                batch_num = len(state.batch_completed) // batch_size + 1
+                total_batches = (len(all_task_ids) + batch_size - 1) // batch_size
+                print(f"\n{Colors.CYAN}═══ VERIFY batch {batch_num}/{total_batches} ({len(batch)} tasks) ═══{Colors.NC}")
+                
+                save_state(self.config, state)  # Persist batch state before running
+                result = self._run_stage_with_state(Stage.VERIFY, state)
+                
+                if result.outcome == StageOutcome.FAILURE:
+                    # Batch failed - check if we should retry
+                    if state.mark_batch_failed(max_retries=2):
+                        print(f"{Colors.YELLOW}Batch failed, will retry (attempt {state.batch_attempt}){Colors.NC}")
+                        save_state(self.config, state)
+                        continue
+                    else:
+                        # Max retries exceeded - transition to rescue
+                        self._handle_batch_failure(result, state, "VERIFY")
+                        return True, False
+                
+                # Batch succeeded
+                state.mark_batch_complete()
+                state = load_state(self.config)  # Reload to get any changes from the stage
+                # Recompute remaining tasks (some may have been accepted/rejected)
+                all_task_ids = [t.id for t in state.done]
         
-        # Check if we're complete
-        if not state.pending and not state.done and not state.issues:
-            return False, True  # Spec complete!
+        # Check if we're complete (nothing left to do in any stage)
+        state = load_state(self.config)
+        if not state.done and not state.pending and not state.issues:
+            state.transition_to_complete()
+            save_state(self.config, state)
+            return False, True
         
-        # More work to do
+        # VERIFY → INVESTIGATE (cycle continues)
+        state.transition_to_investigate()
+        save_state(self.config, state)
         return True, False
     
     def _run_stage_with_state(self, stage: Stage, state: 'RalphState') -> StageResult:
@@ -1831,21 +2209,53 @@ class ConstructStateMachine:
         )
     
     def _handle_failure(self, result: StageResult):
-        """Handle a stage failure by queuing DECOMPOSE."""
-        self._pending_decompose = True
-        self._decompose_task_id = result.task_id
-        self._decompose_kill_reason = result.kill_reason
-        self._decompose_kill_log = result.kill_log
+        """Handle a stage failure by transitioning to DECOMPOSE state."""
+        state = load_state(self.config)
         
-        # Mark the task with kill_reason in state
+        # Transition to DECOMPOSE stage
+        # If we have a specific task that failed, target it
+        # Otherwise, DECOMPOSE will analyze the log to figure out what went wrong
+        target_task_id = result.task_id or "__stage_failure__"
+        
+        state.transition_to_decompose(
+            task_id=target_task_id,
+            reason=result.kill_reason or "unknown",
+            log_path=result.kill_log
+        )
+        
+        # If a specific task failed, reset its status to pending
         if result.task_id:
-            state = load_state(self.config)
             task = next((t for t in state.tasks if t.id == result.task_id), None)
             if task:
-                task.kill_reason = result.kill_reason
-                task.kill_log = result.kill_log
-                save_state(self.config, state)
-                print(f"{Colors.YELLOW}Task {task.id} marked for decomposition{Colors.NC}")
+                task.status = "p"
+                task.done_at = None
+        
+        save_state(self.config, state)
+        if result.task_id:
+            print(f"{Colors.YELLOW}Task {result.task_id} marked for decomposition (reason: {result.kill_reason}){Colors.NC}")
+        else:
+            print(f"{Colors.YELLOW}Stage failed, transitioning to DECOMPOSE (reason: {result.kill_reason}){Colors.NC}")
+    
+    def _handle_batch_failure(self, result: StageResult, state: 'RalphState', stage_name: str):
+        """Handle a batch failure by transitioning to RESCUE state.
+        
+        Unlike DECOMPOSE which breaks down a single task, RESCUE handles
+        step-level failures like batch timeouts in VERIFY/INVESTIGATE.
+        """
+        state = load_state(self.config)
+        
+        # Transition to RESCUE stage with batch context
+        state.transition_to_rescue(
+            stage=stage_name,
+            batch_items=state.batch_items,
+            reason=result.kill_reason or "unknown",
+            log_path=result.kill_log
+        )
+        
+        save_state(self.config, state)
+        print(f"{Colors.YELLOW}{stage_name} batch failed after max retries, transitioning to RESCUE{Colors.NC}")
+        print(f"{Colors.YELLOW}  Batch: {state.batch_items}{Colors.NC}")
+        print(f"{Colors.YELLOW}  Reason: {result.kill_reason}{Colors.NC}")
 
 
 def load_state(config: RalphConfig) -> RalphState:
@@ -1873,8 +2283,44 @@ def load_state(config: RalphConfig) -> RalphState:
                 state.tombstones.append(Tombstone.from_jsonl(d, "accept"))
             elif t == "config":
                 state.config = RalphPlanConfig.from_jsonl(d)
+            elif t == "stage":
+                # Explicit state machine stage
+                state.stage = d.get("stage", "PLAN")
+                state.decompose_target = d.get("decompose_target")
+                state.decompose_reason = d.get("decompose_reason")
+                state.decompose_log = d.get("decompose_log")
+                # Batch tracking for bounded fork-join
+                state.batch_items = d.get("batch_items", [])
+                state.batch_completed = d.get("batch_completed", [])
+                state.batch_attempt = d.get("batch_attempt", 0)
+                # RESCUE state for step-centric recovery
+                state.rescue_stage = d.get("rescue_stage")
+                state.rescue_batch = d.get("rescue_batch", [])
+                state.rescue_reason = d.get("rescue_reason")
+                state.rescue_log = d.get("rescue_log")
     except (json.JSONDecodeError, KeyError):
         pass
+    
+    # Post-process: mark tasks as accepted if they have accept tombstones
+    # This ensures done tasks with accept tombstones don't show in VERIFY queue
+    accepted_ids = {t.id for t in state.tombstones if t.tombstone_type == "accept"}
+    for task in state.tasks:
+        if task.id in accepted_ids and task.status == "d":
+            task.status = "a"  # Mark as accepted, not just done
+    
+    # Migration: if no stage record exists but we have state, compute initial stage
+    # This handles existing plan.jsonl files that don't have a stage record yet
+    if state.stage == "PLAN" and state.spec:
+        # Check for legacy killed tasks (old format used kill_reason on Task)
+        # and migrate them to the new decompose_target format
+        killed_task = next((t for t in state.tasks if t.kill_reason), None)
+        if killed_task:
+            state.stage = "DECOMPOSE"
+            state.decompose_target = killed_task.id
+            state.decompose_reason = killed_task.kill_reason
+            state.decompose_log = killed_task.kill_log
+        else:
+            state.stage = state.compute_initial_stage()
     
     return state
 
@@ -1888,6 +2334,45 @@ def save_state(config: RalphConfig, state: RalphState, commit_msg: Optional[str]
     
     if state.spec:
         lines.append(json.dumps({"t": "spec", "spec": state.spec}))
+    
+    # Validate batch_items against current stage to prevent stale references
+    # BUILD doesn't use batching; INVESTIGATE uses issue IDs; VERIFY uses task IDs
+    valid_batch_items = []
+    if state.batch_items:
+        if state.stage == "INVESTIGATE":
+            issue_ids = {i.id for i in state.issues}
+            valid_batch_items = [b for b in state.batch_items if b in issue_ids]
+        elif state.stage == "VERIFY":
+            task_ids = {t.id for t in state.tasks if t.status == "d"}
+            valid_batch_items = [b for b in state.batch_items if b in task_ids]
+        # BUILD and other stages don't use batching - leave empty
+        state.batch_items = valid_batch_items
+    
+    # Write explicit stage record
+    stage_record = {"t": "stage", "stage": state.stage}
+    if state.decompose_target:
+        stage_record["decompose_target"] = state.decompose_target
+    if state.decompose_reason:
+        stage_record["decompose_reason"] = state.decompose_reason
+    if state.decompose_log:
+        stage_record["decompose_log"] = state.decompose_log
+    # Batch tracking for bounded fork-join
+    if state.batch_items:
+        stage_record["batch_items"] = state.batch_items
+    if state.batch_completed:
+        stage_record["batch_completed"] = state.batch_completed
+    if state.batch_attempt > 0:
+        stage_record["batch_attempt"] = state.batch_attempt
+    # RESCUE state for step-centric recovery
+    if state.rescue_stage:
+        stage_record["rescue_stage"] = state.rescue_stage
+    if state.rescue_batch:
+        stage_record["rescue_batch"] = state.rescue_batch
+    if state.rescue_reason:
+        stage_record["rescue_reason"] = state.rescue_reason
+    if state.rescue_log:
+        stage_record["rescue_log"] = state.rescue_log
+    lines.append(json.dumps(stage_record))
     
     for task in state.tasks:
         lines.append(task.to_jsonl())
@@ -1989,41 +2474,6 @@ def create_tombstone(
         iteration=iteration,
         notes=task.notes
     )
-
-
-def get_current_task_file(config: RalphConfig) -> Path:
-    """Get path to the current task lock file."""
-    return config.ralph_dir / ".current_task"
-
-
-def save_current_task(config: RalphConfig, task_id: str) -> None:
-    """Save the currently assigned task ID to a runtime lock file.
-    
-    This file is NOT tracked by git - it's runtime state that tracks
-    which task BUILD is currently working on, so `ralph task done`
-    knows which task to mark as complete.
-    """
-    lock_file = get_current_task_file(config)
-    lock_file.write_text(task_id)
-
-
-def load_current_task(config: RalphConfig) -> Optional[str]:
-    """Load the currently assigned task ID from the runtime lock file.
-    
-    Returns None if no task is currently assigned.
-    """
-    lock_file = get_current_task_file(config)
-    if lock_file.exists():
-        task_id = lock_file.read_text().strip()
-        return task_id if task_id else None
-    return None
-
-
-def clear_current_task(config: RalphConfig) -> None:
-    """Clear the current task lock file."""
-    lock_file = get_current_task_file(config)
-    if lock_file.exists():
-        lock_file.unlink()
 
 
 def validate_state(state: RalphState, config: RalphConfig = None) -> dict:
@@ -2197,6 +2647,50 @@ def validate_task_notes(notes: str) -> tuple[bool, Optional[str]]:
     
     if not has_guidance:
         return False, "Task notes lack implementation guidance. Describe WHAT to do (add, modify, create, etc.) and HOW."
+    
+    # Check for specific location references (line numbers, function names, or class names)
+    # This ensures notes contain concrete references for BUILD stage to find the right code
+    import re
+    
+    LINE_NUMBER_PATTERNS = [
+        r'line[s]?\s+\d+',           # "line 50" or "lines 100"
+        r'line[s]?\s+~?\d+\s*-\s*\d+',  # "lines 100-150" or "lines ~100-150"
+        r':\d+',                     # "file.py:50" (colon notation)
+        r'\(\s*line[s]?\s+\d+',      # "(line 50" or "(lines 100"
+    ]
+    
+    FUNCTION_CLASS_PATTERNS = [
+        r'function\s+\w+',           # "function foo"
+        r'method\s+\w+',             # "method bar"  
+        r'class\s+\w+',              # "class Baz"
+        r'def\s+\w+',                # "def foo"
+        r'\w+\(\)',                  # "foo()" - function call notation
+        r'\w+\.\w+\(\)',             # "obj.method()" - method call notation
+    ]
+    
+    has_line_ref = any(re.search(p, notes_lower) for p in LINE_NUMBER_PATTERNS)
+    has_func_ref = any(re.search(p, notes_lower) for p in FUNCTION_CLASS_PATTERNS)
+    
+    # Warn but don't reject if no specific location - some tasks legitimately create new files
+    # But for modification tasks, we strongly prefer line numbers
+    has_modify_verb = any(v in notes_lower for v in ['modify ', 'update ', 'change ', 'fix ', 'extract '])
+    if has_modify_verb and not (has_line_ref or has_func_ref):
+        return False, "Task notes mention modifying code but lack specific locations. Include line numbers (e.g., 'lines 100-150') or function/class names (e.g., 'function parse_config()')."
+    
+    # Check for context elements that help BUILD stage
+    CONTEXT_INDICATORS = [
+        'source:', 'from:', 'import', 'pattern:', 'similar to', 'follow',
+        'spec ref', 'see ', 'reference:', 'based on', 'like ',
+        'risk:', 'prerequisite', 'requires ', 'depends on', 'after ',
+    ]
+    
+    has_context = any(indicator in notes_lower for indicator in CONTEXT_INDICATORS)
+    
+    # For longer notes (likely complex tasks), require some context
+    if len(notes_stripped) > 150 and not has_context:
+        # This is a soft warning - complex tasks should have context
+        # But we don't reject, just note it's suboptimal
+        pass
     
     return True, None
 
@@ -2497,48 +2991,50 @@ def push_with_retry(config: RalphConfig, branch: str, max_retries: int = 3) -> b
 
 
 def check_unfinished_tasks(config: RalphConfig, new_spec: str) -> bool:
-    """Check for unfinished tasks and prompt user. Returns True if OK to proceed."""
+    """Check for unfinished tasks/issues and prompt user. Returns True if OK to proceed."""
     state = load_state(config)
-    
-    if not state.tasks:
-        return True
     
     current_spec = state.spec or "unknown"
     pending_tasks = state.pending
     done_tasks = state.done
+    issues = state.issues
     
-    if not pending_tasks and not done_tasks:
+    if not pending_tasks and not done_tasks and not issues:
         return True
     
     # Different messaging for same spec vs different spec
     same_spec = (current_spec == new_spec)
     
     if same_spec:
-        print(f"{Colors.YELLOW}Found existing tasks for spec '{current_spec}':{Colors.NC}")
+        print(f"{Colors.YELLOW}Found existing items for spec '{current_spec}':{Colors.NC}")
     else:
-        print(f"{Colors.YELLOW}Found unfinished tasks from spec '{current_spec}':{Colors.NC}")
+        print(f"{Colors.YELLOW}Found unfinished items from spec '{current_spec}':{Colors.NC}")
     
     for t in pending_tasks:
         print(f"  - [pending] {t.id}: {t.name}")
     for t in done_tasks:
         print(f"  - [done] {t.id}: {t.name}")
+    for i in issues:
+        desc_preview = i.desc[:60] + "..." if len(i.desc) > 60 else i.desc
+        print(f"  - [issue] {i.id}: {desc_preview}")
     print()
     print("What would you like to do?")
-    print("  [c] Cancel existing tasks and start fresh")
+    print("  [c] Clear existing tasks/issues and start fresh")
     if same_spec:
-        print("  [k] Keep existing tasks (continue where you left off)")
+        print("  [k] Keep existing tasks/issues (plan will add to them)")
     print("  [a] Abort (keep current plan)")
     
     try:
         response = input(f"Choice [c/{'k/' if same_spec else ''}a]: ").strip().lower()
         if response == 'c':
-            # Clear tasks before proceeding
+            # Clear tasks and issues before proceeding
             state.tasks = []
+            state.issues = []
             save_state(config, state)
-            print(f"{Colors.GREEN}Cleared existing tasks.{Colors.NC}")
+            print(f"{Colors.GREEN}Cleared existing tasks and issues.{Colors.NC}")
             return True
         elif response == 'k' and same_spec:
-            print(f"{Colors.GREEN}Keeping existing tasks. Plan will add to them.{Colors.NC}")
+            print(f"{Colors.GREEN}Keeping existing tasks/issues. Plan will add to them.{Colors.NC}")
             return True
         else:
             print(f"{Colors.YELLOW}Aborted. Keeping current plan.{Colors.NC}")
@@ -3151,12 +3647,40 @@ Signs of architectural blocker:
 - Same rejection reason recurring
 - Requires changes outside this spec
 
-## Step 4: Check for Gaps
+## Step 4: Verify Spec Acceptance Criteria
 
 Read the spec\'s **Acceptance Criteria section only** (not entire spec):
 `ralph/specs/<spec-name>` - scroll to "## Acceptance Criteria"
 
-For any unchecked criteria (`- [ ]`) not covered by existing tasks, research what's needed and create a well-defined task:
+### 4a: Verify Checked Criteria Still Pass
+
+For each **checked** criterion (`- [x]`), spawn a subagent to verify it still holds:
+
+```
+Task: "Verify spec acceptance criterion: {criterion_text}
+
+1. Search codebase for relevant implementation
+2. Run any tests or commands that verify this criterion
+3. Check that the implementation still satisfies this criterion
+
+Return JSON:
+{
+  \\"criterion\\": \\"{criterion_text}\\",
+  \\"passed\\": true | false,
+  \\"evidence\\": \\"<what you found>\\",
+  \\"reason\\": \\"<why it failed>\\"  // only if passed=false
+}"
+```
+
+**Run all verifications in parallel.**
+
+If any checked criterion no longer passes:
+- `ralph issue add "Spec criterion regressed: <criterion>. Reason: <why>"`
+- Uncheck it in the spec file
+
+### 4b: Create Tasks for Unchecked Criteria
+
+For any **unchecked** criteria (`- [ ]`) not covered by existing tasks, research what's needed and create a well-defined task:
 ```
 ralph task add \'{"name": "<specific action>", "notes": "<DETAILED: file paths + approach>", "accept": "<measurable verification>"}\\'
 ```
@@ -4010,6 +4534,12 @@ def cmd_config():
     print(f"{Colors.CYAN}Circuit Breaker{Colors.NC}")
     print(f"  max_failures:       {cfg.max_failures}")
     print(f"  max_decompose_depth: {cfg.max_decompose_depth}")
+    print()
+    
+    # Bounded fork-join
+    print(f"{Colors.CYAN}Bounded Fork-Join{Colors.NC}")
+    print(f"  verify_batch_size:     {cfg.verify_batch_size}")
+    print(f"  investigate_batch_size: {cfg.investigate_batch_size}")
     print()
     
     # Git settings
@@ -5680,6 +6210,8 @@ def get_prompt_for_stage(config: RalphConfig, mode: str, stage) -> Path:
         return config.prompt_investigate
     elif stage_str == 'DECOMPOSE':
         return config.prompt_decompose
+    elif stage_str == 'RESCUE':
+        return config.prompt_rescue
     else:
         # BUILD, PLAN, COMPLETE all use build prompt
         return config.prompt_build
@@ -5739,10 +6271,7 @@ def run_single_stage(config: RalphConfig, stage: Stage, state: RalphState,
         current_task_id = current_task.id
         current_task_name = current_task.name
     
-    # For BUILD stage, save the assigned task ID so `ralph task done` knows which task to mark
-    # This prevents the "wrong task marked done" bug when task ordering changes mid-iteration
-    if stage == Stage.BUILD and current_task_id:
-        save_current_task(config, current_task_id)
+
     
     output_buffer = OutputBuffer()
     
@@ -6167,7 +6696,11 @@ def print_plan_report(state: RalphState, mode: str):
     
     # Build task ID to name map for dependency display
     task_names = {t.id: t.name for t in state.tasks}
-    done_ids = state.done_ids
+    # Also include accepted task names from tombstones
+    for tomb in state.tombstones:
+        if tomb.tombstone_type == "accept" and tomb.name:
+            task_names[tomb.id] = tomb.name
+    completed_ids = state.completed_ids  # Done + accepted
     
     # Show pending tasks in topological order with full details
     if state.pending:
@@ -6176,7 +6709,7 @@ def print_plan_report(state: RalphState, mode: str):
         print()
         for i, t in enumerate(sorted_pending, 1):
             # Check if task is blocked
-            blocked = t.deps and not all(dep in done_ids for dep in t.deps)
+            blocked = t.deps and not all(dep in completed_ids for dep in t.deps)
             if blocked:
                 print(f"  {Colors.DIM}{i}. {t.name}{Colors.NC} [{t.id}] {Colors.RED}(blocked){Colors.NC}")
             else:
@@ -6186,7 +6719,7 @@ def print_plan_report(state: RalphState, mode: str):
                 dep_strs = []
                 for dep in t.deps:
                     dep_name = task_names.get(dep, dep)[:30]
-                    if dep in done_ids:
+                    if dep in completed_ids:
                         dep_strs.append(f"{Colors.GREEN}✓ {dep_name}{Colors.NC}")
                     else:
                         dep_strs.append(f"{Colors.RED}○ {dep_name}{Colors.NC}")
@@ -6580,6 +7113,8 @@ def cmd_run(config: RalphConfig, mode: str, max_iterations: int, max_cost: float
         print(f"Completion:     \"{completion_promise}\"")
     print(f"{Colors.BLUE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━{Colors.NC}")
 
+
+
     iteration = 0
     try:
         while True:
@@ -6678,11 +7213,6 @@ def cmd_run(config: RalphConfig, mode: str, max_iterations: int, max_cost: float
             if current_task:
                 current_task_id = current_task.id
                 current_task_name = current_task.name
-            
-            # For BUILD stage, save the assigned task ID so `ralph task done` knows which task to mark
-            # This prevents the "wrong task marked done" bug when task ordering changes mid-iteration
-            if stage == 'BUILD' and current_task_id:
-                save_current_task(config, current_task_id)
             
             output_buffer = OutputBuffer()
 
@@ -7303,11 +7833,145 @@ def cmd_query(config: RalphConfig, subquery: Optional[str] = None, done_only: bo
         output = state.to_dict()
         output["stage"] = state.get_stage()
         output["next"] = state.get_next()
-        # Include currently assigned task if BUILD is in progress
-        assigned_task_id = load_current_task(config)
-        if assigned_task_id:
-            output["current_task"] = assigned_task_id
         print(json.dumps(output, indent=2))
+
+
+def _add_single_task(config: RalphConfig, state: 'RalphState', task_input, batch_ids: list = None) -> int:
+    """Add a single task to state. Returns 0 on success, 1 on failure.
+    
+    Args:
+        config: Ralph configuration
+        state: Current state (will be modified in place)
+        task_input: Either a dict with task fields or a string (task name or JSON)
+        batch_ids: List of task IDs added in current batch (for intra-batch deps)
+    
+    Note: Does NOT save state - caller must call save_state after.
+    """
+    batch_ids = batch_ids or []
+    
+    # Parse input
+    if isinstance(task_input, dict):
+        d = task_input
+        name = d.get("name", "")
+        notes = d.get("notes")
+        accept = d.get("accept")
+        deps = d.get("deps")
+        priority = d.get("priority")
+        parent = d.get("parent")
+        created_from = d.get("created_from")
+        custom_id = d.get("id")
+        research_data = d.get("research")
+    elif isinstance(task_input, str):
+        try:
+            if task_input.startswith('{'):
+                d = json.loads(task_input)
+                name = d.get("name", "")
+                notes = d.get("notes")
+                accept = d.get("accept")
+                deps = d.get("deps")
+                priority = d.get("priority")
+                parent = d.get("parent")
+                created_from = d.get("created_from")
+                custom_id = d.get("id")
+                research_data = d.get("research")
+            else:
+                name = task_input
+                notes = None
+                accept = None
+                deps = None
+                priority = None
+                parent = None
+                created_from = None
+                custom_id = None
+                research_data = None
+        except json.JSONDecodeError:
+            name = task_input
+            notes = None
+            accept = None
+            deps = None
+            priority = None
+            parent = None
+            created_from = None
+            custom_id = None
+            research_data = None
+    else:
+        print(f"{Colors.RED}Invalid task input type: {type(task_input)}{Colors.NC}")
+        return 1
+    
+    if not name:
+        print(f"{Colors.RED}Task name is required{Colors.NC}")
+        return 1
+    
+    # Validate task notes
+    is_valid, error_msg = validate_task_notes(notes)
+    if not is_valid:
+        print(f"{Colors.RED}ERROR: {error_msg}{Colors.NC}")
+        return 1
+    
+    # Validate acceptance criteria
+    is_valid, error_msg = validate_acceptance_criteria(accept)
+    if not is_valid:
+        print(f"{Colors.RED}ERROR: {error_msg}{Colors.NC}")
+        return 1
+    
+    # Validate/generate task ID
+    if custom_id:
+        import re
+        if not re.match(r'^t-[a-z0-9]{4,10}$', custom_id):
+            print(f"{Colors.RED}ERROR: Invalid task ID format: {custom_id}{Colors.NC}")
+            return 1
+        existing_ids = {t.id for t in state.tasks}
+        if custom_id in existing_ids:
+            print(f"{Colors.RED}ERROR: Task ID already exists: {custom_id}{Colors.NC}")
+            return 1
+        task_id = custom_id
+    else:
+        task_id = _generate_id('t')
+    
+    # Validate dependencies (include batch_ids for intra-batch deps)
+    if deps:
+        valid_ids = get_all_valid_task_ids(config, state)
+        valid_ids.update(batch_ids)  # Add IDs from current batch
+        missing_deps = [d for d in deps if d not in valid_ids]
+        if missing_deps:
+            print(f"{Colors.RED}ERROR: Dependencies not found: {', '.join(missing_deps)}{Colors.NC}")
+            return 1
+    
+    # Calculate decompose_depth
+    decompose_depth = 0
+    if parent:
+        parent_task = next((t for t in state.tasks if t.id == parent), None)
+        if parent_task:
+            decompose_depth = parent_task.decompose_depth + 1
+            MAX_DECOMPOSE_DEPTH = 3
+            if decompose_depth > MAX_DECOMPOSE_DEPTH:
+                print(f"{Colors.RED}ERROR: Maximum decomposition depth exceeded{Colors.NC}")
+                return 1
+    
+    # Auto-inherit priority from issue
+    if created_from and not priority:
+        source_issue = next((i for i in state.issues if i.id == created_from), None)
+        if source_issue and source_issue.priority:
+            priority = source_issue.priority
+    
+    task = Task(
+        id=task_id,
+        name=name,
+        spec=state.spec,
+        notes=notes,
+        accept=accept,
+        deps=deps,
+        status="p",
+        priority=priority,
+        parent=parent,
+        created_from=created_from,
+        decompose_depth=decompose_depth
+    )
+    state.tasks.append(task)
+    print(f"{Colors.GREEN}Task added:{Colors.NC} {task.id} - {name}")
+    if deps:
+        print(f"  {Colors.DIM}Depends on: {', '.join(deps)}{Colors.NC}")
+    return 0
 
 
 def cmd_task(config: RalphConfig, action: str, desc: Optional[str] = None, arg3: Optional[str] = None):
@@ -7325,24 +7989,9 @@ def cmd_task(config: RalphConfig, action: str, desc: Optional[str] = None, arg3:
                 return 1
             task_source = "explicit"
         else:
-            # First, check if there's a current task assigned by BUILD stage
-            # This prevents the "wrong task marked done" bug when task ordering changes
-            assigned_task_id = load_current_task(config)
-            if assigned_task_id:
-                task = next((t for t in state.pending if t.id == assigned_task_id), None)
-                if task:
-                    # Found the assigned task - use it
-                    task_source = "assigned"
-                else:
-                    # Assigned task no longer pending (weird state) - fall back to get_next_task
-                    print(f"{Colors.YELLOW}Warning: Assigned task {assigned_task_id} not in pending, using next task{Colors.NC}")
-                    task = state.get_next_task()
-                    task_source = "fallback"
-            else:
-                # No assigned task - fall back to get_next_task()
-                # This respects priority and dependency ordering
-                task = state.get_next_task()
-                task_source = "next"
+            # Use get_next_task() which respects priority and dependency ordering
+            task = state.get_next_task()
+            task_source = "next"
             
             if not task:
                 print(f"{Colors.YELLOW}No pending tasks{Colors.NC}")
@@ -7398,17 +8047,10 @@ def cmd_task(config: RalphConfig, action: str, desc: Optional[str] = None, arg3:
         commit_msg = f"ralph: task done - {task.name[:50]}"
         subprocess.run(['git', 'commit', '-m', commit_msg], cwd=config.repo_root, capture_output=True)
         
-        # Clear the current task lock file since task is now done
-        clear_current_task(config)
-        
         print(f"{Colors.GREEN}Task done:{Colors.NC} {task.id} - {task.name}")
         # Show how the task was selected for transparency
-        if task_source == "assigned":
-            print(f"  {Colors.DIM}(from BUILD stage assignment){Colors.NC}")
-        elif task_source == "explicit":
+        if task_source == "explicit":
             print(f"  {Colors.DIM}(explicit task ID){Colors.NC}")
-        elif task_source == "fallback":
-            print(f"  {Colors.DIM}(fallback - assigned task not found){Colors.NC}")
         # Don't print anything for "next" - it's the default behavior
         print(f"  {Colors.DIM}Changed files: {', '.join(sorted(all_changed)[:5])}{Colors.NC}")
         if len(all_changed) > 5:
@@ -7418,137 +8060,56 @@ def cmd_task(config: RalphConfig, action: str, desc: Optional[str] = None, arg3:
     elif action == 'add':
         if not desc:
             print(f"{Colors.RED}Usage: ralph task add \"name\" or ralph task add '{{\"name\": ..., \"notes\": ..., \"accept\": ...}}'{Colors.NC}")
+            print(f"{Colors.DIM}Batch: ralph task add '[{{...}}, {{...}}]'{Colors.NC}")
             return 1
         if not state.spec:
             print(f"{Colors.RED}No spec set. Run 'ralph set-spec <file>' first.{Colors.NC}")
             return 1
         
-        # Try parsing as JSON for structured task, otherwise treat as simple name
-        custom_id = None
-        try:
-            if desc.startswith('{'):
-                d = json.loads(desc)
-                name = d.get("name", "")
-                notes = d.get("notes")
-                accept = d.get("accept")
-                deps = d.get("deps")  # List of task IDs
-                priority = d.get("priority")  # Priority inherited from issue
-                parent = d.get("parent")  # Parent task ID for decomposition
-                created_from = d.get("created_from")  # Issue ID for investigate
-                custom_id = d.get("id")  # Optional custom task ID
-            else:
-                name = desc
-                notes = None
-                accept = None
-                deps = None
-                priority = None
-                parent = None
-                created_from = None
-        except json.JSONDecodeError:
-            name = desc
-            notes = None
-            accept = None
-            deps = None
-            priority = None
-            parent = None
-            created_from = None
-        
-        if not name:
-            print(f"{Colors.RED}Task name is required{Colors.NC}")
-            return 1
-        
-        # Validate task notes are detailed with file paths and approach
-        is_valid, error_msg = validate_task_notes(notes)
-        if not is_valid:
-            print(f"{Colors.RED}ERROR: {error_msg}{Colors.NC}")
-            print(f"  {Colors.DIM}Good notes examples:{Colors.NC}")
-            print(f"  {Colors.DIM}  - 'Modify src/aio.c: Add valk_builtin_aio_within() that races handle with timeout'{Colors.NC}")
-            print(f"  {Colors.DIM}  - 'Create test/test_retry.valk: Test max-attempts, backoff patterns, success after failure'{Colors.NC}")
-            print(f"  {Colors.DIM}  - 'Update src/parser.c line 450: Register aio/within in builtin table after aio/race'{Colors.NC}")
-            return 1
-        
-        # Validate acceptance criteria is measurable and specific
-        is_valid, error_msg = validate_acceptance_criteria(accept)
-        if not is_valid:
-            print(f"{Colors.RED}ERROR: {error_msg}{Colors.NC}")
-            print(f"  {Colors.DIM}Good examples:{Colors.NC}")
-            print(f"  {Colors.DIM}  - 'pytest tests/test_parser.py passes'{Colors.NC}")
-            print(f"  {Colors.DIM}  - '`make build` exits with code 0'{Colors.NC}")
-            print(f"  {Colors.DIM}  - 'grep -c \"ERROR\" log.txt returns 0'{Colors.NC}")
-            print(f"  {Colors.DIM}  - 'output contains \"Success\" and no \"Error\"'{Colors.NC}")
-            return 1
-        
-        # Validate custom task ID if provided
-        if custom_id:
-            import re
-            if not re.match(r'^t-[a-z0-9]{4,10}$', custom_id):
-                print(f"{Colors.RED}ERROR: Invalid task ID format: {custom_id}{Colors.NC}")
-                print(f"  {Colors.DIM}Expected format: t-[a-z0-9]{{4,10}} (e.g., t-abc123){Colors.NC}")
-                return 1
-            # Check for duplicate ID
-            existing_ids = {t.id for t in state.tasks}
-            if custom_id in existing_ids:
-                print(f"{Colors.RED}ERROR: Task ID already exists: {custom_id}{Colors.NC}")
-                return 1
-            task_id = custom_id
-        else:
-            task_id = _generate_id('t')
-        
-        # Validate dependencies exist (checks current state + tombstones + git history)
-        # This handles plan compaction where old tasks are removed
-        if deps:
-            valid_ids = get_all_valid_task_ids(config, state)
-            missing_deps = [d for d in deps if d not in valid_ids]
-            if missing_deps:
-                print(f"{Colors.RED}ERROR: Dependencies not found: {', '.join(missing_deps)}{Colors.NC}")
-                print(f"  {Colors.DIM}Not found in current tasks, tombstones, or git history.{Colors.NC}")
-                print(f"  {Colors.DIM}Create the dependency tasks first, or remove the invalid deps.{Colors.NC}")
-                return 1
-        
-        # Calculate decompose_depth from parent task
-        decompose_depth = 0
-        if parent:
-            parent_task = next((t for t in state.tasks if t.id == parent), None)
-            if parent_task:
-                decompose_depth = parent_task.decompose_depth + 1
-                # Check for maximum decomposition depth
-                MAX_DECOMPOSE_DEPTH = 3
-                if decompose_depth > MAX_DECOMPOSE_DEPTH:
-                    print(f"{Colors.RED}ERROR: Maximum decomposition depth ({MAX_DECOMPOSE_DEPTH}) exceeded!{Colors.NC}")
-                    print(f"  Parent task: {parent_task.name} (depth {parent_task.decompose_depth})")
-                    print(f"  {Colors.YELLOW}This task has been decomposed too many times.{Colors.NC}")
-                    print(f"  {Colors.YELLOW}Create an issue for human review instead:{Colors.NC}")
-                    print(f"  {Colors.DIM}ralph issue add \"Task too complex for auto-decomposition: {name[:50]}\"{Colors.NC}")
+        # Check for batch add (JSON array)
+        if desc.strip().startswith('['):
+            try:
+                tasks_data = json.loads(desc)
+                if not isinstance(tasks_data, list):
+                    print(f"{Colors.RED}Expected JSON array for batch add{Colors.NC}")
                     return 1
+                
+                added_count = 0
+                failed_count = 0
+                added_ids = []  # Track IDs for dependency resolution within batch
+                
+                for i, task_dict in enumerate(tasks_data):
+                    if not isinstance(task_dict, dict):
+                        print(f"{Colors.RED}Item {i}: Expected object, got {type(task_dict).__name__}{Colors.NC}")
+                        failed_count += 1
+                        continue
+                    
+                    # Add previously added IDs to valid deps for intra-batch dependencies
+                    result = _add_single_task(config, state, task_dict, batch_ids=added_ids)
+                    if result == 0:
+                        added_count += 1
+                        # Extract the ID that was just added (last task in state)
+                        if state.tasks:
+                            added_ids.append(state.tasks[-1].id)
+                    else:
+                        failed_count += 1
+                
+                # Save once after all tasks added
+                if added_count > 0:
+                    save_state(config, state)
+                
+                print(f"{Colors.GREEN}Batch complete:{Colors.NC} {added_count} added, {failed_count} failed")
+                return 0 if failed_count == 0 else 1
+                
+            except json.JSONDecodeError as e:
+                print(f"{Colors.RED}Invalid JSON array: {e}{Colors.NC}")
+                return 1
         
-        # Auto-inherit priority from issue if created_from is specified but no priority
-        if created_from and not priority:
-            source_issue = next((i for i in state.issues if i.id == created_from), None)
-            if source_issue and source_issue.priority:
-                priority = source_issue.priority
-            
-        task = Task(
-            id=task_id, 
-            name=name, 
-            spec=state.spec, 
-            notes=notes, 
-            accept=accept, 
-            deps=deps, 
-            status="p", 
-            priority=priority,
-            parent=parent,
-            created_from=created_from,
-            decompose_depth=decompose_depth
-        )
-        state.tasks.append(task)
-        save_state(config, state)  # No auto-commit, let caller batch
-        print(f"{Colors.GREEN}Task added:{Colors.NC} {task.id} - {name}")
-        if deps:
-            print(f"  {Colors.DIM}Depends on: {', '.join(deps)}{Colors.NC}")
-        if parent:
-            print(f"  {Colors.DIM}Parent: {parent} (depth {decompose_depth}){Colors.NC}")
-        if created_from:
-            print(f"  {Colors.DIM}From issue: {created_from}{Colors.NC}")
+        # Single task add
+        result = _add_single_task(config, state, desc)
+        if result == 0:
+            save_state(config, state)
+        return result
         
     elif action == 'accept':
         done = state.done
@@ -7617,6 +8178,13 @@ def cmd_task(config: RalphConfig, action: str, desc: Optional[str] = None, arg3:
             return 1
         task_name = task.name
         state.tasks = [t for t in state.tasks if t.id != task_id]
+        
+        # If this task was the decompose target, clear decompose state and go to BUILD
+        if state.decompose_target == task_id:
+            state._clear_decompose_state()
+            state.transition_to_build()
+            print(f"{Colors.YELLOW}Decompose target deleted, transitioning to BUILD{Colors.NC}")
+        
         save_state(config, state)
         print(f"{Colors.GREEN}Task deleted:{Colors.NC} {task_id} - {task_name}")
     
@@ -7833,14 +8401,20 @@ def cmd_set_spec(config: RalphConfig, spec_file: str):
                 return 1
     
     state = load_state(config)
-    state.spec = spec_path.name
-    # Clear tasks when switching specs
-    state.tasks = []
-    # Clear tombstones - they served their audit purpose for the previous spec
-    state.tombstones = []
-    # Keep issues - they may be relevant across specs
-    save_state(config, state, f"ralph: set spec {spec_path.name}")
-    print(f"{Colors.GREEN}Spec set:{Colors.NC} {spec_path.name}")
+    
+    # Only clear tasks/tombstones when actually switching to a different spec
+    if state.spec != spec_path.name:
+        state.spec = spec_path.name
+        # Clear tasks when switching specs
+        state.tasks = []
+        # Clear tombstones - they served their audit purpose for the previous spec
+        state.tombstones = []
+        # Keep issues - they may be relevant across specs
+        save_state(config, state, f"ralph: set spec {spec_path.name}")
+        print(f"{Colors.GREEN}Spec set:{Colors.NC} {spec_path.name}")
+    else:
+        # Same spec - nothing to do
+        pass
 
 
 def cmd_log(config: RalphConfig, show_all: bool = False, spec_filter: Optional[str] = None, 
@@ -8133,9 +8707,13 @@ Examples:
         
         ensure_profile_selected(args.profile)
         
-        cmd_run(config, 'plan', 1, args.max_cost, args.max_failures, 
+        # Plan mode needs more time to analyze spec and create tasks - minimum 15 min
+        # Also allow multiple iterations for complex specs (default 5, can be overridden with --max-iter)
+        plan_timeout = max(args.timeout, 900000)
+        plan_max_iter = args.max_iterations if args.max_iterations and args.max_iterations > 0 else 5
+        cmd_run(config, 'plan', plan_max_iter, args.max_cost, args.max_failures, 
                 args.completion_promise, args.no_ui, spec_file=spec_path.name,
-                stage_timeout_ms=args.timeout, context_limit=args.context_limit)
+                stage_timeout_ms=plan_timeout, context_limit=args.context_limit)
     elif args.command in ('construct', 'build', ''):
         # Note: 'build' is supported as an alias for backward compatibility
         

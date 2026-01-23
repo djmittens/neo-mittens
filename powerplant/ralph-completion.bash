@@ -3,17 +3,19 @@
 #   source /path/to/ralph-completion.bash
 
 _ralph_get_specs() {
-  # List spec files in ralph/specs/
-  if [[ -d "ralph/specs" ]]; then
-    ls ralph/specs/*.md 2>/dev/null | xargs -n1 basename 2>/dev/null
+  # Find repo root and list spec files in ralph/specs/
+  local repo_root
+  repo_root=$(git rev-parse --show-toplevel 2>/dev/null)
+  if [[ -n "$repo_root" && -d "$repo_root/ralph/specs" ]]; then
+    ls "$repo_root/ralph/specs/"*.md 2>/dev/null | xargs -n1 basename 2>/dev/null
   fi
 }
 
 _ralph_completions() {
   local cur="${COMP_WORDS[COMP_CWORD]}"
   local prev="${COMP_WORDS[COMP_CWORD-1]}"
-  local commands="init plan build status watch stream query task issue set-spec log help"
-  local options="--max-cost --max-failures --completion-promise --no-ui"
+  local commands="init plan construct config status query task issue set-spec watch stream help"
+  local options="--max-cost --max-failures --completion-promise --timeout --context-limit --no-ui --profile --version"
   
   case "$prev" in
     --max-cost)
@@ -28,6 +30,10 @@ _ralph_completions() {
       COMPREPLY=($(compgen -W "DONE COMPLETE FINISHED SPEC_COMPLETE" -- "$cur"))
       return
       ;;
+    --profile|-p)
+      COMPREPLY=($(compgen -W "budget balanced hybrid cost_smart" -- "$cur"))
+      return
+      ;;
     plan|set-spec)
       # Complete with spec files
       local specs=$(_ralph_get_specs)
@@ -35,19 +41,15 @@ _ralph_completions() {
       return
       ;;
     query)
-      COMPREPLY=($(compgen -W "stage next tasks issues" -- "$cur"))
+      COMPREPLY=($(compgen -W "stage tasks issues iteration" -- "$cur"))
       return
       ;;
     task)
-      COMPREPLY=($(compgen -W "done add accept" -- "$cur"))
+      COMPREPLY=($(compgen -W "done add accept reject delete prioritize" -- "$cur"))
       return
       ;;
     issue)
-      COMPREPLY=($(compgen -W "done add" -- "$cur"))
-      return
-      ;;
-    log)
-      COMPREPLY=($(compgen -W "--all --spec --branch --since" -- "$cur"))
+      COMPREPLY=($(compgen -W "done done-all done-ids add" -- "$cur"))
       return
       ;;
   esac
@@ -58,21 +60,21 @@ _ralph_completions() {
     COMPREPLY=($(compgen -W "$commands 1 5 10 20 50" -- "$cur"))
   else
     case "${COMP_WORDS[1]}" in
-      plan)
+      plan|set-spec)
         local specs=$(_ralph_get_specs)
         COMPREPLY=($(compgen -W "$specs" -- "$cur"))
         ;;
-      build|"")
+      construct|"")
         COMPREPLY=($(compgen -W "1 5 10 20 50 100 $options" -- "$cur"))
         ;;
       query)
-        COMPREPLY=($(compgen -W "stage next tasks issues" -- "$cur"))
+        COMPREPLY=($(compgen -W "stage tasks issues iteration" -- "$cur"))
         ;;
       task)
-        COMPREPLY=($(compgen -W "done add accept" -- "$cur"))
+        COMPREPLY=($(compgen -W "done add accept reject delete prioritize" -- "$cur"))
         ;;
       issue)
-        COMPREPLY=($(compgen -W "done add" -- "$cur"))
+        COMPREPLY=($(compgen -W "done done-all done-ids add" -- "$cur"))
         ;;
     esac
   fi

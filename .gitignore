@@ -6,3 +6,5 @@ build/ralph-logs/
 
 # Ralph runtime state (not tracked)
 ralph/.current_task
+ralph/.runtime
+.coverage

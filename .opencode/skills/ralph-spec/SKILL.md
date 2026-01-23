@@ -528,21 +528,38 @@ Logs are auto-cleared on system restart.
 
 | Command | Description |
 |---------|-------------|
-| `ralph plan <spec>` | Generate tasks from spec (gap analysis) |
+| `ralph plan <spec>` | Generate tasks from spec (gap analysis). Uses 15min timeout, up to 5 iterations. Clears old tasks/issues for that spec on start. |
 | `ralph construct <spec>` | Enter construct mode for spec |
 | `ralph query` | Get full current state as JSON |
 | `ralph query stage` | Get current stage: INVESTIGATE, BUILD, VERIFY, DECOMPOSE, COMPLETE |
+
+**Plan mode behavior:**
+- Prompts to clear/keep existing tasks before starting
+- Uses batch `ralph task add '[...]'` for efficiency
+- Runs multiple iterations for complex specs
+- Minimum 15 minute timeout per iteration
 
 ### Task Commands
 
 | Command | Description |
 |---------|-------------|
-| `ralph task add '<json>'` | Add task: `{"name": "...", "notes": "...", "accept": "...", "deps": [...]}` |
+| `ralph task add '<json>'` | Add single task: `{"name": "...", "notes": "...", "accept": "...", "deps": [...]}` |
+| `ralph task add '[...]'` | Batch add: `[{"name": "...", ...}, {"name": "...", ...}]` |
 | `ralph task done` | Mark current task as done |
 | `ralph task accept <id>` | Accept a done task (verification passed) |
 | `ralph task reject <id> "reason"` | Reject a done task (add tombstone, retry) |
 | `ralph task delete <id>` | Remove a task |
 | `ralph task prioritize` | Re-prioritize all pending tasks |
+
+**Batch add example:**
+```bash
+ralph task add '[
+  {"name": "Create config module", "notes": "Create app/ralph/config.py with GlobalConfig...", "accept": "import works"},
+  {"name": "Create state module", "notes": "Create app/ralph/state.py...", "accept": "import works", "deps": ["t-xxx"]}
+]'
+```
+
+Batch add is faster (single save) and supports intra-batch dependencies.
 
 ### Issue Commands
 
