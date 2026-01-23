@@ -174,7 +174,9 @@ def _add_simple_parsers(subparsers) -> None:
 def _add_construct_parser(subparsers) -> None:
     """Add construct subcommand with all its options."""
     p = subparsers.add_parser("construct", help="Run autonomous construction")
-    p.add_argument("spec", help="Spec file to construct")
+    p.add_argument(
+        "--spec", help="Spec file to construct (auto-initializes if plan.jsonl missing)"
+    )
     p.add_argument(
         "--max-cost", type=float, default=0, help="Stop when cost exceeds $N"
     )
