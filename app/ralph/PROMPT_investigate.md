@@ -1,87 +1,79 @@
 # INVESTIGATE Stage
 
-Issues were discovered during build or verification. Research and resolve ALL of them in parallel.
+Research and resolve all pending issues.
 
-## Step 1: Get All Issues
+## Issues ({{ISSUE_COUNT}} total)
 
-Run `ralph query issues` to see all pending issues.
+```json
+{{ISSUES_JSON}}
+```
 
-## Step 2: Parallel Investigation with Structured Output
+## Spec File
 
-Use the Task tool to investigate ALL issues in parallel. Each subagent MUST return structured findings:
+`ralph/specs/{{SPEC_FILE}}`
+
+## Instructions
+
+### 1. Parallel Investigation
+
+Launch a subagent for EACH issue above:
 
 ```
-Task: "Investigate this issue: <issue description>
-Issue ID: <id>
-Issue priority: <priority or 'medium'>
+Task: "Investigate: {issue.desc}
+Issue ID: {issue.id}
+Priority: {issue.priority}
 
-Analyze the codebase and return a JSON object:
+Return JSON:
 {
-  \"issue_id\": \"<id>\",
-  \"root_cause\": \"<specific file:line reference>\",
+  \"issue_id\": \"...\",
+  \"root_cause\": \"file:line reference\",
   \"resolution\": \"task\" | \"trivial\" | \"out_of_scope\",
   \"task\": {
-    \"name\": \"<specific fix>\",
-    \"notes\": \"Root cause: <file:line>. Fix: <approach>. Imports: <needed>. Risk: <side effects>.\",
-    \"accept\": \"<measurable command + expected result>\",
-    \"priority\": \"<from issue>\",
-    \"research\": {\"files_analyzed\": [\"path:lines\"], \"root_cause_location\": \"file:line\"}
+    \"name\": \"Fix: ...\",
+    \"notes\": \"Root cause: file:line. Fix: approach. Imports: list. Risk: effects.\",
+    \"accept\": \"measurable command + result\",
+    \"priority\": \"high|medium|low\"
   }
 }"
 ```
 
-## Step 3: Create Tasks with Full Context
+**Run ALL investigations in parallel.**
 
-After subagents complete, create tasks preserving research:
+### 2. Create Tasks
 
-```
-ralph task add '{"name": "Fix: <desc>", "notes": "Root cause: <file:line>. Fix: <approach>. Pattern: <similar code>. Risk: <effects>.", "accept": "<measurable>", "created_from": "<issue-id>", "priority": "<from issue>", "research": {"files_analyzed": ["path:lines"], "root_cause_location": "file:line"}}'
-```
-
-### Task Notes Template for Issues
+For each subagent result with `resolution: "task"`:
 
 ```
-Root cause: <file:line - specific problem>. 
-Current behavior: <what happens>. Expected: <what should happen>. 
-Fix approach: <how to fix>. Similar pattern: <existing code ref>. 
-Imports needed: <any>. Risk: <side effects>.
+ralph2 task add '{"name": "...", "notes": "Root cause: file:line. Fix: approach.", "accept": "...", "created_from": "<issue-id>", "priority": "..."}'
 ```
 
-## Step 4: Clear Issues
+### 3. Clear Issues
 
 ```
-ralph issue done-all
+ralph2 issue done-all
 ```
 
-## Step 5: Report
+### 4. Report
 
 ```
 [RALPH] === INVESTIGATE COMPLETE ===
 [RALPH] Processed: N issues
-[RALPH] Tasks created: X (with full context)
+[RALPH] Tasks created: X
 ```
 
-## Handling Auto-Generated Pattern Issues
+## Pattern Issues
 
-**REPEATED REJECTION issues:** Same task failed 3+ times
-- Create HIGH PRIORITY blocking task addressing root cause
-- Notes MUST include: which task fails, rejection pattern, how new task unblocks it
+**REPEATED REJECTION**: Same task failed 3+ times
+- Create HIGH PRIORITY task addressing root cause
+- Notes must include: which task fails, pattern, how to unblock
 
-**COMMON FAILURE PATTERN issues:** Multiple tasks fail same way
+**COMMON FAILURE PATTERN**: Multiple tasks fail same way
 - Create single HIGH PRIORITY task fixing root cause
-- Notes MUST include: error pattern, affected tasks, fix approach
 
-## Validation
+---
 
-Tasks from issues are validated. REJECTED if:
-- Notes < 50 chars or missing root cause location
-- Acceptance criteria is vague
-- Missing file:line references
+## Spec Content (Reference)
 
-## Rules
-
-- Launch ALL investigations in parallel
-- Preserve research in notes with file:line references
-- Measurable acceptance for every task
-- Use `created_from` to link to source issue
-- EXIT after all issues resolved
+<spec>
+{{SPEC_CONTENT}}
+</spec>

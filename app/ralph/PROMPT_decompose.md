@@ -1,103 +1,94 @@
 # DECOMPOSE Stage
 
-A task was killed because it was too large (exceeded context or timeout limits).
-You must break it down into smaller subtasks.
+A task was killed due to context/timeout limits. Break it into smaller subtasks.
 
-## Step 1: Get the Failed Task
+## Killed Task
 
-Run `ralph query` to see the task that needs decomposition.
-The `next.task` field shows:
-- `name`: The task that failed
-- `notes`: Original implementation guidance
-- `kill_reason`: Why it was killed ("timeout" or "context_limit")
-- `kill_log`: Path to the log from the failed iteration
-
-## Step 2: Review the Failed Iteration Log
-
-**CRITICAL**: Log may be HUGE. NEVER read entire file:
-
-```bash
-wc -l <kill_log_path>
-head -50 <kill_log_path>
-tail -100 <kill_log_path>
+```json
+{{TASK_JSON}}
 ```
 
-Determine: what was completed, what caused context explosion, partial progress.
+**Task**: {{TASK_NAME}}
+**Kill Reason**: {{KILL_REASON}}
+**Kill Log**: `{{KILL_LOG_PATH}}`
+**Decompose Depth**: {{DECOMPOSE_DEPTH}} / {{MAX_DEPTH}}
 
-## Step 3: Research the Breakdown
+## Original Notes
 
-Use subagent to analyze:
+{{TASK_NOTES}}
+
+## Kill Log Preview
+
+<log>
+{{KILL_LOG_PREVIEW}}
+</log>
+
+## Instructions
+
+### 1. Analyze the Log
+
+The log preview shows head + tail. Determine:
+- What was completed before kill
+- What caused context explosion
+- Partial progress to preserve
+
+### 2. Research Breakdown
+
+Spawn a subagent:
 
 ```
-Task: "Analyze how to decompose: [task name]
-Original notes: [task notes]
+Task: "Analyze how to decompose: {{TASK_NAME}}
+Notes: {{TASK_NOTES}}
 
 Return JSON:
 {
   \"remaining_work\": [
-    {\"subtask\": \"<specific piece>\", \"files\": [{\"path\": \"file.py\", \"lines\": \"100-150\"}], \"effort\": \"small|medium\"}
+    {\"subtask\": \"specific piece\", \"files\": [{\"path\": \"file.py\", \"lines\": \"100-150\"}], \"effort\": \"small|medium\"}
   ],
-  \"context_risks\": \"<what caused explosion>\",
-  \"mitigation\": \"<how subtasks avoid it>\"
+  \"context_risks\": \"what caused explosion\",
+  \"mitigation\": \"how subtasks avoid it\"
 }"
 ```
 
-## Step 4: Create Subtasks with Full Context
+### 3. Create Subtasks
 
 Each subtask MUST include:
-
-1. **Source locations**: Exact file paths with line numbers
-2. **What to do**: Specific bounded action
-3. **How to do it**: Implementation approach
-4. **Context from parent**: What was learned
-5. **Risk mitigation**: How to avoid re-kill
-
-**Template:**
-```
-ralph task add '{"name": "Specific subtask", "notes": "Source: <file> lines <N-M>. <Action>. Imports: <list>. Context from parent: <findings>. Risk mitigation: <avoid context explosion by...>", "accept": "<measurable>", "parent": "<task-id>"}'
-```
-
-**Example:**
-```json
-{
-  "name": "Create fallback.py with DashboardState dataclass",
-  "notes": "Source: powerplant/ralph lines 4022-4045 (DashboardState only). Create ralph/tui/fallback.py with just dataclass. Imports: dataclass, field, Optional, deque. Risk mitigation: Don't extract full class yet - just dataclass.",
-  "accept": "python3 -c 'from ralph.tui.fallback import DashboardState' exits 0",
-  "parent": "t-original"
-}
-```
-
-## Step 5: Delete Original Task
+- **Source locations**: file paths with line numbers
+- **Bounded action**: completable in ONE iteration
+- **Risk mitigation**: how to avoid re-kill
+- **Context from parent**: what was learned
 
 ```
-ralph task delete <original-task-id>
+ralph2 task add '{"name": "...", "notes": "Source: file lines N-M. Action. Risk mitigation: ...", "accept": "...", "parent": "{{TASK_ID}}"}'
 ```
 
-## Step 6: Report
+### 4. Delete Original
+
+```
+ralph2 task delete {{TASK_ID}}
+```
+
+### 5. Report
 
 ```
 [RALPH] === DECOMPOSE COMPLETE ===
-[RALPH] Original: <task name>
-[RALPH] Kill reason: <timeout|context_limit>
-[RALPH] Context risk: <what caused explosion>
-[RALPH] Mitigation: <how subtasks avoid it>
+[RALPH] Original: {{TASK_NAME}}
+[RALPH] Kill reason: {{KILL_REASON}}
 [RALPH] Split into: N subtasks
 ```
 
-## Validation
-
-Subtasks are validated. REJECTED if:
-- Notes < 50 chars or missing source line numbers
-- Modification tasks without specific locations
-- Acceptance criteria is vague
-
 ## Rules
 
-1. ALWAYS review kill log first (head/tail only!)
-2. Each subtask < 100k tokens - completable in ONE iteration
-3. Preserve context from parent task notes
-4. Include line numbers for every subtask
-5. Measurable acceptance criteria
-6. Include risk mitigation for each subtask
-7. Maximum decomposition depth: 3 levels
-8. DO NOT implement - just create task breakdown
+1. Each subtask must be completable in ONE iteration (<100k tokens)
+2. Include file:line references for every subtask
+3. Include risk mitigation for each subtask
+4. Maximum depth: {{MAX_DEPTH}} levels (current: {{DECOMPOSE_DEPTH}})
+5. DO NOT implement - just create the breakdown
+
+---
+
+## Spec Content (Reference)
+
+<spec>
+{{SPEC_CONTENT}}
+</spec>

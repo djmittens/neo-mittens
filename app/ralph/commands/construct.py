@@ -1,17 +1,43 @@
 """Ralph construct command.
 
 Construct mode - main autonomous development loop.
+
+Features:
+- Project rules (AGENTS.md) integration
+- Context injection for stage prompts
+- Circuit breaker (consecutive failures)
+- Max cost limit
+- Git sync/push each iteration
+- Full metrics tracking
 """
 
 import argparse
+import json
 import subprocess
+import sys
 import time
+from datetime import datetime
 from pathlib import Path
-from typing import Optional, Tuple
+from typing import Optional, Tuple, Callable
 
 from ..config import GlobalConfig
-from ..context import Metrics
-from ..opencode import spawn_opencode
+from ..context import Metrics, LoopDetector, SessionSummary
+from ..git import (
+    get_current_branch,
+    has_uncommitted_plan,
+    push_with_retry,
+    sync_with_remote,
+)
+from ..opencode import spawn_opencode, extract_metrics
+from ..prompts import (
+    find_project_rules,
+    build_prompt_with_rules,
+    load_and_inject,
+    build_build_context,
+    build_verify_context,
+    build_investigate_context,
+    build_decompose_context,
+)
 from ..stages.base import (
     ConstructStateMachine,
     Stage,
@@ -24,23 +50,102 @@ from ..utils import Colors
 
 __all__ = ["cmd_construct"]
 
-STAGE_PROMPTS = {
-    Stage.INVESTIGATE: "PROMPT_investigate.md",
-    Stage.BUILD: "PROMPT_build.md",
-    Stage.VERIFY: "PROMPT_verify.md",
-    Stage.DECOMPOSE: "PROMPT_decompose.md",
-}
+# Default values
+DEFAULT_MAX_FAILURES = 3
+DEFAULT_STAGE_TIMEOUT_MS = 900_000  # 15 minutes
+DEFAULT_CONTEXT_WINDOW = 200_000
 
 
-def _load_stage_prompt(ralph_dir: Path, stage: Stage) -> Optional[str]:
-    """Load the prompt file for a stage."""
-    prompt_file = STAGE_PROMPTS.get(stage)
-    if not prompt_file:
+def _check_opencode_available() -> Tuple[bool, str]:
+    """Check if opencode is available and configured.
+    
+    Returns:
+        Tuple of (is_available, error_message).
+    """
+    try:
+        result = subprocess.run(
+            ["opencode", "--version"],
+            capture_output=True,
+            timeout=5,
+        )
+        if result.returncode == 0:
+            return True, ""
+        return False, f"opencode exited with code {result.returncode}"
+    except FileNotFoundError:
+        return False, "opencode not found. Install with: go install github.com/opencode-ai/opencode@latest"
+    except subprocess.TimeoutExpired:
+        return False, "opencode --version timed out"
+    except Exception as e:
+        return False, f"Error checking opencode: {e}"
+
+
+def _validate_state(state: RalphState) -> Tuple[bool, list[str]]:
+    """Validate state for dangling dependencies and other issues.
+    
+    Returns:
+        Tuple of (is_valid, list of error messages).
+    """
+    errors = []
+    
+    # Check for dangling dependencies
+    all_task_ids = {t.id for t in state.tasks}
+    for task in state.tasks:
+        for dep in (task.deps or []):
+            if dep not in all_task_ids:
+                errors.append(f"Task {task.id} has dangling dep: {dep}")
+    
+    return len(errors) == 0, errors
+
+
+def _build_stage_prompt(
+    stage: Stage,
+    state: RalphState,
+    ralph_dir: Path,
+    project_rules: Optional[str] = None,
+) -> Optional[str]:
+    """Build a prompt for a stage with context injection.
+    
+    Args:
+        stage: The stage to build prompt for.
+        state: Current Ralph state.
+        ralph_dir: Path to ralph directory.
+        project_rules: Optional project rules content.
+    
+    Returns:
+        The prompt content with injected context, or None if not available.
+    """
+    stage_name = stage.name.lower()
+    
+    # Build context based on stage
+    spec_name = state.spec or ""
+    if stage == Stage.BUILD:
+        task = state.pending[0] if state.pending else None
+        if not task:
+            return None
+        context = build_build_context(task)
+    elif stage == Stage.VERIFY:
+        context = build_verify_context(state.done, spec_name)
+    elif stage == Stage.INVESTIGATE:
+        context = build_investigate_context(state.issues, spec_name)
+    elif stage == Stage.DECOMPOSE:
+        # Find the task that needs decomposition
+        task = next((t for t in state.tasks if t.status == "killed"), None)
+        if not task:
+            return None
+        context = build_decompose_context(task)
+    else:
         return None
-    prompt_path = ralph_dir / prompt_file
-    if not prompt_path.exists():
+    
+    try:
+        prompt = load_and_inject(stage_name, context, ralph_dir)
+        
+        # Prepend project rules if available
+        if project_rules:
+            prompt = build_prompt_with_rules(prompt, project_rules)
+        
+        return prompt
+    except FileNotFoundError:
         return None
-    return prompt_path.read_text()
 
 
 def _should_skip_stage(stage: Stage, state: RalphState) -> bool:
@@ -61,6 +166,8 @@ def _make_result(
     exit_code: int = 0,
     error: Optional[str] = None,
     kill_reason: Optional[str] = None,
+    cost: float = 0.0,
+    tokens_used: int = 0,
 ) -> StageResult:
     """Create a StageResult with the given parameters."""
     return StageResult(
@@ -70,25 +177,40 @@ def _make_result(
         duration_seconds=duration,
         error=error,
         kill_reason=kill_reason,
+        cost=cost,
+        tokens_used=tokens_used,
     )
 
 
 def _execute_opencode(
     config: GlobalConfig, prompt: str, repo_root: Path, stage_timeout_ms: int
-) -> Tuple[int, str, bool]:
-    """Execute opencode and return (return_code, output, timed_out)."""
+) -> Tuple[int, str, bool, float, int]:
+    """Execute opencode and return (return_code, output, timed_out, cost, tokens).
+    """
     model = config.model if hasattr(config, "model") else None
     proc = spawn_opencode(prompt, cwd=repo_root, timeout=stage_timeout_ms, model=model)
+    cost = 0.0
+    tokens = 0
+    
     try:
         stdout_bytes, _ = proc.communicate(timeout=stage_timeout_ms // 1000)
         stdout_output = (
             stdout_bytes.decode("utf-8", errors="replace") if stdout_bytes else ""
         )
-        return proc.returncode, stdout_output, False
+        
+        # Extract metrics from output
+        try:
+            metrics = extract_metrics(stdout_output)
+            cost = metrics.total_cost
+            tokens = metrics.tokens_used
+        except Exception:
+            pass
+        
+        return proc.returncode, stdout_output, False, cost, tokens
     except subprocess.TimeoutExpired:
         proc.kill()
         proc.wait()
-        return -1, "", True
+        return -1, "", True, cost, tokens
 
 
 def _run_stage(
@@ -100,22 +222,23 @@ def _run_stage(
     context_limit: int,
     repo_root: Path,
     ralph_dir: Path,
+    project_rules: Optional[str] = None,
     print_output: bool = True,
 ) -> StageResult:
-    """Run a single stage by spawning opencode."""
+    """Run a single stage by spawning opencode with context injection."""
     start_time = time.time()
-
-    prompt = _load_stage_prompt(ralph_dir, stage)
-    if not prompt:
-        return _make_result(
-            stage, StageOutcome.SKIP, error=f"No prompt file for stage {stage.name}"
-        )
 
     if _should_skip_stage(stage, state):
         return _make_result(stage, StageOutcome.SKIP)
 
+    prompt = _build_stage_prompt(stage, state, ralph_dir, project_rules)
+    if not prompt:
+        return _make_result(
+            stage, StageOutcome.SKIP, error=f"No prompt available for stage {stage.name}"
+        )
+
     try:
-        return_code, stdout_output, timed_out = _execute_opencode(
+        return_code, stdout_output, timed_out, cost, tokens = _execute_opencode(
             config, prompt, repo_root, stage_timeout_ms
         )
     except Exception as e:
@@ -123,28 +246,38 @@ def _run_stage(
             stage, StageOutcome.FAILURE, time.time() - start_time, error=str(e)
         )
 
+    # Update metrics
+    metrics.total_cost += cost
+    metrics.total_tokens_in += tokens  # Simplified - ideally split in/out
+
     if timed_out:
+        metrics.kills_timeout += 1
         return _make_result(
             stage,
             StageOutcome.FAILURE,
             time.time() - start_time,
             error="Stage timed out",
             kill_reason="timeout",
+            cost=cost,
+            tokens_used=tokens,
         )
 
     if print_output and stdout_output:
+        # Show last 20 lines of output
         for line in stdout_output.split("\n")[-20:]:
             print(f"  {line}")
 
     duration = time.time() - start_time
     if return_code == 0:
-        return _make_result(stage, StageOutcome.SUCCESS, duration)
+        return _make_result(stage, StageOutcome.SUCCESS, duration, cost=cost, tokens_used=tokens)
     return _make_result(
         stage,
         StageOutcome.FAILURE,
         duration,
         return_code,
         error=f"Stage exited with code {return_code}",
+        cost=cost,
+        tokens_used=tokens,
     )
 
 
@@ -190,51 +323,53 @@ def _validate_config(
     return plan_file, repo_root, ralph_dir, None
 
 
-def _print_construct_header(state: RalphState, iterations: int) -> None:
-    """Print the construct mode header."""
-    print(f"{Colors.CYAN}Ralph Construct Mode{Colors.NC}")
-    print(f"  Spec: {state.spec}")
-    print(f"  Iterations: {iterations if iterations > 0 else 'unlimited'}")
-    print(f"  Pending tasks: {len(state.pending)}")
-    print(f"  Open issues: {len(state.issues)}")
-    print()
-
-
-def _run_iterations(state_machine: ConstructStateMachine, max_iterations: int) -> int:
-    """Run construct iterations and return exit code."""
-    try:
-        for i in range(1, max_iterations + 1):
-            print(f"\n{Colors.BLUE}=== Iteration {i} ==={Colors.NC}")
-            should_continue, spec_complete = state_machine.run_iteration(i)
-            if spec_complete:
-                print(f"\n{Colors.GREEN}Spec complete!{Colors.NC}")
-                return 0
-            if not should_continue:
-                print(f"\n{Colors.YELLOW}No more work to do.{Colors.NC}")
-                return 0
-    except KeyboardInterrupt:
-        print(f"\n{Colors.YELLOW}Interrupted.{Colors.NC}")
-        return 130
-
-    print(f"\n{Colors.YELLOW}Max iterations ({max_iterations}) reached.{Colors.NC}")
-    return 0
-
-
-def _get_spec_from_args(args: argparse.Namespace) -> Optional[str]:
-    """Extract spec from args if present."""
-    return args.spec if hasattr(args, "spec") else None
-
-
-def _setup_state_with_spec(
-    state: RalphState, spec: Optional[str], plan_file: Path
+def _print_construct_header(
+    state: RalphState,
+    branch: str,
+    rules_source: Optional[str],
+    config: GlobalConfig,
+    max_iterations: int,
+    max_cost: float,
+    max_failures: int,
+    stage_timeout_ms: int,
+    context_limit: int,
 ) -> None:
-    """Set spec on state if provided and not already set."""
-    if spec and not state.spec:
-        state.spec = spec
-        save_state(state, plan_file)
+    """Print the construct mode header with full configuration."""
+    # Calculate context thresholds
+    warn_pct = getattr(config, "context_warn_pct", 70)
+    compact_pct = getattr(config, "context_compact_pct", 85)
+    kill_pct = getattr(config, "context_kill_pct", 95)
+    
+    soft_limit = int(context_limit * warn_pct / 100)
+    compact_limit = int(context_limit * compact_pct / 100)
+    hard_limit = int(context_limit * kill_pct / 100)
+    
+    print(f"{Colors.BLUE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━{Colors.NC}")
+    print(f"Mode:   {Colors.GREEN}construct{Colors.NC} (state machine)")
+    print(f"Spec:   {Colors.CYAN}{state.spec}{Colors.NC}")
+    print(f"Branch: {branch}")
+    if rules_source:
+        print(f"Rules:  {Colors.GREEN}{rules_source}{Colors.NC}")
+    else:
+        print(f"Rules:  {Colors.YELLOW}None{Colors.NC}")
+    print(f"Model:  {config.model or 'default'}")
+    if max_iterations > 0:
+        print(f"Max iterations: {max_iterations}")
+    if max_cost > 0:
+        print(f"Max cost:       ${max_cost}")
+    print(f"Max failures:   {max_failures} (circuit breaker)")
+    print(f"Timeout:        {stage_timeout_ms}ms per stage")
+    print(f"Context:        {context_limit:,} tokens (warn: {soft_limit:,}, compact: {compact_limit:,}, kill: {hard_limit:,})")
+    print(f"Pending tasks:  {len(state.pending)}")
+    print(f"Open issues:    {len(state.issues)}")
+    print(f"{Colors.BLUE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━{Colors.NC}")
 
 
-def _create_stage_wrapper(repo_root: Path, ralph_dir: Path):
+def _create_stage_wrapper(
+    repo_root: Path,
+    ralph_dir: Path,
+    project_rules: Optional[str] = None,
+) -> Callable:
     """Create a stage wrapper function for the state machine."""
 
     def run_stage_wrapper(
@@ -247,14 +382,106 @@ def _create_stage_wrapper(repo_root: Path, ralph_dir: Path):
     ) -> StageResult:
         print(f"\n{Colors.CYAN}[{stage.name}]{Colors.NC}")
         return _run_stage(
-            cfg, stage, st, met, timeout_ms, ctx_limit, repo_root, ralph_dir
+            cfg, stage, st, met, timeout_ms, ctx_limit, 
+            repo_root, ralph_dir, project_rules
         )
 
     return run_stage_wrapper
 
 
-def cmd_construct(config: dict, iterations: int, args: argparse.Namespace) -> int:
-    """Construct mode - main autonomous development loop."""
+def _emit_session_summary(
+    metrics: Metrics,
+    exit_reason: str,
+    spec: str,
+    config: GlobalConfig,
+    log_dir: Path,
+) -> None:
+    """Write session summary JSON to log directory."""
+    if not getattr(config, "emit_session_summary", True):
+        return
+
+    log_dir.mkdir(parents=True, exist_ok=True)
+    ended_at = datetime.now().isoformat()
+    summary = SessionSummary.from_metrics(
+        metrics=metrics,
+        exit_reason=exit_reason,
+        spec=spec,
+        profile=getattr(config, "profile", "default"),
+        ended_at=ended_at,
+    )
+
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    summary_file = log_dir / f"session_{timestamp}.json"
+    try:
+        with open(summary_file, "w") as f:
+            json.dump(summary.to_dict(), f, indent=2)
+        print(f"{Colors.CYAN}Session summary: {summary_file}{Colors.NC}")
+    except OSError as e:
+        print(f"{Colors.YELLOW}Failed to write session summary: {e}{Colors.NC}")
+
+
+def _print_final_report(
+    metrics: Metrics,
+    exit_reason: str,
+    iterations: int,
+    state: RalphState,
+) -> None:
+    """Print final construct session report."""
+    print()
+    if exit_reason == "complete":
+        print(f"{Colors.GREEN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━{Colors.NC}")
+        print(f"{Colors.GREEN}SPEC COMPLETE: {state.spec}{Colors.NC}")
+    elif exit_reason == "circuit_breaker":
+        print(f"{Colors.RED}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━{Colors.NC}")
+        print(f"{Colors.RED}CIRCUIT BREAKER TRIPPED{Colors.NC}")
+    elif exit_reason == "cost_limit":
+        print(f"{Colors.YELLOW}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━{Colors.NC}")
+        print(f"{Colors.YELLOW}COST LIMIT REACHED{Colors.NC}")
+    elif exit_reason == "max_iterations":
+        print(f"{Colors.YELLOW}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━{Colors.NC}")
+        print(f"{Colors.YELLOW}MAX ITERATIONS REACHED{Colors.NC}")
+    else:
+        print(f"{Colors.BLUE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━{Colors.NC}")
+    
+    print(f"Total cost:     ${metrics.total_cost:.4f}")
+    print(f"Iterations:     {iterations}")
+    print(f"Tokens used:    {metrics.tokens_used:,}")
+    
+    if state.pending:
+        print(f"Pending tasks:  {len(state.pending)}")
+    if state.done:
+        print(f"Done tasks:     {len(state.done)}")
+    if state.issues:
+        print(f"Open issues:    {len(state.issues)}")
+    
+    print(f"{Colors.BLUE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━{Colors.NC}")
+
+
+def _get_spec_from_args(args: argparse.Namespace) -> Optional[str]:
+    """Extract spec from args if present."""
+    return args.spec if hasattr(args, "spec") else None
+
+
+def cmd_construct(
+    config: dict,
+    iterations: int,
+    args: argparse.Namespace,
+    max_cost: float = 0.0,
+    max_failures: int = DEFAULT_MAX_FAILURES,
+) -> int:
+    """Construct mode - main autonomous development loop.
+    
+    Args:
+        config: Configuration dict with paths.
+        iterations: Maximum iterations (0 for unlimited).
+        args: Command-line arguments.
+        max_cost: Maximum cost limit (0 for unlimited).
+        max_failures: Circuit breaker threshold.
+    
+    Returns:
+        Exit code (0 for success, 1 for failure).
+    """
+    cwd = Path.cwd()
     spec = _get_spec_from_args(args)
     plan_file_opt, repo_root_opt, ralph_dir_opt, error = _validate_config(config, spec)
 
@@ -263,24 +490,180 @@ def cmd_construct(config: dict, iterations: int, args: argparse.Namespace) -> in
         return 1
 
     plan_file, repo_root, ralph_dir = plan_file_opt, repo_root_opt, ralph_dir_opt
+    
+    # Pre-flight check: validate opencode
+    opencode_ok, opencode_error = _check_opencode_available()
+    if not opencode_ok:
+        print(f"{Colors.RED}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━{Colors.NC}")
+        print(f"{Colors.RED}OPENCODE NOT AVAILABLE{Colors.NC}")
+        print(f"{opencode_error}")
+        print(f"{Colors.RED}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━{Colors.NC}")
+        return 1
+    
+    # Load state
     state = load_state(plan_file)
-    _setup_state_with_spec(state, spec, plan_file)
-    _print_construct_header(state, iterations)
-
+    if spec and not state.spec:
+        state.spec = spec
+        save_state(state, plan_file)
+    
+    if not state.spec:
+        print(f"{Colors.YELLOW}No spec configured - run 'ralph plan <spec.md>' first{Colors.NC}")
+        return 1
+    
+    # Pre-flight check: validate state
+    valid, validation_errors = _validate_state(state)
+    if not valid:
+        print(f"{Colors.RED}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━{Colors.NC}")
+        print(f"{Colors.RED}VALIDATION ERRORS - Cannot start construct{Colors.NC}")
+        for err in validation_errors:
+            print(f"  {Colors.RED}✗{Colors.NC} {err}")
+        print(f"{Colors.RED}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━{Colors.NC}")
+        return 1
+    
+    # Load global config
     global_config = GlobalConfig.load()
-    max_iterations = iterations if iterations > 0 else 1000
+    max_iterations = iterations if iterations > 0 else global_config.max_iterations
+    stage_timeout_ms = global_config.stage_timeout_ms
+    context_limit = global_config.context_window
+    
+    # Get branch info
+    branch = get_current_branch(cwd)
+    
+    # Load project rules
+    project_rules = find_project_rules(cwd)
+    rules_source = None
+    if project_rules:
+        for candidate in ["AGENTS.md", "CLAUDE.md"]:
+            if (cwd / candidate).exists():
+                rules_source = candidate
+                break
 
-    state_machine = ConstructStateMachine(
-        config=global_config,
-        metrics=Metrics(),
-        stage_timeout_ms=global_config.stage_timeout_ms,
-        context_limit=global_config.context_window,
-        run_stage_fn=_create_stage_wrapper(repo_root, ralph_dir),
-        load_state_fn=lambda: load_state(plan_file),
-        save_state_fn=lambda st: save_state(st, plan_file),
+    # Print header
+    _print_construct_header(
+        state, branch, rules_source, global_config,
+        max_iterations, max_cost, max_failures,
+        stage_timeout_ms, context_limit
     )
 
-    return _run_iterations(state_machine, max_iterations)
+    # Initialize metrics with start time
+    metrics = Metrics()
+    metrics.started_at = datetime.now().isoformat()
+    metrics.record_progress()
 
+    # Initialize loop detector if configured
+    loop_threshold = getattr(global_config, "loop_detection_threshold", 3)
+    loop_detector = LoopDetector(threshold=loop_threshold) if loop_threshold > 0 else None
 
-# Auto-init implemented
+    # Create state machine
+    state_machine = ConstructStateMachine(
+        config=global_config,
+        metrics=metrics,
+        stage_timeout_ms=stage_timeout_ms,
+        context_limit=context_limit,
+        run_stage_fn=_create_stage_wrapper(repo_root, ralph_dir, project_rules),
+        load_state_fn=lambda: load_state(plan_file),
+        save_state_fn=lambda st: save_state(st, plan_file),
+        loop_detector=loop_detector,
+    )
+
+    # Run construct loop
+    consecutive_failures = 0
+    iteration = 0
+    exit_reason = "unknown"
+    
+    try:
+        while True:
+            # Check iteration limit
+            if max_iterations > 0 and iteration >= max_iterations:
+                exit_reason = "max_iterations"
+                break
+            
+            # Check cost limit
+            if max_cost > 0 and metrics.total_cost >= max_cost:
+                exit_reason = "cost_limit"
+                break
+            
+            # Check circuit breaker
+            if consecutive_failures >= max_failures:
+                exit_reason = "circuit_breaker"
+                break
+            
+            iteration += 1
+            metrics.total_iterations = iteration
+            
+            # Sync with remote before each iteration
+            sync_result = sync_with_remote(branch, plan_file, cwd)
+            if sync_result == "conflict":
+                print(f"{Colors.RED}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━{Colors.NC}")
+                print(f"{Colors.RED}GIT CONFLICT DETECTED{Colors.NC}")
+                print(f"Another Ralph instance made conflicting changes.")
+                print(f"{Colors.RED}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━{Colors.NC}")
+                exit_reason = "git_conflict"
+                break
+            elif sync_result == "updated":
+                print(f"{Colors.CYAN}Synced with remote - reloading state{Colors.NC}")
+                state = load_state(plan_file)
+            
+            # Print iteration header
+            if max_cost > 0:
+                cost_display = f" | Cost: ${metrics.total_cost:.4f}/${max_cost}"
+            else:
+                cost_display = f" | Cost: ${metrics.total_cost:.4f}"
+            
+            print()
+            print(f"{Colors.GREEN}╔═══════════════════════════════════════════════════════════════╗{Colors.NC}")
+            print(f"{Colors.GREEN}║  ITERATION {iteration} - {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}{cost_display}{Colors.NC}")
+            print(f"{Colors.GREEN}╚═══════════════════════════════════════════════════════════════╝{Colors.NC}")
+            
+            # Run one iteration
+            should_continue, spec_complete = state_machine.run_iteration(iteration)
+            
+            if spec_complete:
+                exit_reason = "complete"
+                break
+            
+            if not should_continue:
+                exit_reason = "no_work"
+                break
+            
+            # Check for loop detection
+            if metrics.kills_loop > 0:
+                exit_reason = "loop_detected"
+                break
+            
+            # Commit any plan changes
+            if has_uncommitted_plan(plan_file, cwd):
+                subprocess.run(
+                    ["git", "add", str(plan_file)],
+                    cwd=cwd,
+                    capture_output=True,
+                )
+                subprocess.run(
+                    ["git", "commit", "-m", f"ralph: iteration {iteration}"],
+                    cwd=cwd,
+                    capture_output=True,
+                )
+            
+            # Push changes with retry
+            if not push_with_retry(branch, retries=2, plan_file=plan_file, cwd=cwd):
+                print(f"{Colors.YELLOW}Push failed - continuing without push{Colors.NC}")
+            
+            # Reset failure counter on success
+            consecutive_failures = 0
+    
+    except KeyboardInterrupt:
+        print(f"\n{Colors.YELLOW}Interrupted by user{Colors.NC}")
+        exit_reason = "interrupted"
+    
+    finally:
+        # Reload final state
+        state = load_state(plan_file)
+        
+        # Print final report
+        _print_final_report(metrics, exit_reason, iteration, state)
+        
+        # Emit session summary
+        log_dir = Path(global_config.log_dir)
+        _emit_session_summary(metrics, exit_reason, state.spec or "", global_config, log_dir)
+    
+    return 0 if exit_reason in ("complete", "no_work", "max_iterations") else 1

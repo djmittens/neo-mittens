@@ -1,13 +1,22 @@
 """Unit tests for ralph.prompts module."""
 
 import pytest
+import json
 from pathlib import Path
+from unittest.mock import MagicMock
 
 from ralph.prompts import (
     load_prompt,
     build_prompt_with_rules,
     merge_prompts,
     find_project_rules,
+    inject_context,
+    build_build_context,
+    build_verify_context,
+    build_investigate_context,
+    build_decompose_context,
+    build_plan_context,
+    load_and_inject,
 )
 
 
@@ -265,3 +274,218 @@ class TestFindProjectRules:
         result = find_project_rules(tmp_path)
 
         assert result == ""
+
+
+class TestInjectContext:
+    """Tests for inject_context function."""
+
+    def test_replaces_simple_placeholders(self):
+        template = "Hello {{NAME}}, your task is {{TASK}}."
+        context = {"name": "Alice", "task": "build"}
+        
+        result = inject_context(template, context)
+        
+        assert result == "Hello Alice, your task is build."
+
+    def test_handles_dict_values(self):
+        template = "Task: {{TASK_JSON}}"
+        context = {"task_json": {"name": "Fix bug", "id": "t-123"}}
+        
+        result = inject_context(template, context)
+        
+        assert '"name": "Fix bug"' in result
+        assert '"id": "t-123"' in result
+
+    def test_handles_list_values(self):
+        template = "Items: {{ITEMS}}"
+        context = {"items": ["a", "b", "c"]}
+        
+        result = inject_context(template, context)
+        
+        # json.dumps with indent=2 produces formatted output
+        assert '"a"' in result
+        assert '"b"' in result
+        assert '"c"' in result
+
+    def test_handles_none_values(self):
+        template = "Value: {{VALUE}}"
+        context = {"value": None}
+        
+        result = inject_context(template, context)
+        
+        assert result == "Value: "
+
+    def test_preserves_unmatched_placeholders(self):
+        template = "Hello {{NAME}}, {{UNKNOWN}} is not replaced."
+        context = {"name": "Alice"}
+        
+        result = inject_context(template, context)
+        
+        assert "Alice" in result
+        assert "{{UNKNOWN}}" in result
+
+
+class TestBuildBuildContext:
+    """Tests for build_build_context function."""
+
+    def test_creates_context_from_task(self):
+        task = MagicMock()
+        task.id = "t-123"
+        task.name = "Fix bug"
+        task.spec = "feature.md"
+        task.notes = "Fix the bug in module X"
+        task.accept = "pytest passes"
+        task.reject_reason = None
+        task.kill_reason = None
+        task.kill_log = None
+        task.deps = []
+        task.status = "p"
+        task.priority = "high"
+        task.parent = None
+        task.decompose_depth = 0
+        
+        context = build_build_context(task, "spec content here")
+        
+        assert context["task_id"] == "t-123"
+        assert context["task_name"] == "Fix bug"
+        assert context["spec_content"] == "spec content here"
+        assert context["is_retry"] == "false"
+
+    def test_marks_retry_when_rejected(self):
+        task = MagicMock()
+        task.id = "t-123"
+        task.name = "Fix bug"
+        task.spec = "feature.md"
+        task.notes = "Notes"
+        task.accept = "Accept"
+        task.reject_reason = "Did not fix the root cause"
+        task.kill_reason = None
+        task.kill_log = None
+        task.deps = []
+        task.status = "p"
+        task.priority = None
+        task.parent = None
+        task.decompose_depth = 0
+        
+        context = build_build_context(task)
+        
+        assert context["is_retry"] == "true"
+        assert context["task_reject"] == "Did not fix the root cause"
+
+
+class TestBuildVerifyContext:
+    """Tests for build_verify_context function."""
+
+    def test_creates_context_from_done_tasks(self):
+        task1 = MagicMock()
+        task1.id = "t-1"
+        task1.name = "Task 1"
+        task1.spec = "spec.md"
+        task1.notes = "notes"
+        task1.accept = "pytest passes"
+        task1.deps = []
+        task1.status = "d"
+        task1.priority = None
+        task1.reject_reason = None
+        task1.kill_reason = None
+        task1.kill_log = None
+        task1.parent = None
+        task1.decompose_depth = 0
+        
+        task2 = MagicMock()
+        task2.id = "t-2"
+        task2.name = "Task 2"
+        task2.spec = "spec.md"
+        task2.notes = "notes"
+        task2.accept = "build passes"
+        task2.deps = []
+        task2.status = "d"
+        task2.priority = None
+        task2.reject_reason = None
+        task2.kill_reason = None
+        task2.kill_log = None
+        task2.parent = None
+        task2.decompose_depth = 0
+        
+        context = build_verify_context([task1, task2], "spec.md", "spec content")
+        
+        assert context["done_count"] == 2
+        assert context["spec_file"] == "spec.md"
+        assert len(context["done_tasks"]) == 2
+
+
+class TestBuildInvestigateContext:
+    """Tests for build_investigate_context function."""
+
+    def test_creates_context_from_issues(self):
+        issue1 = MagicMock()
+        issue1.id = "i-1"
+        issue1.desc = "Test failure"
+        issue1.spec = "spec.md"
+        issue1.priority = "high"
+        
+        issue2 = MagicMock()
+        issue2.id = "i-2"
+        issue2.desc = "Warning in build"
+        issue2.spec = "spec.md"
+        issue2.priority = None
+        
+        context = build_investigate_context([issue1, issue2], "spec.md", "spec content")
+        
+        assert context["issue_count"] == 2
+        assert len(context["issues"]) == 2
+        assert context["issues"][0]["id"] == "i-1"
+
+
+class TestBuildDecomposeContext:
+    """Tests for build_decompose_context function."""
+
+    def test_creates_context_from_killed_task(self):
+        task = MagicMock()
+        task.id = "t-123"
+        task.name = "Large refactor"
+        task.spec = "spec.md"
+        task.notes = "Move all functions"
+        task.accept = "tests pass"
+        task.deps = []
+        task.status = "p"
+        task.priority = None
+        task.reject_reason = None
+        task.kill_reason = "context_limit"
+        task.kill_log = "/tmp/logs/t-123.log"
+        task.parent = None
+        task.decompose_depth = 1
+        
+        context = build_decompose_context(task, "log preview here", "spec content")
+        
+        assert context["task_id"] == "t-123"
+        assert context["kill_reason"] == "context_limit"
+        assert context["kill_log_preview"] == "log preview here"
+        assert context["decompose_depth"] == 1
+        assert context["max_depth"] == 3
+
+
+class TestBuildPlanContext:
+    """Tests for build_plan_context function."""
+
+    def test_creates_context_from_spec(self):
+        context = build_plan_context("feature.md", "# Feature Spec\n\nDo things.")
+        
+        assert context["spec_file"] == "feature.md"
+        assert "Feature Spec" in context["spec_content"]
+
+
+class TestLoadAndInject:
+    """Tests for load_and_inject function."""
+
+    def test_loads_and_injects_context(self, tmp_path):
+        ralph_dir = tmp_path / "ralph"
+        ralph_dir.mkdir()
+        prompt_file = ralph_dir / "PROMPT_test.md"
+        prompt_file.write_text("Task: {{TASK_NAME}}\nSpec: {{SPEC_FILE}}")
+        
+        context = {"task_name": "Build feature", "spec_file": "feature.md"}
+        result = load_and_inject("test", context, ralph_dir)
+        
+        assert "Task: Build feature" in result
+        assert "Spec: feature.md" in result

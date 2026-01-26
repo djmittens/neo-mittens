@@ -1,0 +1,19 @@
+#!/bin/bash
+# ralph2 - wrapper for the new modular Ralph implementation
+#
+# Usage: ralph2 <command> [args...]
+#
+# This runs the refactored Ralph from app/ralph/ instead of the
+# legacy monolithic powerplant/ralph script.
+#
+# Code changes in app/ralph/ are immediately available - no reinstall needed.
+# PYTHONPATH is set to include the app/ directory.
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(dirname "$SCRIPT_DIR")"
+
+# Ensure PYTHONPATH includes app/ for ralph package imports
+# This allows code changes to be immediately available
+export PYTHONPATH="${REPO_ROOT}/app${PYTHONPATH:+:$PYTHONPATH}"
+
+exec python3 -m ralph "$@"

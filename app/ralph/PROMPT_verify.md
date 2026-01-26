@@ -1,99 +1,54 @@
 # VERIFY Stage
 
-All tasks are done. Verify they meet their acceptance criteria.
+Verify that done tasks meet their acceptance criteria.
 
-## Step 1: Get State
+## Done Tasks ({{DONE_COUNT}} total)
 
-Run `ralph query` to get:
-- `spec`: the current spec name (e.g., "construct-mode.md")
-- `tasks.done`: list of done tasks with their acceptance criteria
+```json
+{{DONE_TASKS_JSON}}
+```
 
-## Step 2: Verify Each Done Task
+## Spec File
 
-For EACH done task, spawn a subagent to verify:
+`ralph/specs/{{SPEC_FILE}}`
+
+## Instructions
+
+### 1. Verify Each Done Task
+
+For EACH task above, spawn a subagent:
 
 ```
-Task: "Verify task '{task.name}' meets its acceptance criteria: {task.accept}
+Task: "Verify task '{task.name}' meets: {task.accept}
 
-1. Search codebase for the implementation
-2. Check if acceptance criteria is satisfied
-3. Run any tests mentioned in criteria
+1. Find the implementation
+2. Check acceptance criteria
+3. Run any tests in criteria
 
 Return JSON:
-{
-  \"task_id\": \"{task.id}\",
-  \"passed\": true | false,
-  \"evidence\": \"<what you found>\",
-  \"reason\": \"<why it failed>\"  // only if passed=false
-}"
+{\"task_id\": \"...\", \"passed\": true|false, \"evidence\": \"...\", \"reason\": \"...\"}"
 ```
 
 **Run all verifications in parallel.**
 
-## Step 3: Apply Results
+### 2. Apply Results
 
-### For each task:
+**Passed** -> `ralph2 task accept <task-id>`
 
-**If passed** -> `ralph task accept <task-id>`
+**Failed** -> Choose one:
+- Implementation bug: `ralph2 task reject <task-id> "<reason>"`
+- Architectural blocker: `ralph2 issue add "..."` then `ralph2 task delete <task-id>`
 
-**If failed** -> Choose one:
+### 3. Check Spec Acceptance Criteria
 
-1. **Implementation bug** (can be fixed):
-   `ralph task reject <task-id> "<reason>"`
+Read ONLY the "## Acceptance Criteria" section of the spec below.
 
-2. **Architectural blocker** (cannot be done):
-   `ralph issue add "Task <task-id> blocked: <why>"`
-   `ralph task delete <task-id>`
-   
-Signs of architectural blocker:
-- "Cannot do X mid-execution"
-- Same rejection reason recurring
-- Requires changes outside this spec
+For each **checked** criterion (`- [x]`), verify it still holds.
+For each **unchecked** criterion (`- [ ]`) not covered by tasks, create a task.
 
-## Step 4: Verify Spec Acceptance Criteria
+### 4. Report
 
-Read the spec\'s **Acceptance Criteria section only** (not entire spec):
-`ralph/specs/<spec-name>` - scroll to "## Acceptance Criteria"
-
-### 4a: Verify checked criteria still pass
-
-For each **checked** criterion (`- [x]`), spawn a subagent to verify it still holds:
-
-```
-Task: "Verify spec criterion still passes: \'<criterion text>\'
-
-1. Search codebase for the implementation
-2. Run any tests or commands that validate this criterion
-3. Check that the criterion is still satisfied
-
-Return JSON:
-{
-  \"criterion\": \"<criterion text>\",
-  \"passed\": true | false,
-  \"evidence\": \"<what you found>\",
-  \"reason\": \"<why it failed>\"  // only if passed=false
-}"
-```
-
-**Run all verifications in parallel.**
-
-If any checked criterion fails:
-- Uncheck it in the spec (`- [x]` -> `- [ ]`)
-- Create a task to fix the regression:
-  ```
-  ralph task add '{"name": "Fix regression: <criterion>", "notes": "<DETAILED: what broke, file paths, approach>", "accept": "<measurable verification>"}'
-  ```
-
-### 4b: Check for uncovered criteria
-
-For any **unchecked** criteria (`- [ ]`) not covered by existing tasks:
-```
-ralph task add '{"name": "...", "notes": "<DETAILED: file paths + approach>", "accept": "..."}'
-```
-
-## Step 5: Final Decision
-
-If all tasks accepted and no new tasks created:
+All tasks accepted, no new tasks:
 ```
 [RALPH] SPEC_COMPLETE
 ```
@@ -103,4 +58,10 @@ Otherwise:
 [RALPH] SPEC_INCOMPLETE: <summary>
 ```
 
-## EXIT after completing
+---
+
+## Spec Content (Acceptance Criteria Reference)
+
+<spec>
+{{SPEC_CONTENT}}
+</spec>

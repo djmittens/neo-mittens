@@ -1,4 +1,7 @@
-"""INVESTIGATE stage for creating tasks from issues."""
+"""INVESTIGATE stage for creating tasks from issues.
+
+Uses context injection to pre-populate prompts with issue data.
+"""
 
 from pathlib import Path
 from typing import List
@@ -7,29 +10,33 @@ from ralph.config import GlobalConfig
 from ralph.state import RalphState
 from ralph.models import Task, Issue
 from ralph.stages.base import Stage, StageResult, StageOutcome
-from ralph.prompts import load_prompt
+from ralph.prompts import load_and_inject, build_investigate_context
 from ralph.opencode import spawn_opencode, parse_json_stream, extract_metrics
 from ralph.utils import gen_id
 
 
+def _load_spec_content(spec_name: str) -> str:
+    """Load spec file content, returning empty string if not found."""
+    if not spec_name:
+        return ""
+    spec_path = Path.cwd() / "ralph" / "specs" / spec_name
+    if spec_path.exists():
+        return spec_path.read_text()
+    return ""
+
+
 def _build_investigate_prompt(state: RalphState) -> str:
-    """Build the full prompt for investigation stage.
+    """Build the full prompt for investigation stage with injected context.
 
     Args:
         state: Current Ralph state with issues and spec context
 
     Returns:
-        Formatted prompt string with spec and issues
+        Formatted prompt string with pre-injected issues and spec
     """
-    prompt = load_prompt("investigate")
-    spec_contents = (
-        Path(f"app/ralph/specs/{state.spec}").read_text() if state.spec else ""
-    )
-    issue_lines = [
-        f"ID: {issue.id}\nDescription: {issue.desc}\nPriority: {issue.priority or 'unset'}"
-        for issue in state.issues
-    ]
-    return prompt.format(spec=spec_contents, issues="\n\n".join(issue_lines))
+    spec_content = _load_spec_content(state.spec or "")
+    context = build_investigate_context(state.issues, state.spec or "", spec_content)
+    return load_and_inject("investigate", context)
 
 
 def _parse_task_from_json(json_obj: dict, state: RalphState) -> Task | None:

@@ -1,15 +1,18 @@
 """Ralph task command.
 
 Task subcommands: add, done, accept, reject, delete, prioritize.
+Validation is enforced programmatically on task add.
 """
 
 import json
 import subprocess
+import sys
 from typing import Optional
 
 from ralph.models import Task, Tombstone
 from ralph.state import load_state, save_state
 from ralph.utils import Colors, gen_id
+from ralph.validation import validate_task, ValidationResult
 
 __all__ = ["cmd_task"]
 
@@ -54,8 +57,31 @@ def cmd_task(
     return 1
 
 
-def _task_add(state, plan_file, arg2: Optional[str]) -> int:
-    """Add a new task."""
+def _output_validation_error(result: ValidationResult) -> None:
+    """Output validation errors in JSON format for programmatic consumption."""
+    error_output = {
+        "error": "validation_failed",
+        "valid": False,
+        "errors": [
+            {"field": e.field, "code": e.code, "message": e.message}
+            for e in result.errors
+        ],
+    }
+    print(json.dumps(error_output), file=sys.stderr)
+
+
+def _task_add(state, plan_file, arg2: Optional[str], strict: bool = True) -> int:
+    """Add a new task with validation.
+    
+    Args:
+        state: Current Ralph state
+        plan_file: Path to plan.jsonl
+        arg2: Task JSON or simple description
+        strict: If True, enforce all validation rules
+        
+    Returns:
+        Exit code (0 for success, 1 for validation error)
+    """
     if not arg2:
         print(
             f"{Colors.RED}Usage: ralph task add '<json>' or ralph task add 'description'{Colors.NC}"
@@ -64,25 +90,70 @@ def _task_add(state, plan_file, arg2: Optional[str]) -> int:
 
     try:
         data = json.loads(arg2)
+        name = data.get("name", "")
+        notes = data.get("notes")
+        accept = data.get("accept")
+        
+        # Validate before creating task
+        result = validate_task(
+            name=name,
+            notes=notes,
+            accept=accept,
+            is_modification=True,  # Default assumption
+            strict=strict,
+        )
+        
+        if not result.valid:
+            _output_validation_error(result)
+            # Also print human-readable errors
+            print(f"{Colors.RED}Task validation failed:{Colors.NC}")
+            for err in result.errors:
+                print(f"  - [{err.code}] {err.field}: {err.message}")
+            return 1
+        
         task = Task(
             id=gen_id("t"),
-            name=data.get("name", ""),
+            name=name,
             spec=state.spec or "",
-            notes=data.get("notes"),
-            accept=data.get("accept"),
+            notes=notes,
+            accept=accept,
             deps=data.get("deps"),
             priority=data.get("priority"),
             parent=data.get("parent"),
             created_from=data.get("created_from"),
         )
     except json.JSONDecodeError:
+        # Simple string description - validate with relaxed rules
+        result = validate_task(
+            name=arg2,
+            notes=None,
+            accept=None,
+            strict=False,  # Relaxed for simple descriptions
+        )
+        
+        if not result.valid:
+            _output_validation_error(result)
+            print(f"{Colors.RED}Task validation failed:{Colors.NC}")
+            for err in result.errors:
+                print(f"  - [{err.code}] {err.field}: {err.message}")
+            return 1
+            
         task = Task(
             id=gen_id("t"),
             name=arg2,
             spec=state.spec or "",
         )
+    
     state.add_task(task)
     save_state(state, plan_file)
+    
+    # Output success in JSON format for programmatic consumption
+    success_output = {
+        "success": True,
+        "task_id": task.id,
+        "task_name": task.name,
+    }
+    print(json.dumps(success_output))
     print(f"{Colors.GREEN}Task added:{Colors.NC} {task.id} - {task.name}")
     return 0
 

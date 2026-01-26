@@ -1,4 +1,7 @@
-"""DECOMPOSE stage for breaking down complex tasks."""
+"""DECOMPOSE stage for breaking down complex tasks.
+
+Uses context injection to pre-populate prompts with killed task data.
+"""
 
 import logging
 import os
@@ -12,7 +15,7 @@ from ..config import GlobalConfig
 from ..state import RalphState
 from ..stages.base import Stage, StageResult, StageOutcome
 from ..opencode import spawn_opencode, parse_json_stream, extract_metrics
-from ..prompts import load_prompt, build_prompt_with_rules
+from ..prompts import load_prompt, load_and_inject, build_decompose_context, build_prompt_with_rules
 from ..models import Task
 from ..context import Metrics
 
@@ -80,11 +83,54 @@ def _validate_subtask(
     )
 
 
-def _build_decompose_prompt() -> Optional[str]:
-    """Build the decompose prompt with rules. Returns None on failure."""
-    prompt_text = load_prompt("decompose")
+def _load_spec_content(spec_name: str) -> str:
+    """Load spec file content, returning empty string if not found."""
+    if not spec_name:
+        return ""
+    spec_path = Path.cwd() / "ralph" / "specs" / spec_name
+    if spec_path.exists():
+        return spec_path.read_text()
+    return ""
+
+
+def _load_kill_log_preview(kill_log_path: Optional[str], head_lines: int = 50, tail_lines: int = 100) -> str:
+    """Load preview of kill log (head + tail to avoid huge context).
+    
+    Args:
+        kill_log_path: Path to the kill log file
+        head_lines: Number of lines from the beginning
+        tail_lines: Number of lines from the end
+        
+    Returns:
+        Preview string with head and tail of the log
+    """
+    if not kill_log_path:
+        return ""
+    log_path = Path(kill_log_path)
+    if not log_path.exists():
+        return f"[Kill log not found: {kill_log_path}]"
+    
     try:
-        return build_prompt_with_rules(prompt_text, Path.cwd() / "app/ralph/AGENTS.md")
+        lines = log_path.read_text().splitlines()
+        total = len(lines)
+        if total <= head_lines + tail_lines:
+            return "\n".join(lines)
+        
+        head = lines[:head_lines]
+        tail = lines[-tail_lines:]
+        return "\n".join(head) + f"\n\n... [{total - head_lines - tail_lines} lines omitted] ...\n\n" + "\n".join(tail)
+    except Exception as e:
+        return f"[Error reading kill log: {e}]"
+
+
+def _build_decompose_prompt(task: Task) -> Optional[str]:
+    """Build the decompose prompt with injected context. Returns None on failure."""
+    try:
+        spec_content = _load_spec_content(task.spec)
+        kill_log_preview = _load_kill_log_preview(task.kill_log)
+        context = build_decompose_context(task, kill_log_preview, spec_content)
+        prompt = load_and_inject("decompose", context)
+        return build_prompt_with_rules(prompt, Path.cwd() / "app/ralph/AGENTS.md")
     except Exception as e:
         logger.error(f"Failed to build prompt: {e}")
         return None
@@ -94,20 +140,11 @@ def _spawn_and_communicate(
     prompt: str, config: GlobalConfig, task: Task
 ) -> Optional[str]:
     """Spawn OpenCode and return output. Returns None on failure."""
-    decompose_context = {
-        "task": {
-            "id": task.id,
-            "name": task.name,
-            "notes": task.notes,
-            "kill_reason": getattr(task, "kill_reason", None),
-        }
-    }
     try:
         model = config.model if config.model else None
         process = spawn_opencode(
             prompt, cwd=Path.cwd(), timeout=config.timeout_ms, model=model
         )
-        os.environ["OPENCODE_CONTEXT"] = json.dumps(decompose_context)
     except Exception as e:
         logger.error(f"Failed to spawn OpenCode process: {e}")
         return None
@@ -158,7 +195,7 @@ def run(state: RalphState, config: GlobalConfig) -> StageResult:
 
     task = killed_tasks[0]
 
-    prompt = _build_decompose_prompt()
+    prompt = _build_decompose_prompt(task)
     if prompt is None:
         return StageResult(
             stage=Stage.DECOMPOSE,

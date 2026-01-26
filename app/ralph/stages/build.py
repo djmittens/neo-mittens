@@ -1,6 +1,7 @@
 """BUILD stage for implementing tasks.
 
 Run function refactored to under 50 lines with extracted helpers.
+Uses context injection to pre-populate prompts with task data.
 """
 
 import sys
@@ -15,7 +16,7 @@ from ralph.config import GlobalConfig
 from ralph.context import Metrics
 from ralph.models import Task
 from ralph.opencode import spawn_opencode, parse_json_stream, extract_metrics
-from ralph.prompts import load_prompt
+from ralph.prompts import load_and_inject, build_build_context
 from ralph.stages.base import Stage, StageOutcome, StageResult
 from ralph.state import RalphState
 from ralph.utils import gen_id
@@ -45,17 +46,23 @@ def _get_current_task(
     return current_task, None
 
 
+def _load_spec_content(spec_name: str) -> str:
+    """Load spec file content, returning empty string if not found."""
+    if not spec_name:
+        return ""
+    spec_path = Path.cwd() / "ralph" / "specs" / spec_name
+    if spec_path.exists():
+        return spec_path.read_text()
+    return ""
+
+
 def _build_prompt(task: Task) -> Tuple[Optional[str], Optional[str]]:
-    """Build the full prompt for the BUILD stage."""
+    """Build the full prompt for the BUILD stage with injected context."""
     try:
-        prompt = load_prompt("build")
-        prompt_context = f"""
-TASK DETAILS:
-- Name: {task.name}
-- Notes: {task.notes}
-- Acceptance Criteria: {task.accept or "No specific criteria provided"}
-"""
-        return prompt_context + prompt, None
+        spec_content = _load_spec_content(task.spec)
+        context = build_build_context(task, spec_content)
+        prompt = load_and_inject("build", context)
+        return prompt, None
     except Exception as e:
         return None, f"Failed to load build prompt: {str(e)}"
 

@@ -1,5 +1,7 @@
 """Context management and metrics tracking for Ralph."""
 
+import hashlib
+import time
 from dataclasses import dataclass, field
 from typing import Optional
 
@@ -21,9 +23,15 @@ class Metrics:
     successes: int = 0
     kills_timeout: int = 0
     kills_context: int = 0
+    kills_loop: int = 0  # New: killed due to loop detection
     started_at: Optional[str] = None
     last_kill_reason: str = ""
     last_kill_activity: str = ""
+
+    # Progress tracking
+    last_progress_time: float = 0.0  # Unix timestamp of last progress
+    tasks_completed: int = 0
+    commits_made: int = 0
 
     @property
     def tokens_used(self) -> int:
@@ -39,6 +47,59 @@ class Metrics:
     def iterations(self) -> int:
         """Alias for total_iterations."""
         return self.total_iterations
+
+    def record_progress(self) -> None:
+        """Record that progress was made (task completed, commit, etc.)."""
+        self.last_progress_time = time.time()
+
+    def seconds_since_progress(self) -> float:
+        """Return seconds since last progress, or 0 if never recorded."""
+        if self.last_progress_time <= 0:
+            return 0.0
+        return time.time() - self.last_progress_time
+
+
+class LoopDetector:
+    """Detects runaway loops by tracking repeated outputs."""
+
+    def __init__(self, threshold: int = 3):
+        """Initialize loop detector.
+
+        Args:
+            threshold: Number of identical outputs before triggering abort.
+        """
+        self.threshold = threshold
+        self.output_hashes: list[str] = []
+        self.consecutive_identical: int = 0
+        self.last_hash: str = ""
+
+    def check_output(self, output: str) -> bool:
+        """Check if output indicates a loop.
+
+        Args:
+            output: Stage output to check.
+
+        Returns:
+            True if loop detected (should abort), False otherwise.
+        """
+        # Hash the output for efficient comparison
+        output_hash = hashlib.md5(output.encode()).hexdigest()
+
+        if output_hash == self.last_hash:
+            self.consecutive_identical += 1
+        else:
+            self.consecutive_identical = 1
+            self.last_hash = output_hash
+
+        self.output_hashes.append(output_hash)
+
+        return self.consecutive_identical >= self.threshold
+
+    def reset(self) -> None:
+        """Reset the detector state."""
+        self.output_hashes.clear()
+        self.consecutive_identical = 0
+        self.last_hash = ""
 
 
 @dataclass
@@ -183,3 +244,97 @@ def context_pressure(metrics: Metrics, config) -> float:
     if context_limit <= 0:
         return 0.0
     return (metrics.tokens_used / context_limit) * 100
+
+
+@dataclass
+class SessionSummary:
+    """Summary of a Ralph session for logging/auditing."""
+
+    started_at: str
+    ended_at: str
+    duration_seconds: float
+    total_iterations: int
+    tasks_completed: int
+    commits_made: int
+    total_tokens_in: int
+    total_tokens_out: int
+    total_cost: float
+    failures: int
+    successes: int
+    kills_timeout: int
+    kills_context: int
+    kills_loop: int
+    exit_reason: str  # "complete", "max_iterations", "interrupted", "loop_detected", etc.
+    spec: str
+    profile: str
+
+    def to_dict(self) -> dict:
+        """Convert to dictionary for JSON serialization."""
+        return {
+            "started_at": self.started_at,
+            "ended_at": self.ended_at,
+            "duration_seconds": self.duration_seconds,
+            "total_iterations": self.total_iterations,
+            "tasks_completed": self.tasks_completed,
+            "commits_made": self.commits_made,
+            "tokens": {
+                "input": self.total_tokens_in,
+                "output": self.total_tokens_out,
+                "total": self.total_tokens_in + self.total_tokens_out,
+            },
+            "cost": self.total_cost,
+            "outcomes": {
+                "successes": self.successes,
+                "failures": self.failures,
+            },
+            "kills": {
+                "timeout": self.kills_timeout,
+                "context": self.kills_context,
+                "loop": self.kills_loop,
+            },
+            "exit_reason": self.exit_reason,
+            "spec": self.spec,
+            "profile": self.profile,
+        }
+
+    @classmethod
+    def from_metrics(
+        cls,
+        metrics: "Metrics",
+        exit_reason: str,
+        spec: str,
+        profile: str,
+        ended_at: str,
+    ) -> "SessionSummary":
+        """Create summary from metrics."""
+        started = metrics.started_at or ended_at
+        # Calculate duration if we have timestamps
+        duration = 0.0
+        try:
+            from datetime import datetime
+
+            start_dt = datetime.fromisoformat(started)
+            end_dt = datetime.fromisoformat(ended_at)
+            duration = (end_dt - start_dt).total_seconds()
+        except (ValueError, TypeError):
+            pass
+
+        return cls(
+            started_at=started,
+            ended_at=ended_at,
+            duration_seconds=duration,
+            total_iterations=metrics.total_iterations,
+            tasks_completed=metrics.tasks_completed,
+            commits_made=metrics.commits_made,
+            total_tokens_in=metrics.total_tokens_in,
+            total_tokens_out=metrics.total_tokens_out,
+            total_cost=metrics.total_cost,
+            failures=metrics.failures,
+            successes=metrics.successes,
+            kills_timeout=metrics.kills_timeout,
+            kills_context=metrics.kills_context,
+            kills_loop=metrics.kills_loop,
+            exit_reason=exit_reason,
+            spec=spec,
+            profile=profile,
+        )

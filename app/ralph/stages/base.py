@@ -1,12 +1,13 @@
 """Stage definitions and state machine for construct mode."""
 
+import time
 from dataclasses import dataclass
 from enum import Enum, auto
 from typing import Callable, Optional, TYPE_CHECKING
 
 if TYPE_CHECKING:
     from ralph.config import GlobalConfig
-    from ralph.context import Metrics
+    from ralph.context import Metrics, LoopDetector
     from ralph.state import RalphState
 
 
@@ -65,6 +66,7 @@ class ConstructStateMachine:
         ],
         load_state_fn: Callable[[], "RalphState"],
         save_state_fn: Callable[["RalphState"], None],
+        loop_detector: Optional["LoopDetector"] = None,
     ):
         """Initialize the state machine.
 
@@ -76,6 +78,7 @@ class ConstructStateMachine:
             run_stage_fn: Function to actually run a stage (injected for testability)
             load_state_fn: Function to load state (injected for testability)
             save_state_fn: Function to save state (injected for testability)
+            loop_detector: Optional loop detector for runaway prevention
         """
         self.config = config
         self.metrics = metrics
@@ -84,6 +87,8 @@ class ConstructStateMachine:
         self.run_stage = run_stage_fn
         self.load_state = load_state_fn
         self.save_state = save_state_fn
+        self.loop_detector = loop_detector
+        self._last_stage_output: str = ""
 
     def run_iteration(self, iteration: int) -> tuple[bool, bool]:
         """Run a single iteration of the construct loop.
@@ -107,6 +112,16 @@ class ConstructStateMachine:
 
         if state.stage == "COMPLETE":
             return False, True
+
+        # Check for progress stall
+        progress_interval = getattr(self.config, "progress_check_interval", 0)
+        if progress_interval > 0:
+            stall_time = self.metrics.seconds_since_progress()
+            if stall_time > progress_interval:
+                print(
+                    f"WARNING: No progress in {int(stall_time)}s "
+                    f"(threshold: {progress_interval}s)"
+                )
 
         # Dispatch based on explicit stage
         if state.stage == "DECOMPOSE":
@@ -251,7 +266,7 @@ class ConstructStateMachine:
 
     def _run_stage_with_state(self, stage: Stage, state: "RalphState") -> StageResult:
         """Run a stage and return the result."""
-        return self.run_stage(
+        result = self.run_stage(
             self.config,
             stage,
             state,
@@ -259,6 +274,27 @@ class ConstructStateMachine:
             self.stage_timeout_ms,
             self.context_limit,
         )
+
+        # Check for loop detection if enabled
+        if self.loop_detector and result.outcome == StageOutcome.SUCCESS:
+            # Use a simple representation of the result for loop detection
+            output_repr = f"{stage.name}:{result.exit_code}:{result.duration_seconds:.0f}"
+            if self.loop_detector.check_output(output_repr):
+                self.metrics.kills_loop += 1
+                return StageResult(
+                    stage=stage,
+                    outcome=StageOutcome.FAILURE,
+                    exit_code=-2,
+                    duration_seconds=result.duration_seconds,
+                    error="Loop detected: repeated identical stage outputs",
+                    kill_reason="loop_detected",
+                )
+
+        # Record progress on success
+        if result.outcome == StageOutcome.SUCCESS:
+            self.metrics.record_progress()
+
+        return result
 
     def _handle_task_failure(self, result: StageResult) -> None:
         """Handle a BUILD task failure by transitioning to DECOMPOSE."""

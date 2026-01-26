@@ -61,6 +61,16 @@ class GlobalConfig:
     verify_batch_size: int = 5  # Max tasks to verify in one batch
     investigate_batch_size: int = 5  # Max issues to investigate in one batch
 
+    # Loop detection - abort if stuck in repetitive patterns
+    loop_detection_threshold: int = 3  # Abort after N identical stage outputs
+    max_identical_tool_calls: int = 5  # Abort after N identical tool calls in a stage
+
+    # Progress tracking
+    progress_check_interval: int = 600  # Warn if no progress in N seconds (0 = disabled)
+
+    # Session logging
+    emit_session_summary: bool = True  # Write JSON summary at end of session
+
     # Git settings
     commit_prefix: str = "ralph:"
     recent_commits_display: int = 3
