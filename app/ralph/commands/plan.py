@@ -71,10 +71,10 @@ def _build_plan_prompt(
 
 
 def _run_opencode(config: GlobalConfig, prompt: str, cwd: Path) -> Tuple[Optional[str], Metrics]:
-    """Spawn OpenCode and get output with metrics.
+    """Spawn OpenCode and stream output in real-time.
 
-    OpenCode will run `ralph task add` commands that modify plan.jsonl directly.
-    We capture the output to extract metrics and check for completion signal.
+    OpenCode will run `ralph2 task add` commands that modify plan.jsonl directly.
+    We stream output to show progress, and capture it for metrics extraction.
 
     Args:
         config: Ralph configuration.
@@ -84,8 +84,13 @@ def _run_opencode(config: GlobalConfig, prompt: str, cwd: Path) -> Tuple[Optiona
     Returns:
         Tuple of (output string or None on failure, metrics).
     """
+    import json
+    import select
+    import sys
+    
     metrics = Metrics()
     start_time = time.time()
+    output_lines = []
     
     process = spawn_opencode(
         prompt=prompt,
@@ -95,8 +100,44 @@ def _run_opencode(config: GlobalConfig, prompt: str, cwd: Path) -> Tuple[Optiona
     )
     
     try:
-        output_bytes, _ = process.communicate(timeout=config.timeout_ms / 1000)
-        output = output_bytes.decode("utf-8")
+        # Stream output in real-time
+        while True:
+            # Check if process has finished
+            retcode = process.poll()
+            
+            # Read available output
+            if process.stdout:
+                ready, _, _ = select.select([process.stdout], [], [], 0.1)
+                if ready:
+                    line = process.stdout.readline()
+                    if line:
+                        line_str = line.decode("utf-8", errors="replace")
+                        output_lines.append(line_str)
+                        
+                        # Parse and display based on event type
+                        try:
+                            event = json.loads(line_str.strip())
+                            _display_event(event)
+                        except json.JSONDecodeError:
+                            # Not JSON, print raw
+                            print(line_str, end="", flush=True)
+            
+            # If process finished and no more output, break
+            if retcode is not None:
+                # Drain remaining output
+                if process.stdout:
+                    remaining = process.stdout.read()
+                    if remaining:
+                        for line in remaining.decode("utf-8", errors="replace").splitlines(keepends=True):
+                            output_lines.append(line)
+                            try:
+                                event = json.loads(line.strip())
+                                _display_event(event)
+                            except json.JSONDecodeError:
+                                print(line, end="", flush=True)
+                break
+        
+        output = "".join(output_lines)
         
         # Extract metrics from output
         try:
@@ -113,9 +154,72 @@ def _run_opencode(config: GlobalConfig, prompt: str, cwd: Path) -> Tuple[Optiona
         process.kill()
         print(f"{Colors.RED}OpenCode process timed out{Colors.NC}")
         return None, metrics
+    except KeyboardInterrupt:
+        process.kill()
+        print(f"\n{Colors.YELLOW}Interrupted.{Colors.NC}")
+        return None, metrics
     except Exception as e:
         print(f"{Colors.RED}Error during OpenCode execution: {e}{Colors.NC}")
         return None, metrics
+
+
+def _display_event(event: dict) -> None:
+    """Display an OpenCode JSON event in a human-readable format.
+    
+    Args:
+        event: Parsed JSON event from OpenCode.
+    """
+    import sys
+    
+    event_type = event.get("type", "")
+    
+    if event_type == "assistant":
+        # Assistant text output
+        content = event.get("content", "")
+        if content:
+            print(content, end="", flush=True)
+    
+    elif event_type == "text":
+        # Text chunk
+        part = event.get("part", {})
+        text = part.get("text", "")
+        if text:
+            print(text, end="", flush=True)
+    
+    elif event_type == "tool_use":
+        # Tool invocation
+        part = event.get("part", {})
+        tool = part.get("tool", "unknown")
+        state = part.get("state", {})
+        title = state.get("title", "")
+        
+        if title:
+            print(f"\n{Colors.DIM}[{tool}] {title}{Colors.NC}", flush=True)
+        else:
+            print(f"\n{Colors.DIM}[{tool}]{Colors.NC}", flush=True)
+    
+    elif event_type == "tool_result":
+        # Tool result - usually don't need to show
+        pass
+    
+    elif event_type == "step_finish":
+        # Step completed with metrics
+        part = event.get("part", {})
+        cost = part.get("cost", 0)
+        tokens = part.get("tokens", {})
+        input_tokens = tokens.get("input", 0)
+        output_tokens = tokens.get("output", 0)
+        cache = tokens.get("cache", {})
+        cache_read = cache.get("read", 0)
+        
+        print(f"\n{Colors.DIM}─ Cost: ${cost:.4f} | Tokens: {input_tokens + cache_read}in/{output_tokens}out{Colors.NC}", flush=True)
+    
+    elif event_type == "error":
+        # Error message
+        message = event.get("message", event.get("error", "Unknown error"))
+        print(f"\n{Colors.RED}Error: {message}{Colors.NC}", flush=True)
+    
+    # Other event types are silently ignored
 
 
 def _check_plan_complete(output_str: str) -> Tuple[bool, int]:

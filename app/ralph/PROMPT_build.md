@@ -42,6 +42,34 @@ For codebase research, spawn subagents:
 Task: "Find how X is implemented. Report: files, current behavior, changes needed for Y"
 ```
 
+### Running Tests
+
+**Always redirect test output to logs:**
+```bash
+mkdir -p build/logs
+make build > build/logs/build.log 2>&1 && make test > build/logs/test.log 2>&1
+echo "Exit code: $?"
+```
+
+**Only check exit code.** Do NOT read log files unless tests fail.
+If tests fail, read LAST 50 lines of `build/logs/test.log` to diagnose.
+
+### Timeout/Hang Failures - ESCALATE, DON'T RETRY
+
+If tests **timeout or hang** (no clear error, just stops):
+
+1. **Do NOT guess at fixes** - async bugs require execution traces
+2. **Capture with rr** (if available):
+   ```bash
+   timeout 120 rr record --chaos build/test_<name> 2>&1 || true
+   ```
+3. **Create issue and move on**:
+   ```
+   ralph2 issue add "Test <name> hangs. rr recording captured. Needs human debugging."
+   ```
+
+Signs to escalate: timeout with no error, intermittent failures, TSAN races.
+
 ### Completing the Task
 
 When implementation passes acceptance criteria:

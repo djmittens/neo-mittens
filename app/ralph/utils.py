@@ -57,9 +57,8 @@ def gen_id(prefix: str = "t") -> str:
 
     Format: {prefix}-{timestamp_base36}{random} (e.g., t-k5x9ab, i-k5x9cd)
 
-    The timestamp component (2 chars) provides uniqueness across time,
-    while the random suffix (4 chars) provides uniqueness within the same second.
-    This reduces collision probability when multiple Ralph instances run in parallel.
+    Uses microsecond-precision timestamp (4 chars) plus random suffix (2 chars)
+    to minimize collision probability even when generating many IDs quickly.
 
     Args:
         prefix: Single character prefix for the ID type ('t' for task, 'i' for issue)
@@ -69,13 +68,14 @@ def gen_id(prefix: str = "t") -> str:
     """
     chars = string.ascii_lowercase + string.digits
 
-    # Use last 2 chars of base36 timestamp for time-based uniqueness
-    timestamp_part = int(time.time()) % (36 * 36)  # 0-1295, fits in 2 base36 chars
+    # Use microseconds for better uniqueness in tight loops
+    # time.time() * 1000000 gives microseconds, mod 36^4 fits in 4 base36 chars
+    timestamp_part = int(time.time() * 1000000) % (36 ** 4)
     ts_chars = ""
-    for _ in range(2):
+    for _ in range(4):
         ts_chars = chars[timestamp_part % 36] + ts_chars
         timestamp_part //= 36
 
-    # Add 4 random chars
-    random_part = "".join(random.choice(chars) for _ in range(4))
+    # Add 2 random chars for extra uniqueness
+    random_part = "".join(random.choice(chars) for _ in range(2))
     return f"{prefix}-{ts_chars}{random_part}"

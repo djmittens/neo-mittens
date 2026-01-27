@@ -28,7 +28,7 @@ from ..git import (
     push_with_retry,
     sync_with_remote,
 )
-from ..opencode import spawn_opencode, extract_metrics
+from ..opencode import spawn_opencode, extract_metrics, stream_and_collect
 from ..prompts import (
     find_project_rules,
     build_prompt_with_rules,
@@ -183,34 +183,26 @@ def _make_result(
 
 
 def _execute_opencode(
-    config: GlobalConfig, prompt: str, repo_root: Path, stage_timeout_ms: int
+    config: GlobalConfig,
+    prompt: str,
+    repo_root: Path,
+    stage_timeout_ms: int,
+    print_output: bool = True,
 ) -> Tuple[int, str, bool, float, int]:
-    """Execute opencode and return (return_code, output, timed_out, cost, tokens).
+    """Execute opencode with real-time streaming output.
+    
+    Returns:
+        Tuple of (return_code, output, timed_out, cost, tokens).
     """
     model = config.model if hasattr(config, "model") else None
     proc = spawn_opencode(prompt, cwd=repo_root, timeout=stage_timeout_ms, model=model)
-    cost = 0.0
-    tokens = 0
     
-    try:
-        stdout_bytes, _ = proc.communicate(timeout=stage_timeout_ms // 1000)
-        stdout_output = (
-            stdout_bytes.decode("utf-8", errors="replace") if stdout_bytes else ""
-        )
-        
-        # Extract metrics from output
-        try:
-            metrics = extract_metrics(stdout_output)
-            cost = metrics.total_cost
-            tokens = metrics.tokens_used
-        except Exception:
-            pass
-        
-        return proc.returncode, stdout_output, False, cost, tokens
-    except subprocess.TimeoutExpired:
-        proc.kill()
-        proc.wait()
-        return -1, "", True, cost, tokens
+    timeout_seconds = stage_timeout_ms // 1000
+    return_code, stdout_output, timed_out, metrics = stream_and_collect(
+        proc, timeout_seconds, print_output=print_output
+    )
+    
+    return return_code, stdout_output, timed_out, metrics.total_cost, metrics.tokens_used
 
 
 def _run_stage(
@@ -239,7 +231,7 @@ def _run_stage(
 
     try:
         return_code, stdout_output, timed_out, cost, tokens = _execute_opencode(
-            config, prompt, repo_root, stage_timeout_ms
+            config, prompt, repo_root, stage_timeout_ms, print_output=print_output
         )
     except Exception as e:
         return _make_result(
@@ -261,11 +253,6 @@ def _run_stage(
             cost=cost,
             tokens_used=tokens,
         )
-
-    if print_output and stdout_output:
-        # Show last 20 lines of output
-        for line in stdout_output.split("\n")[-20:]:
-            print(f"  {line}")
 
     duration = time.time() - start_time
     if return_code == 0:

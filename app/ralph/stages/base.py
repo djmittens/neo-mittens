@@ -176,8 +176,16 @@ class ConstructStateMachine:
             batch_size = self.config.investigate_batch_size
             all_issue_ids = [i.id for i in state.issues]
 
-            # Process in batches
+            # Process in batches with safety limit
+            max_batch_iterations = len(all_issue_ids) + 10  # Allow some retries
+            batch_iteration = 0
             while True:
+                batch_iteration += 1
+                if batch_iteration > max_batch_iterations:
+                    # Safety: prevent infinite loops
+                    state._clear_batch_state()
+                    break
+
                 batch = state.get_next_batch(all_issue_ids, batch_size)
                 if not batch:
                     break
@@ -195,6 +203,9 @@ class ConstructStateMachine:
 
                 state.mark_batch_complete()
                 state = self.load_state()
+        else:
+            # No issues but stage is INVESTIGATE - clear any stale batch state
+            state._clear_batch_state()
 
         # INVESTIGATE -> BUILD
         state.transition_to_build()
@@ -231,7 +242,15 @@ class ConstructStateMachine:
         batch_size = self.config.verify_batch_size
         all_task_ids = [t.id for t in state.done]
 
+        # Safety limit to prevent infinite loops
+        max_batch_iterations = len(all_task_ids) + 10
+        batch_iteration = 0
         while True:
+            batch_iteration += 1
+            if batch_iteration > max_batch_iterations:
+                state._clear_batch_state()
+                return False
+
             batch = state.get_next_batch(all_task_ids, batch_size)
             if not batch:
                 return False

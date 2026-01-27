@@ -34,6 +34,31 @@ def _get_log_dir(spec: Optional[str], branch: str) -> str:
     return f"/tmp/ralph-logs/{repo_name}/{branch}/{spec_name}"
 
 
+def _is_ralph_running_in_cwd() -> bool:
+    """Check if Ralph (opencode) is running in the current directory."""
+    cwd = str(Path.cwd())
+    try:
+        result = subprocess.run(
+            ["pgrep", "-x", "opencode"],
+            capture_output=True,
+            text=True,
+        )
+        if result.returncode != 0 or not result.stdout.strip():
+            return False
+        
+        pids = result.stdout.strip().split("\n")
+        for pid in pids:
+            try:
+                proc_cwd = Path(f"/proc/{pid}/cwd").resolve()
+                if str(proc_cwd) == cwd:
+                    return True
+            except (OSError, PermissionError):
+                continue
+        return False
+    except Exception:
+        return False
+
+
 def _print_header() -> None:
     """Print status header."""
     print(f"{Colors.BLUE}{'=' * 60}{Colors.NC}")
@@ -50,7 +75,11 @@ def _print_overview(state, branch: str) -> None:
     print(f"  Spec:   {Colors.CYAN}{state.spec or 'Not set'}{Colors.NC}")
     print(f"  Logs:   {Colors.DIM}{_get_log_dir(state.spec, branch)}{Colors.NC}")
     print(f"  Stage:  {Colors.GREEN}{state.get_stage()}{Colors.NC}")
-    print(f"  Status: {Colors.BOLD}{Colors.YELLOW}Stopped{Colors.NC}")
+    
+    if _is_ralph_running_in_cwd():
+        print(f"  Status: {Colors.BOLD}{Colors.GREEN}Running{Colors.NC}")
+    else:
+        print(f"  Status: {Colors.BOLD}{Colors.YELLOW}Stopped{Colors.NC}")
     print()
 
 

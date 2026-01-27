@@ -30,19 +30,30 @@ def _get_current_branch() -> str:
         return "unknown"
 
 
-def _count_running_processes() -> int:
-    """Count running opencode processes."""
+def _count_running_processes_in_cwd() -> int:
+    """Count opencode processes running in the current directory."""
+    cwd = str(Path.cwd())
     try:
         result = subprocess.run(
             ["pgrep", "-x", "opencode"],
             capture_output=True,
             text=True,
         )
-        if result.returncode == 0:
-            return len(result.stdout.strip().split("\n"))
+        if result.returncode != 0 or not result.stdout.strip():
+            return 0
+        
+        count = 0
+        pids = result.stdout.strip().split("\n")
+        for pid in pids:
+            try:
+                proc_cwd = Path(f"/proc/{pid}/cwd").resolve()
+                if str(proc_cwd) == cwd:
+                    count += 1
+            except (OSError, PermissionError):
+                continue
+        return count
     except Exception:
-        pass
-    return 0
+        return 0
 
 
 def cmd_watch(config: dict) -> int:
@@ -79,12 +90,12 @@ def cmd_watch(config: dict) -> int:
         if last_mtime is None or current_mtime != last_mtime:
             last_mtime = current_mtime
             dashboard.ralph_state = load_state(plan_file)
-            dashboard.is_running = _count_running_processes() > 0
-            dashboard.running_count = _count_running_processes()
+            dashboard.is_running = _count_running_processes_in_cwd() > 0
+            dashboard.running_count = _count_running_processes_in_cwd()
             return [f"State refreshed at {time.strftime('%H:%M:%S')}"]
 
-        dashboard.is_running = _count_running_processes() > 0
-        dashboard.running_count = _count_running_processes()
+        dashboard.is_running = _count_running_processes_in_cwd() > 0
+        dashboard.running_count = _count_running_processes_in_cwd()
         return []
 
     def on_quit():

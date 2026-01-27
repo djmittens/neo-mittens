@@ -65,6 +65,32 @@ Before marking done, verify the task's acceptance criteria:
 2. Run any tests specified in the criteria
 3. Do NOT re-read the full spec - that's VERIFY stage's job
 
+**When running tests, redirect output to logs:**
+```bash
+mkdir -p build/logs
+make build > build/logs/build.log 2>&1 && make test > build/logs/test.log 2>&1
+echo "Exit code: $?"
+```
+
+**Only check exit code.** Do NOT read log files unless tests fail.
+If tests fail, read LAST 50 lines of `build/logs/test.log` to diagnose.
+
+### Timeout/Hang Failures - ESCALATE, DON'T RETRY
+
+If tests **timeout or hang** (no clear error, just stops):
+
+1. **Do NOT guess at fixes** - async bugs require execution traces
+2. **Capture with rr** (if available):
+   ```bash
+   timeout 120 rr record --chaos build/test_<name> 2>&1 || true
+   ```
+3. **Create issue and move on**:
+   ```
+   ralph issue add "Test <name> hangs. rr recording captured. Needs human debugging."
+   ```
+
+Signs to escalate: timeout with no error, intermittent failures, TSAN races.
+
 If acceptance criteria pass, mark done. VERIFY stage will do the thorough spec check later.
 
 ## Step 6: Complete
