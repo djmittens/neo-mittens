@@ -1,4 +1,23 @@
 import { tool } from "@opencode-ai/plugin"
+import { readFileSync, existsSync } from "fs"
+import { homedir } from "os"
+import { join } from "path"
+
+/**
+ * Get quota project from ADC credentials file
+ */
+function getQuotaProject(): string | null {
+  const adcPath = join(homedir(), ".config", "gcloud", "application_default_credentials.json")
+  if (!existsSync(adcPath)) {
+    return null
+  }
+  try {
+    const adc = JSON.parse(readFileSync(adcPath, "utf-8"))
+    return adc.quota_project_id || null
+  } catch {
+    return null
+  }
+}
 
 /**
  * Helper to get access token from gcloud ADC
@@ -22,11 +41,21 @@ async function getAccessToken(): Promise<string> {
  */
 async function sheetsApi(endpoint: string, options: RequestInit = {}): Promise<any> {
   const token = await getAccessToken()
+  const quotaProject = getQuotaProject()
+  
+  const headers: Record<string, string> = {
+    Authorization: `Bearer ${token}`,
+    "Content-Type": "application/json",
+  }
+  
+  if (quotaProject) {
+    headers["x-goog-user-project"] = quotaProject
+  }
+  
   const response = await fetch(`https://sheets.googleapis.com${endpoint}`, {
     ...options,
     headers: {
-      Authorization: `Bearer ${token}`,
-      "Content-Type": "application/json",
+      ...headers,
       ...options.headers,
     },
   })

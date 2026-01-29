@@ -411,6 +411,26 @@ require("lazy").setup({
     "juacker/git-link.nvim",
     config = function()
       require("git-link").setup({
+        url_rules = {
+          -- Override to use current branch (HEAD) instead of upstream
+          {
+            pattern = "^https?://([^/]+)/(.+)$",
+            replace = "https://%1/%2",
+            format_url = function(base_url, params)
+              -- Use current branch instead of upstream
+              local branch = vim.fn.trim(vim.fn.system("git rev-parse --abbrev-ref HEAD"))
+              if branch == "" or branch == "HEAD" then
+                branch = params.branch -- fallback to plugin's branch
+              end
+              local single_line_url =
+                string.format("%s/blob/%s/%s#L%d", base_url, branch, params.file_path, params.start_line)
+              if params.start_line == params.end_line then
+                return single_line_url
+              end
+              return string.format("%s-L%d", single_line_url, params.end_line)
+            end,
+          },
+        },
       })
 
       vim.keymap.set({ 'n', 'v' }, "<leader>gy", function() require("git-link").copy_line_url() end)

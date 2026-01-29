@@ -18,17 +18,40 @@ async function getAccessToken(): Promise<string> {
 }
 
 /**
+ * Helper to get quota project from ADC credentials file
+ */
+async function getQuotaProject(): Promise<string | null> {
+  try {
+    const homeDir = process.env.HOME || process.env.USERPROFILE || ""
+    const adcPath = `${homeDir}/.config/gcloud/application_default_credentials.json`
+    const file = Bun.file(adcPath)
+    const content = await file.json()
+    return content.quota_project_id || null
+  } catch {
+    return null
+  }
+}
+
+/**
  * Make authenticated request to Google API
  */
 async function googleApi(endpoint: string, options: RequestInit = {}): Promise<any> {
   const token = await getAccessToken()
+  const quotaProject = await getQuotaProject()
+  
+  const headers: Record<string, string> = {
+    Authorization: `Bearer ${token}`,
+    "Content-Type": "application/json",
+    ...options.headers as Record<string, string>,
+  }
+  
+  if (quotaProject) {
+    headers["x-goog-user-project"] = quotaProject
+  }
+  
   const response = await fetch(`https://www.googleapis.com${endpoint}`, {
     ...options,
-    headers: {
-      Authorization: `Bearer ${token}`,
-      "Content-Type": "application/json",
-      ...options.headers,
-    },
+    headers,
   })
   if (!response.ok) {
     const error = await response.text()
