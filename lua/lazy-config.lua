@@ -69,7 +69,7 @@ require("lazy").setup({
   },
   { 'saadparwaiz1/cmp_luasnip', },
   { 'scalameta/nvim-metals',           dependencies = { 'nvim-lua/plenary.nvim' }, main = 'neo-mittens.plugins.metals',     config = true },
-  { "nvim-treesitter/nvim-treesitter", build = ":TSUpdate",                        main = 'neo-mittens.plugins.treesitter', config = true },
+  { "nvim-treesitter/nvim-treesitter", build = ":TSUpdate", config = function() require('neo-mittens.plugins.treesitter').setup() end },
   {
     "nvim-treesitter/nvim-treesitter-context",
     dependencies = { 'nvim-treesitter/nvim-treesitter' },

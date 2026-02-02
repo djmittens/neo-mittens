@@ -1,0 +1,131 @@
+#!/usr/bin/env bash
+# ssh-themed: SSH wrapper that changes terminal theme based on destination host
+# Works with both kitty (direct terminals) and tmux panes
+#
+# Usage: ssh-themed [ssh-args] hostname
+# Or alias ssh='ssh-themed' in your shell config
+
+set -euo pipefail
+
+# Host-to-theme mapping
+# Add your hosts here: "hostname:theme-name"
+declare -A HOST_THEMES=(
+    ["obelisk"]="obelisk"
+    ["obelisk.local"]="obelisk"
+    # Add more hosts as needed:
+    # ["production-server"]="danger"
+    # ["staging"]="warning"
+)
+
+# Default theme for unknown hosts (falls back to local on disconnect)
+DEFAULT_REMOTE_THEME="obelisk"
+LOCAL_THEME="local"
+
+KITTY_THEMES_DIR="${HOME}/.config/kitty/themes"
+TMUX_THEMES_DIR="${HOME}/.config/tmux/themes"
+
+# Extract hostname from SSH args (handles user@host and just host)
+get_hostname() {
+    local arg
+    for arg in "$@"; do
+        # Skip options and their arguments
+        case "$arg" in
+            -*)
+                continue
+                ;;
+            *)
+                # First non-option is the destination
+                # Handle user@host format
+                if [[ "$arg" == *@* ]]; then
+                    echo "${arg#*@}"
+                else
+                    echo "$arg"
+                fi
+                return
+                ;;
+        esac
+    done
+}
+
+# Get theme for a hostname
+get_theme_for_host() {
+    local host="$1"
+    local theme="${HOST_THEMES[$host]:-}"
+    
+    # Try without domain suffix
+    if [[ -z "$theme" && "$host" == *.* ]]; then
+        local short_host="${host%%.*}"
+        theme="${HOST_THEMES[$short_host]:-}"
+    fi
+    
+    echo "${theme:-$DEFAULT_REMOTE_THEME}"
+}
+
+# Apply kitty theme (works for current window/tab)
+apply_kitty_theme() {
+    local theme="$1"
+    local theme_file="${KITTY_THEMES_DIR}/${theme}.conf"
+    
+    if [[ -f "$theme_file" ]] && [[ -n "${KITTY_WINDOW_ID:-}" ]]; then
+        kitty @ --to unix:/tmp/kitty-${USER} set-colors --match "id:${KITTY_WINDOW_ID}" "$theme_file" 2>/dev/null || true
+    fi
+}
+
+# Apply tmux pane theme
+apply_tmux_theme() {
+    local theme="$1"
+    
+    if [[ -n "${TMUX:-}" ]]; then
+        local pane_id
+        pane_id=$(tmux display-message -p '#{pane_id}')
+        
+        # Source theme-specific tmux config
+        local theme_file="${TMUX_THEMES_DIR}/${theme}.tmux"
+        if [[ -f "$theme_file" ]]; then
+            tmux source-file "$theme_file" 2>/dev/null || true
+        fi
+        
+        # Set pane border style based on theme
+        case "$theme" in
+            obelisk)
+                tmux select-pane -t "$pane_id" -P 'bg=#0D0A0B'
+                tmux set-option -p pane-border-style 'fg=#D64933'
+                tmux set-option -p pane-active-border-style 'fg=#FF6B35'
+                ;;
+            local|*)
+                tmux select-pane -t "$pane_id" -P 'bg=default'
+                tmux set-option -p pane-border-style 'fg=#6C7086'
+                tmux set-option -p pane-active-border-style 'fg=#B4BEFE'
+                ;;
+        esac
+    fi
+}
+
+# Main
+main() {
+    if [[ $# -eq 0 ]]; then
+        echo "Usage: ssh-themed [ssh-args] hostname" >&2
+        exit 1
+    fi
+    
+    local hostname
+    hostname=$(get_hostname "$@")
+    local theme
+    theme=$(get_theme_for_host "$hostname")
+    
+    # Apply theme before connecting
+    apply_kitty_theme "$theme"
+    apply_tmux_theme "$theme"
+    
+    # Run SSH
+    /usr/bin/ssh "$@"
+    local exit_code=$?
+    
+    # Restore local theme after disconnect
+    apply_kitty_theme "$LOCAL_THEME"
+    apply_tmux_theme "$LOCAL_THEME"
+    
+    exit $exit_code
+}
+
+main "$@"

@@ -321,6 +321,40 @@ ${end}"
   fi
 }
 
+install_ssh_themed_alias() {
+  local zshrc_file="$HOME/.zshrc"
+  local ssh_themed="$SCRIPT_DIR/powerplant/ssh-themed"
+
+  ensure_dir "$(dirname -- "$zshrc_file")"
+
+  local begin='# >>> neo-mittens ssh-themed >>>'
+  local end='# <<< neo-mittens ssh-themed <<<'
+  local block
+  block="${begin}
+# Use ssh-themed wrapper for automatic per-host terminal theming
+if [ -x \"${ssh_themed}\" ]; then
+  alias ssh='${ssh_themed}'
+fi
+${end}"
+
+  if [ -f "$zshrc_file" ] && grep -Fq "$begin" "$zshrc_file"; then
+    # Replace existing managed block
+    tmp="$(mktemp)"
+    awk -v b="$begin" -v e="$end" '
+      BEGIN{inb=0}
+      $0==b {inb=1; next}
+      $0==e {inb=0; next}
+      inb==0 {print}
+    ' "$zshrc_file" >"$tmp"
+    printf "\n%s\n" "$block" >>"$tmp"
+    cat "$tmp" > "$zshrc_file"
+    echo "UPDATE: Managed ssh-themed alias in $zshrc_file"
+  else
+    printf "\n%s\n" "$block" >>"$zshrc_file"
+    echo "ADD: Managed ssh-themed alias to $zshrc_file"
+  fi
+}
+
 # 1) Ensure config directories exist
 ensure_dir "$HOME/.config"
 ensure_dir "$NVIM_LUA_DIR"
@@ -347,6 +381,9 @@ disable_omz_auto_title
 # 6) Add tmux pane title block to ~/.zshrc
 install_zsh_pane_title_block
 
+# 6b) Add ssh-themed alias for automatic terminal theming on SSH
+install_ssh_themed_alias
+
 # 7) Link Hyprland and Rofi configs
 link_symlink "$SCRIPT_DIR/hypr" "$HOME/.config/hypr"
 link_symlink "$SCRIPT_DIR/rofi" "$HOME/.config/rofi"
@@ -364,6 +401,9 @@ link_symlink "$SCRIPT_DIR/waybar" "$HOME/.config/waybar"
 # 10) Link tmux configs (if present in repo)
 link_symlink "$SCRIPT_DIR/tmux/config" "$HOME/.config/tmux"
 link_symlink "$SCRIPT_DIR/tmux/tmux.conf" "$HOME/.tmux.conf"
+
+# 10b) Link kitty config (if present in repo)
+link_symlink "$SCRIPT_DIR/kitty" "$HOME/.config/kitty"
 
 # 11) Ensure TPM + plugins (Catppuccin via TPM in tmux.conf)
 ensure_tpm
