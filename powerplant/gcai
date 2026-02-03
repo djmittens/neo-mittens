@@ -71,14 +71,31 @@ PROMPT="Write a git commit message for these changes.
 STRICT FORMAT (follow exactly):
 <subject line: max 50 chars, type(scope): description>
 
-<body: 2-4 lines explaining the changes, each line max 72 chars>
+<body: markdown-formatted, clear and easy to read for humans>
+
+The body should:
+- Use markdown formatting (bullet points, bold text, code blocks, etc.)
+- Be well-structured with clear sections if needed
+- Include specific details about WHAT changed and WHY
+- Highlight key changes with bullet points or numbered lists
+- Use **bold** for emphasis on important changes
+- Keep lines under 72 characters for readability
+- Be informative and descriptive, not generic
 
 Example:
 feat(hooks): add commit message generation
 
-Add prepare-commit-msg hook that uses OpenCode to generate
-commit messages automatically. Integrates with bootstrap.sh
-for global installation.
+Implemented AI-powered commit message generation:
+
+**Key Changes:**
+- Added \`prepare-commit-msg\` hook that uses OpenCode
+- Integrated with \`bootstrap.sh\` for global installation
+- Automatically generates context-aware commit messages
+
+**Technical Details:**
+- Hook triggers before commit editor opens
+- Falls back gracefully if OpenCode unavailable
+- Preserves user's ability to edit/reject messages
 
 NOW GENERATE FOR THESE CHANGES:
 
