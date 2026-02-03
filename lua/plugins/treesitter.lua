@@ -1,26 +1,25 @@
 local M = {}
 
-function M.setup()
-  local configs = require('nvim-treesitter.configs')
-  configs.setup({
-    ensure_installed = { 'c', 'cpp', 'python', 'lua', 'vim', 'vimdoc', 'query', 'javascript', 'html' },
-    sync_install = false,
-    highlight = { enable = true, additional_vim_regex_highlighting = false },
-    indent = { enable = true, disable = { 'yaml' } },
-    incremental_selection = {
-      enable = true,
-      keymaps = { init_selection = 'vn', scope_incremental = 'H', node_incremental = 'K', node_decremental = 'J' },
-    },
-  })
+-- Languages to install and enable treesitter for
+local languages = { 'c', 'cpp', 'python', 'lua', 'vim', 'vimdoc', 'query', 'javascript', 'html', 'markdown', 'markdown_inline' }
 
-  require('nvim-treesitter.parsers').get_parser_configs().stacktrace = {
-    install_info = {
-      url = 'https://github.com/Tudyx/tree-sitter-log/',
-      files = { 'src/parser.c' },
-      branch = 'main',
-    },
-    filetype = 'log',
-  }
+function M.setup()
+  local treesitter = require('nvim-treesitter')
+  treesitter.setup()
+
+  -- Install parsers (async, won't block startup)
+  treesitter.install(languages)
+
+  -- Enable treesitter features via FileType autocmd (new API)
+  vim.api.nvim_create_autocmd('FileType', {
+    pattern = languages,
+    callback = function()
+      -- Syntax highlighting (built-in Neovim)
+      vim.treesitter.start()
+      -- Indentation (nvim-treesitter)
+      vim.bo.indentexpr = "v:lua.require'nvim-treesitter'.indentexpr()"
+    end,
+  })
 end
 
 return M
