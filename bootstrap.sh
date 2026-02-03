@@ -181,6 +181,13 @@ resolve_tmux_conf_path() {
 ensure_tmux_tpm_block() {
   local conf
   conf="$(resolve_tmux_conf_path)"
+  
+  # Skip if TPM is already configured (with or without our managed block)
+  if [ -f "$conf" ] && grep -q "run.*tpm/tpm" "$conf" && ! grep -Fq "# >>> neo-mittens tpm >>>" "$conf"; then
+    echo "OK: TPM already configured in $conf"
+    return 0
+  fi
+
   local begin='# >>> neo-mittens tpm >>>'
   local end='# <<< neo-mittens tpm <<<'
   local block
