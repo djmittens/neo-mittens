@@ -2,7 +2,7 @@
 
 # Get short hostname
 _neo_mittens_short_hostname() {
-    /usr/bin/hostname -s 2>/dev/null || /usr/bin/hostname | cut -d. -f1
+    uname -n | cut -d. -f1
 }
 
 # Check if we're on a remote host (via SSH)
