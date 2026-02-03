@@ -8,11 +8,10 @@ function M.setup()
 
   -- New API (nvim-treesitter main branch, requires Neovim 0.11+)
   if type(treesitter.install) == 'function' then
-    treesitter.setup()
-    -- Install parsers (async, won't block startup)
+    -- install() is a no-op if parsers are already installed
     treesitter.install(languages)
 
-    -- Enable treesitter features via FileType autocmd (new API)
+    -- Enable treesitter features via FileType autocmd
     vim.api.nvim_create_autocmd('FileType', {
       pattern = languages,
       callback = function()
@@ -22,8 +21,7 @@ function M.setup()
     })
   else
     -- Old API (nvim-treesitter master branch)
-    local configs = require('nvim-treesitter.configs')
-    configs.setup({
+    require('nvim-treesitter.configs').setup({
       ensure_installed = languages,
       highlight = { enable = true },
       indent = { enable = true },

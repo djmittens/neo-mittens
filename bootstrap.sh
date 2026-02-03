@@ -575,6 +575,46 @@ install_mypy() {
 
 install_mypy
 
+# 17c) Install tree-sitter-cli for nvim-treesitter (required for new API)
+install_tree_sitter_cli() {
+  if command -v tree-sitter >/dev/null 2>&1; then
+    echo "OK: tree-sitter-cli already installed"
+    return 0
+  fi
+
+  # Try package managers (failures are non-fatal)
+  if command -v brew >/dev/null 2>&1; then
+    echo "Installing tree-sitter via brew..."
+    if brew install tree-sitter 2>/dev/null; then
+      echo "OK: tree-sitter installed via brew"
+      return 0
+    fi
+  fi
+
+  if command -v pacman >/dev/null 2>&1; then
+    echo "Installing tree-sitter-cli via pacman..."
+    if sudo pacman -S tree-sitter-cli; then
+      echo "OK: tree-sitter installed via pacman"
+      return 0
+    fi
+  fi
+
+  # Fallback hints (not an error, just guidance)
+  echo "HINT: Install tree-sitter-cli for nvim-treesitter parser compilation:"
+  if command -v pacman >/dev/null 2>&1; then
+    echo "  sudo pacman -S tree-sitter-cli"
+  elif command -v brew >/dev/null 2>&1; then
+    echo "  brew install tree-sitter"
+  elif command -v cargo >/dev/null 2>&1; then
+    echo "  cargo install tree-sitter-cli"
+  elif command -v npm >/dev/null 2>&1; then
+    echo "  npm install -g tree-sitter-cli"
+  fi
+  return 0  # Always succeed - this is optional
+}
+
+install_tree_sitter_cli
+
 # 18) Install global OpenCode tools (to ~/.config/opencode/tools/)
 OPENCODE_CONFIG_DIR="$HOME/.config/opencode"
 OPENCODE_TOOLS_DIR="$OPENCODE_CONFIG_DIR/tools"
