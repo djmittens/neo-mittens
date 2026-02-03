@@ -8,7 +8,8 @@ function M.setup()
   treesitter.setup()
 
   -- Install parsers (async, won't block startup)
-  treesitter.install(languages)
+  local install = require('nvim-treesitter.install')
+  install.ensure_installed(languages)
 
   -- Enable treesitter features via FileType autocmd (new API)
   vim.api.nvim_create_autocmd('FileType', {
