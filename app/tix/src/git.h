@@ -21,5 +21,8 @@ tix_err_t tix_git_log_file(const char *file, tix_git_log_entry_t *entries,
 
 int tix_git_run_cmd(const char *cmd, char *out, sz out_len);
 
+/* Get the current git user.name config value */
+tix_err_t tix_git_user_name(char *out, sz out_len);
+
 /* Check if a string is safe to embed in a shell command (no metacharacters) */
 int tix_git_is_shell_safe(const char *s);

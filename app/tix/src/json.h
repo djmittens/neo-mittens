@@ -25,6 +25,7 @@ typedef struct {
   tix_json_type_e type;
   char str_val[TIX_MAX_DESC_LEN];
   i64 num_val;
+  double dbl_val;  /* populated for NUMBER type alongside num_val */
   int bool_val;
   /* for arrays of strings */
   char arr_vals[TIX_JSON_MAX_ARRLEN][TIX_MAX_ID_LEN];
@@ -42,6 +43,8 @@ tix_err_t tix_json_parse_line(const char *line, tix_json_obj_t *obj);
 
 const char *tix_json_get_str(const tix_json_obj_t *obj, const char *key);
 i64 tix_json_get_num(const tix_json_obj_t *obj, const char *key, i64 def);
+double tix_json_get_double(const tix_json_obj_t *obj, const char *key,
+                           double def);
 int tix_json_get_bool(const tix_json_obj_t *obj, const char *key, int def);
 
 int tix_json_has_key(const tix_json_obj_t *obj, const char *key);

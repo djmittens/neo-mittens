@@ -205,6 +205,22 @@ class Tix:
         result = self._run("task", "delete", task_id)
         return result.data
 
+    def task_update(self, task_id: str, fields: dict) -> dict:
+        """Update fields on an existing ticket.
+
+        Used to attach telemetry data (cost, tokens, model, etc.) to a
+        ticket after the agent stage completes.
+
+        Args:
+            task_id: Task ID to update.
+            fields: Dict of fields to merge (e.g. cost, tokens_in, model).
+
+        Returns:
+            Dict with id and status.
+        """
+        result = self._run("task", "update", task_id, json.dumps(fields))
+        return result.data
+
     def task_prioritize(self, task_id: str, priority: str) -> dict:
         """Change task priority.
 

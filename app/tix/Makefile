@@ -58,6 +58,7 @@ define run_tests
 	$(1)/test_json
 	$(1)/test_error_paths
 	$(1)/test_sync
+	$(1)/test_new_fields
 	@echo "=== All tix tests passed ($(1)) ==="
 endef
 

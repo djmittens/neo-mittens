@@ -175,7 +175,10 @@ def _reconcile_stage(
         ReconcileResult summarizing what was done.
     """
     if stage == Stage.BUILD:
-        return reconcile_build(tix, agent_output, meta.get("task_id", ""))
+        return reconcile_build(
+            tix, agent_output, meta.get("task_id", ""),
+            stage_metrics=meta.get("stage_metrics"),
+        )
     elif stage == Stage.VERIFY:
         return reconcile_verify(tix, agent_output)
     elif stage == Stage.INVESTIGATE:
@@ -231,11 +234,12 @@ def _execute_opencode(
     repo_root: Path,
     stage_timeout_ms: int,
     print_output: bool = True,
-) -> Tuple[int, str, bool, float, int]:
+) -> Tuple[int, str, bool, float, int, int, int]:
     """Execute opencode with real-time streaming output.
     
     Returns:
-        Tuple of (return_code, output, timed_out, cost, tokens).
+        Tuple of (return_code, output, timed_out, cost, tokens_in,
+                  tokens_out, iterations).
     """
     model = config.model if hasattr(config, "model") else None
     proc = spawn_opencode(prompt, cwd=repo_root, timeout=stage_timeout_ms, model=model)
@@ -245,7 +249,9 @@ def _execute_opencode(
         proc, timeout_seconds, print_output=print_output
     )
     
-    return return_code, stdout_output, timed_out, metrics.total_cost, metrics.tokens_used
+    return (return_code, stdout_output, timed_out, metrics.total_cost,
+            metrics.total_tokens_in, metrics.total_tokens_out,
+            metrics.total_iterations)
 
 
 def _run_stage(
@@ -275,7 +281,8 @@ def _run_stage(
         )
 
     try:
-        return_code, stdout_output, timed_out, cost, tokens = _execute_opencode(
+        (return_code, stdout_output, timed_out, cost,
+         tokens_in, tokens_out, stage_iters) = _execute_opencode(
             config, prompt, repo_root, stage_timeout_ms,
             print_output=print_output,
         )
@@ -285,8 +292,10 @@ def _run_stage(
             time.time() - start_time, error=str(e),
         )
 
+    tokens = tokens_in + tokens_out
     metrics.total_cost += cost
-    metrics.total_tokens_in += tokens
+    metrics.total_tokens_in += tokens_in
+    metrics.total_tokens_out += tokens_out
 
     if timed_out:
         metrics.kills_timeout += 1
@@ -297,6 +306,16 @@ def _run_stage(
             kill_reason="timeout",
             cost=cost, tokens_used=tokens,
         )
+
+    # Build per-task telemetry for reconciliation
+    stage_metrics = {
+        "cost": round(cost, 6),
+        "tokens_in": tokens_in,
+        "tokens_out": tokens_out,
+        "iterations": stage_iters,
+        "model": config.model or "",
+    }
+    meta["stage_metrics"] = stage_metrics
 
     # Reconcile agent output through tix
     reconcile_result = _reconcile_stage(stage, tix, stdout_output, meta)

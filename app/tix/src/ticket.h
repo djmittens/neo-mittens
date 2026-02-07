@@ -45,6 +45,21 @@ typedef struct {
   char supersedes_reason[TIX_MAX_KEYWORD_LEN];
   i64 created_at;
   i64 updated_at;
+
+  /* identity & attribution */
+  char author[TIX_MAX_NAME_LEN];
+
+  /* completion timing (ISO 8601 with timezone, e.g. "2026-02-07T14:30:00-08:00") */
+  char completed_at[64];
+
+  /* agent telemetry (populated by orchestrator at task completion) */
+  double cost;            /* total dollar cost, 0.0 = not set */
+  i64 tokens_in;          /* total input tokens */
+  i64 tokens_out;         /* total output tokens */
+  i32 iterations;         /* construct loop iterations */
+  char model[TIX_MAX_NAME_LEN]; /* model used, e.g. "claude-sonnet-4-20250514" */
+  i32 retries;            /* retries after failure before success */
+  i32 kill_count;         /* times iteration was killed before success */
 } tix_ticket_t;
 
 typedef struct {
@@ -68,6 +83,10 @@ void tix_ticket_init(tix_ticket_t *t);
 tix_err_t tix_ticket_set_name(tix_ticket_t *t, const char *name);
 tix_err_t tix_ticket_set_spec(tix_ticket_t *t, const char *spec);
 tix_err_t tix_ticket_add_dep(tix_ticket_t *t, const char *dep_id);
+
+/* Write current time as ISO 8601 with timezone offset (e.g. "2026-02-07T14:30:00-08:00").
+   Buffer must be at least 32 bytes. */
+tix_err_t tix_timestamp_iso8601(char *out, sz out_len);
 
 /* validation helpers (shared by cmd_task, batch, validate) */
 int tix_is_valid_ticket_id(const char *id);

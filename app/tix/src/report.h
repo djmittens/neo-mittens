@@ -4,6 +4,8 @@
 #include "common.h"
 #include "db.h"
 
+/* --- Progress report (existing) --- */
+
 typedef struct {
   u32 total_tasks;
   u32 pending_tasks;
@@ -19,3 +21,67 @@ typedef struct {
 
 tix_err_t tix_report_generate(tix_db_t *db, tix_report_t *report);
 tix_err_t tix_report_print(const tix_report_t *report, char *buf, sz buf_len);
+
+/* --- Velocity report --- */
+
+typedef struct {
+  u32 completed;           /* done + accepted tasks with telemetry */
+  double total_cost;       /* sum of cost */
+  double avg_cost;         /* average cost per task */
+  i64 total_tokens_in;     /* sum tokens_in */
+  i64 total_tokens_out;    /* sum tokens_out */
+  double avg_cycle_secs;   /* average (updated_at - created_at) */
+  double avg_iterations;   /* average iterations per task */
+  u32 total_retries;       /* sum retries */
+  u32 total_kills;         /* sum kill_count */
+} tix_velocity_report_t;
+
+tix_err_t tix_report_velocity(tix_db_t *db, tix_velocity_report_t *report);
+tix_err_t tix_report_velocity_print(const tix_velocity_report_t *r,
+                                    char *buf, sz buf_len);
+
+/* --- Actors (per-author) report --- */
+
+#define TIX_MAX_REPORT_ACTORS 64
+
+typedef struct {
+  char author[TIX_MAX_NAME_LEN];
+  u32 total;               /* tasks created */
+  u32 completed;           /* done + accepted */
+  u32 pending;
+  double total_cost;
+  double avg_cost;
+  double avg_iterations;
+} tix_actor_entry_t;
+
+typedef struct {
+  tix_actor_entry_t actors[TIX_MAX_REPORT_ACTORS];
+  u32 count;
+} tix_actors_report_t;
+
+tix_err_t tix_report_actors(tix_db_t *db, tix_actors_report_t *report);
+tix_err_t tix_report_actors_print(const tix_actors_report_t *r,
+                                  char *buf, sz buf_len);
+
+/* --- Models (per-model) report --- */
+
+#define TIX_MAX_REPORT_MODELS 32
+
+typedef struct {
+  char model[TIX_MAX_NAME_LEN];
+  u32 total;
+  double total_cost;
+  double avg_cost;
+  i64 total_tokens_in;
+  i64 total_tokens_out;
+  double avg_iterations;
+} tix_model_entry_t;
+
+typedef struct {
+  tix_model_entry_t models[TIX_MAX_REPORT_MODELS];
+  u32 count;
+} tix_models_report_t;
+
+tix_err_t tix_report_models(tix_db_t *db, tix_models_report_t *report);
+tix_err_t tix_report_models_print(const tix_models_report_t *r,
+                                  char *buf, sz buf_len);

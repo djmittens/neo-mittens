@@ -90,7 +90,7 @@ grep -A3 "WARNING: ThreadSanitizer" build/tsan.log | \
 When TSAN reports races, create concise issues:
 
 ```bash
-ralph issue add "TSAN: data race in Worker::process (src/worker.cc:123)"
+tix issue add "TSAN: data race in Worker::process (src/worker.cc:123)"
 ```
 
 NOT verbose multi-line descriptions with full stack traces.

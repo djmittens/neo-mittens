@@ -1,4 +1,5 @@
 #include "cmd.h"
+#include "git.h"
 #include "json.h"
 #include "log.h"
 
@@ -29,6 +30,9 @@ static tix_err_t note_add(tix_ctx_t *ctx, int argc, char **argv) {
   }
 
   tix_ticket_set_name(&ticket, argv[0]);
+
+  /* auto-fill author from git user.name */
+  tix_git_user_name(ticket.author, sizeof(ticket.author));
 
   err = tix_plan_append_ticket(ctx->plan_path, &ticket);
   if (err != TIX_OK) { return err; }

@@ -10,7 +10,7 @@ metadata:
 
 # Using tix - Git-Based Ticket Management
 
-Use this skill when managing tasks, issues, and notes through the `tix` CLI. tix is a high-performance C binary that replaces Ralph's Python ticket system, reading and writing `ralph/plan.jsonl`.
+Use this skill when managing tasks, issues, and notes through the `tix` CLI. tix is a high-performance C binary for git-based ticket management, reading and writing `.tix/plan.jsonl` (with legacy fallback to `ralph/plan.jsonl`).
 
 ## Quick Reference
 
@@ -22,6 +22,7 @@ tix task add '<json>'             # Add task(s)
 tix task done [id]                # Mark task done
 tix task accept <id>              # Accept done task
 tix task reject <id> "reason"     # Reject done task
+tix task update <id> '<json>'     # Update fields on existing ticket
 tix issue add "description"       # Add issue
 tix issue done [id]               # Resolve issue
 tix search "keywords"             # Search tickets
@@ -29,18 +30,20 @@ tix tree [id]                     # Dependency tree
 tix report                        # Progress report
 tix validate                      # Integrity check
 tix log                           # Git history of plan changes
+tix sync [branch|--all]           # Sync cache from git history
+tix compact                       # Sync + compact plan.jsonl
 ```
 
 ## Data Flow
 
 ```
-ralph/plan.jsonl  <---->  tix  <---->  .tix/cache.db (SQLite)
+.tix/plan.jsonl  <---->  tix  <---->  .tix/cache.db (SQLite)
       |                                      |
    git tracked                          gitignored
    (primary storage)                    (read cache)
 ```
 
-tix reads/writes `ralph/plan.jsonl` (the git-tracked source of truth) and caches state in `.tix/cache.db` for fast reads. The cache is rebuilt automatically when the git HEAD changes.
+tix reads/writes `.tix/plan.jsonl` (the git-tracked source of truth) and caches state in `.tix/cache.db` for fast reads. The cache is rebuilt automatically when plan.jsonl changes or the schema version bumps.
 
 ## Task Management
 
@@ -73,6 +76,30 @@ tix task add '[
 | `created_from` | No | Created from issue ID |
 | `supersedes` | No | Replaces task ID |
 
+### Auto-filled Fields
+
+These fields are populated automatically by tix:
+
+| Field | When | Source |
+|-------|------|--------|
+| `author` | Ticket creation | `git config user.name` |
+| `completed_at` | Task marked done | ISO 8601 timestamp with timezone |
+| `branch` | Ticket creation/update | Current git branch |
+
+### Agent Telemetry Fields
+
+These fields are populated by the orchestrator (via `tix task update`) after stage completion:
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `cost` | float | Total dollar cost for this task |
+| `tokens_in` | int | Total input tokens consumed |
+| `tokens_out` | int | Total output tokens consumed |
+| `iterations` | int | Construct loop iterations |
+| `model` | string | Model used (e.g. `"claude-sonnet-4-20250514"`) |
+| `retries` | int | Retries after failure before success |
+| `kill_count` | int | Times iteration was killed before success |
+
 ### Task Lifecycle
 
 ```
@@ -87,6 +114,7 @@ tix task accept t-a1b2c3d4        # Accept after verification
 tix task reject t-a1b2c3d4 "Tests fail on edge case"
 tix task delete t-a1b2c3d4        # Remove task entirely
 tix task prioritize t-a1b2c3d4 high  # Set priority
+tix task update t-a1b2c3d4 '{"cost": 0.52, "tokens_in": 50000}'  # Attach telemetry
 ```
 
 ## Issue Management
@@ -168,9 +196,9 @@ tix tree t-a1b2c3d4               # Show tree from specific task
 ASCII output:
 ```
 t-root: Implement feature X [pending]
-├── t-a1b2: Design API [done]
-│   └── t-c3d4: Write tests [pending]
-└── t-e5f6: Implement core [pending]  (blocked by: t-a1b2)
++-- t-a1b2: Design API [done]
+|   +-- t-c3d4: Write tests [pending]
++-- t-e5f6: Implement core [pending]  (blocked by: t-a1b2)
 ```
 
 ## Validation
@@ -180,7 +208,7 @@ tix validate
 ```
 
 Checks:
-- Dependency references exist
+- Dependency references exist (three-state: resolved, stale, broken)
 - No orphan dependencies
 - Tombstone consistency
 - ID uniqueness
@@ -192,6 +220,17 @@ tix batch operations.json         # From file
 tix batch '[{"op": "task_add", "data": {...}}, ...]'  # Inline JSON
 ```
 
+## Cache Management
+
+```bash
+tix sync                          # Sync cache from current branch git history
+tix sync <branch>                 # Sync from specific branch
+tix sync --all                    # Sync from all branches
+tix compact                       # Sync + rewrite plan.jsonl (dedup, denormalize refs)
+```
+
+The SQLite cache uses schema versioning. When the schema version bumps (new fields added), the cache is automatically dropped and rebuilt from plan.jsonl.
+
 ## Environment Variables
 
 | Variable | Description |
@@ -200,16 +239,17 @@ tix batch '[{"op": "task_add", "data": {...}}, ...]'  # Inline JSON
 
 ## plan.jsonl Format
 
-tix reads/writes Ralph's `plan.jsonl` format:
+tix reads/writes `.tix/plan.jsonl` (append-only, line-delimited JSON):
 ```jsonl
-{"t": "config", "timeout_ms": 900000, "max_iterations": 10}
-{"t": "spec", "spec": "coverage.md"}
-{"t": "stage", "stage": "BUILD"}
-{"t": "task", "id": "t-1a2b", "spec": "coverage.md", "name": "...", "s": "p"}
-{"t": "issue", "id": "i-7g8h", "spec": "coverage.md", "desc": "..."}
-{"t": "accept", "id": "t-1a2b", "done_at": "abc123", "reason": ""}
-{"t": "reject", "id": "t-3c4d", "done_at": "def456", "reason": "..."}
+{"t":"task","id":"t-1a2b","name":"...","s":"p","author":"jane","spec":"coverage.md"}
+{"t":"task","id":"t-1a2b","name":"...","s":"d","done_at":"abc123","completed_at":"2026-02-07T14:30:00-08:00","cost":0.52,"tokens_in":50000,"tokens_out":3000,"iterations":5,"model":"claude-sonnet-4-20250514"}
+{"t":"issue","id":"i-7g8h","name":"...","author":"ralph"}
+{"t":"accept","id":"t-1a2b","done_at":"abc123","reason":"","name":"..."}
+{"t":"reject","id":"t-3c4d","done_at":"def456","reason":"...","name":"..."}
+{"t":"delete","id":"t-5e6f"}
 ```
+
+Status values (`s`): `"p"` = pending, `"d"` = done, `"a"` = accepted. Zero/empty values are omitted from output.
 
 ## ID Format
 
@@ -217,22 +257,15 @@ tix reads/writes Ralph's `plan.jsonl` format:
 - Issues: `i-{hex8}` (e.g., `i-a1b2c3d4`)
 - Notes: `n-{hex8}` (e.g., `n-a1b2c3d4`)
 
-## Integration with Ralph
-
-tix is the backend for Ralph's ticket operations. Ralph calls tix for:
-- Task CRUD (add, done, accept, reject, delete, prioritize)
-- Issue CRUD (add, done, done-all, done-ids)
-- State queries (query, status)
-- Validation and reporting
-
-The plan.jsonl file is shared between Ralph and tix. Both can read/write it.
-
 ## Building tix
 
 ```bash
 cd app/tix
-make build        # Debug build
-make test         # Run all 31 tests
+make build        # Debug build (Ninja)
+make build-asan   # AddressSanitizer build
+make test         # Run all 94 E2E tests
+make test-asan    # Tests under ASAN
+make lint         # clang-tidy
 make install      # Copy to powerplant/tix
 ```
 
@@ -256,6 +289,13 @@ tix query tasks                   # See what's pending
 # ... do the work ...
 tix task done                     # Mark first pending task done
 tix task accept t-xxxx            # Accept after verification
+```
+
+### Attaching telemetry after build
+
+```bash
+tix task done t-xxxx
+tix task update t-xxxx '{"cost": 1.23, "tokens_in": 80000, "tokens_out": 5000, "iterations": 3, "model": "claude-sonnet-4-20250514"}'
 ```
 
 ### Investigating issues

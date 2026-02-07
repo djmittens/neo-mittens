@@ -116,3 +116,31 @@ int tix_has_duplicate_dep(const tix_ticket_t *t, const char *dep_id) {
   }
   return 0;
 }
+
+tix_err_t tix_timestamp_iso8601(char *out, sz out_len) {
+  if (out == NULL || out_len < 26) { return TIX_ERR_INVALID_ARG; }
+
+  time_t now = time(NULL);
+  struct tm local;
+  struct tm utc;
+  if (localtime_r(&now, &local) == NULL) { return TIX_ERR_IO; }
+  if (gmtime_r(&now, &utc) == NULL) { return TIX_ERR_IO; }
+
+  /* "2026-02-07T14:30:00" = 19 chars, "+HH:MM" = 6 chars, NUL = 1 => 26 */
+  sz pos = strftime(out, out_len, "%Y-%m-%dT%H:%M:%S", &local);
+  if (pos == 0) { return TIX_ERR_OVERFLOW; }
+
+  /* compute UTC offset portably: diff between local and UTC mktime */
+  time_t local_epoch = mktime(&local);
+  time_t utc_epoch = mktime(&utc);
+  long offset = (long)(local_epoch - utc_epoch);
+  char sign = '+';
+  if (offset < 0) { sign = '-'; offset = -offset; }
+  int off_h = (int)(offset / 3600);
+  int off_m = (int)((offset % 3600) / 60);
+
+  int n = snprintf(out + pos, out_len - pos, "%c%02d:%02d", sign, off_h, off_m);
+  if (n < 0 || (sz)n >= out_len - pos) { return TIX_ERR_OVERFLOW; }
+
+  return TIX_OK;
+}

@@ -7,6 +7,10 @@
 #include <stdio.h>
 #include <string.h>
 
+/* Bump this when the tickets table schema changes.
+   On mismatch the cache is dropped and rebuilt from plan.jsonl. */
+#define TIX_SCHEMA_VERSION "2"
+
 static const char *SCHEMA_SQL =
   "CREATE TABLE IF NOT EXISTS tickets ("
   "  id TEXT PRIMARY KEY,"
@@ -28,7 +32,16 @@ static const char *SCHEMA_SQL =
   "  supersedes_reason TEXT,"
   "  created_at INTEGER,"
   "  updated_at INTEGER,"
-  "  commit_hash TEXT"
+  "  commit_hash TEXT,"
+  "  author TEXT,"
+  "  completed_at TEXT,"
+  "  cost REAL DEFAULT 0.0,"
+  "  tokens_in INTEGER DEFAULT 0,"
+  "  tokens_out INTEGER DEFAULT 0,"
+  "  iterations INTEGER DEFAULT 0,"
+  "  model TEXT,"
+  "  retries INTEGER DEFAULT 0,"
+  "  kill_count INTEGER DEFAULT 0"
   ");"
   "CREATE TABLE IF NOT EXISTS ticket_deps ("
   "  ticket_id TEXT NOT NULL,"
@@ -85,6 +98,25 @@ tix_err_t tix_db_close(tix_db_t *db) {
 tix_err_t tix_db_init_schema(tix_db_t *db) {
   if (db == NULL || db->handle == NULL) { return TIX_ERR_INVALID_ARG; }
 
+  /* Ensure cache_meta exists first so we can check schema version */
+  sqlite3_exec(db->handle,
+    "CREATE TABLE IF NOT EXISTS cache_meta "
+    "(key TEXT PRIMARY KEY, value TEXT)", NULL, NULL, NULL);
+
+  /* Check schema version - if outdated, nuke all tables and recreate */
+  char ver[32] = {0};
+  tix_db_get_meta(db, "schema_version", ver, sizeof(ver));
+  if (ver[0] != '\0' && strcmp(ver, TIX_SCHEMA_VERSION) != 0) {
+    TIX_INFO("schema version %s -> %s, rebuilding cache", ver,
+             TIX_SCHEMA_VERSION);
+    sqlite3_exec(db->handle, "DROP TABLE IF EXISTS tickets", NULL, NULL, NULL);
+    sqlite3_exec(db->handle, "DROP TABLE IF EXISTS ticket_deps",
+                 NULL, NULL, NULL);
+    sqlite3_exec(db->handle, "DROP TABLE IF EXISTS tombstones",
+                 NULL, NULL, NULL);
+    sqlite3_exec(db->handle, "DROP TABLE IF EXISTS keywords", NULL, NULL, NULL);
+  }
+
   char *err_msg = NULL;
   int rc = sqlite3_exec(db->handle, SCHEMA_SQL, NULL, NULL, &err_msg);
   if (rc != SQLITE_OK) {
@@ -92,6 +124,8 @@ tix_err_t tix_db_init_schema(tix_db_t *db) {
     sqlite3_free(err_msg);
     return TIX_ERR_DB;
   }
+
+  tix_db_set_meta(db, "schema_version", TIX_SCHEMA_VERSION);
   return TIX_OK;
 }
 
@@ -103,8 +137,10 @@ tix_err_t tix_db_upsert_ticket(tix_db_t *db, const tix_ticket_t *t) {
     "(id,type,status,priority,name,spec,notes,accept,done_at,branch,"
     "parent,created_from,supersedes,kill_reason,"
     "created_from_name,supersedes_name,supersedes_reason,"
-    "created_at,updated_at) "
-    "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)";
+    "created_at,updated_at,"
+    "author,completed_at,cost,tokens_in,tokens_out,"
+    "iterations,model,retries,kill_count) "
+    "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)";
 
   sqlite3_stmt *stmt = NULL;
   int rc = sqlite3_prepare_v2(db->handle, sql, -1, &stmt, NULL);
@@ -129,6 +165,15 @@ tix_err_t tix_db_upsert_ticket(tix_db_t *db, const tix_ticket_t *t) {
   sqlite3_bind_text(stmt, 17, t->supersedes_reason, -1, SQLITE_STATIC);
   sqlite3_bind_int64(stmt, 18, t->created_at);
   sqlite3_bind_int64(stmt, 19, t->updated_at);
+  sqlite3_bind_text(stmt, 20, t->author, -1, SQLITE_STATIC);
+  sqlite3_bind_text(stmt, 21, t->completed_at, -1, SQLITE_STATIC);
+  sqlite3_bind_double(stmt, 22, t->cost);
+  sqlite3_bind_int64(stmt, 23, t->tokens_in);
+  sqlite3_bind_int64(stmt, 24, t->tokens_out);
+  sqlite3_bind_int(stmt, 25, t->iterations);
+  sqlite3_bind_text(stmt, 26, t->model, -1, SQLITE_STATIC);
+  sqlite3_bind_int(stmt, 27, t->retries);
+  sqlite3_bind_int(stmt, 28, t->kill_count);
 
   rc = sqlite3_step(stmt);
   sqlite3_finalize(stmt);
@@ -190,55 +235,73 @@ tix_err_t tix_db_delete_ticket(tix_db_t *db, const char *id) {
   return TIX_OK;
 }
 
+/* Find column index by name in a prepared statement. Returns -1 if not found.
+   This makes row_to_ticket() immune to column ordering changes. */
+static int col_idx(sqlite3_stmt *stmt, const char *name) {
+  int n = sqlite3_column_count(stmt);
+  for (int i = 0; i < n; i++) {
+    const char *cname = sqlite3_column_name(stmt, i);
+    if (cname != NULL && strcmp(cname, name) == 0) { return i; }
+  }
+  return -1;
+}
+
+/* Read a TEXT column by name into a fixed buffer. No-op if column not found. */
+static void col_text(sqlite3_stmt *stmt, int idx, char *out, sz out_len) {
+  if (idx < 0) { return; }
+  const char *v = (const char *)sqlite3_column_text(stmt, idx);
+  if (v != NULL) { snprintf(out, out_len, "%s", v); }
+}
+
 static void row_to_ticket(sqlite3_stmt *stmt, tix_ticket_t *t) {
   tix_ticket_init(t);
-  const char *id_col = (const char *)sqlite3_column_text(stmt, 0);
-  if (id_col != NULL) { snprintf(t->id, TIX_MAX_ID_LEN, "%s", id_col); }
-  t->type = (tix_ticket_type_e)sqlite3_column_int(stmt, 1);
-  t->status = (tix_status_e)sqlite3_column_int(stmt, 2);
-  t->priority = (tix_priority_e)sqlite3_column_int(stmt, 3);
 
-  const char *name = (const char *)sqlite3_column_text(stmt, 4);
-  if (name != NULL) { snprintf(t->name, TIX_MAX_NAME_LEN, "%s", name); }
+  col_text(stmt, col_idx(stmt, "id"), t->id, TIX_MAX_ID_LEN);
 
-  const char *spec = (const char *)sqlite3_column_text(stmt, 5);
-  if (spec != NULL) { snprintf(t->spec, TIX_MAX_PATH_LEN, "%s", spec); }
+  int ci;
+  ci = col_idx(stmt, "type");
+  if (ci >= 0) { t->type = (tix_ticket_type_e)sqlite3_column_int(stmt, ci); }
+  ci = col_idx(stmt, "status");
+  if (ci >= 0) { t->status = (tix_status_e)sqlite3_column_int(stmt, ci); }
+  ci = col_idx(stmt, "priority");
+  if (ci >= 0) { t->priority = (tix_priority_e)sqlite3_column_int(stmt, ci); }
 
-  const char *notes = (const char *)sqlite3_column_text(stmt, 6);
-  if (notes != NULL) { snprintf(t->notes, TIX_MAX_DESC_LEN, "%s", notes); }
+  col_text(stmt, col_idx(stmt, "name"), t->name, TIX_MAX_NAME_LEN);
+  col_text(stmt, col_idx(stmt, "spec"), t->spec, TIX_MAX_PATH_LEN);
+  col_text(stmt, col_idx(stmt, "notes"), t->notes, TIX_MAX_DESC_LEN);
+  col_text(stmt, col_idx(stmt, "accept"), t->accept, TIX_MAX_DESC_LEN);
+  col_text(stmt, col_idx(stmt, "done_at"), t->done_at, TIX_MAX_HASH_LEN);
+  col_text(stmt, col_idx(stmt, "branch"), t->branch, TIX_MAX_BRANCH_LEN);
+  col_text(stmt, col_idx(stmt, "parent"), t->parent, TIX_MAX_ID_LEN);
+  col_text(stmt, col_idx(stmt, "created_from"), t->created_from, TIX_MAX_ID_LEN);
+  col_text(stmt, col_idx(stmt, "supersedes"), t->supersedes, TIX_MAX_ID_LEN);
+  col_text(stmt, col_idx(stmt, "kill_reason"), t->kill_reason, TIX_MAX_KEYWORD_LEN);
+  col_text(stmt, col_idx(stmt, "created_from_name"), t->created_from_name, TIX_MAX_NAME_LEN);
+  col_text(stmt, col_idx(stmt, "supersedes_name"), t->supersedes_name, TIX_MAX_NAME_LEN);
+  col_text(stmt, col_idx(stmt, "supersedes_reason"), t->supersedes_reason, TIX_MAX_KEYWORD_LEN);
 
-  const char *accept = (const char *)sqlite3_column_text(stmt, 7);
-  if (accept != NULL) { snprintf(t->accept, TIX_MAX_DESC_LEN, "%s", accept); }
+  ci = col_idx(stmt, "created_at");
+  if (ci >= 0) { t->created_at = sqlite3_column_int64(stmt, ci); }
+  ci = col_idx(stmt, "updated_at");
+  if (ci >= 0) { t->updated_at = sqlite3_column_int64(stmt, ci); }
 
-  const char *done_at = (const char *)sqlite3_column_text(stmt, 8);
-  if (done_at != NULL) { snprintf(t->done_at, TIX_MAX_HASH_LEN, "%s", done_at); }
-
-  const char *branch = (const char *)sqlite3_column_text(stmt, 9);
-  if (branch != NULL) { snprintf(t->branch, TIX_MAX_BRANCH_LEN, "%s", branch); }
-
-  const char *parent = (const char *)sqlite3_column_text(stmt, 10);
-  if (parent != NULL) { snprintf(t->parent, TIX_MAX_ID_LEN, "%s", parent); }
-
-  const char *cf = (const char *)sqlite3_column_text(stmt, 11);
-  if (cf != NULL) { snprintf(t->created_from, TIX_MAX_ID_LEN, "%s", cf); }
-
-  const char *ss = (const char *)sqlite3_column_text(stmt, 12);
-  if (ss != NULL) { snprintf(t->supersedes, TIX_MAX_ID_LEN, "%s", ss); }
-
-  const char *kr = (const char *)sqlite3_column_text(stmt, 13);
-  if (kr != NULL) { snprintf(t->kill_reason, TIX_MAX_KEYWORD_LEN, "%s", kr); }
-
-  const char *cfn = (const char *)sqlite3_column_text(stmt, 14);
-  if (cfn != NULL) { snprintf(t->created_from_name, TIX_MAX_NAME_LEN, "%s", cfn); }
-
-  const char *ssn = (const char *)sqlite3_column_text(stmt, 15);
-  if (ssn != NULL) { snprintf(t->supersedes_name, TIX_MAX_NAME_LEN, "%s", ssn); }
-
-  const char *ssr = (const char *)sqlite3_column_text(stmt, 16);
-  if (ssr != NULL) { snprintf(t->supersedes_reason, TIX_MAX_KEYWORD_LEN, "%s", ssr); }
-
-  t->created_at = sqlite3_column_int64(stmt, 17);
-  t->updated_at = sqlite3_column_int64(stmt, 18);
+  /* new fields — gracefully absent if reading an older schema */
+  col_text(stmt, col_idx(stmt, "author"), t->author, TIX_MAX_NAME_LEN);
+  col_text(stmt, col_idx(stmt, "completed_at"), t->completed_at,
+           sizeof(t->completed_at));
+  ci = col_idx(stmt, "cost");
+  if (ci >= 0) { t->cost = sqlite3_column_double(stmt, ci); }
+  ci = col_idx(stmt, "tokens_in");
+  if (ci >= 0) { t->tokens_in = sqlite3_column_int64(stmt, ci); }
+  ci = col_idx(stmt, "tokens_out");
+  if (ci >= 0) { t->tokens_out = sqlite3_column_int64(stmt, ci); }
+  ci = col_idx(stmt, "iterations");
+  if (ci >= 0) { t->iterations = (i32)sqlite3_column_int(stmt, ci); }
+  col_text(stmt, col_idx(stmt, "model"), t->model, TIX_MAX_NAME_LEN);
+  ci = col_idx(stmt, "retries");
+  if (ci >= 0) { t->retries = (i32)sqlite3_column_int(stmt, ci); }
+  ci = col_idx(stmt, "kill_count");
+  if (ci >= 0) { t->kill_count = (i32)sqlite3_column_int(stmt, ci); }
 }
 
 tix_err_t tix_db_get_ticket(tix_db_t *db, const char *id, tix_ticket_t *out) {
@@ -542,6 +605,31 @@ static void replay_one_line(tix_db_t *db, const char *line) {
     if (branch != NULL) {
       snprintf(ticket.branch, TIX_MAX_BRANCH_LEN, "%s", branch);
     }
+
+    /* identity & attribution */
+    const char *author = tix_json_get_str(&obj, "author");
+    if (author != NULL) {
+      snprintf(ticket.author, TIX_MAX_NAME_LEN, "%s", author);
+    }
+
+    /* completion timing */
+    const char *completed_at = tix_json_get_str(&obj, "completed_at");
+    if (completed_at != NULL) {
+      snprintf(ticket.completed_at, sizeof(ticket.completed_at),
+               "%s", completed_at);
+    }
+
+    /* agent telemetry */
+    ticket.cost = tix_json_get_double(&obj, "cost", 0.0);
+    ticket.tokens_in = tix_json_get_num(&obj, "tokens_in", 0);
+    ticket.tokens_out = tix_json_get_num(&obj, "tokens_out", 0);
+    ticket.iterations = (i32)tix_json_get_num(&obj, "iterations", 0);
+    const char *model = tix_json_get_str(&obj, "model");
+    if (model != NULL) {
+      snprintf(ticket.model, TIX_MAX_NAME_LEN, "%s", model);
+    }
+    ticket.retries = (i32)tix_json_get_num(&obj, "retries", 0);
+    ticket.kill_count = (i32)tix_json_get_num(&obj, "kill_count", 0);
 
     /* load deps from JSON array */
     for (u32 fi = 0; fi < obj.field_count; fi++) {

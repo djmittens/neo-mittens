@@ -59,6 +59,18 @@ tix_err_t tix_git_rev_parse_head(char *out, sz out_len) {
   return TIX_OK;
 }
 
+tix_err_t tix_git_user_name(char *out, sz out_len) {
+  if (out == NULL || out_len < 2) { return TIX_ERR_INVALID_ARG; }
+
+  int status = tix_git_run_cmd("git config user.name", out, out_len);
+  if (status != 0 || out[0] == '\0') {
+    TIX_DEBUG("git config user.name not set (status=%d)", status);
+    out[0] = '\0';
+    return TIX_ERR_NOT_FOUND;
+  }
+  return TIX_OK;
+}
+
 tix_err_t tix_git_current_branch(char *out, sz out_len) {
   if (out == NULL || out_len < 4) { return TIX_ERR_INVALID_ARG; }
 

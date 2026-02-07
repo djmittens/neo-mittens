@@ -135,6 +135,7 @@ def reconcile_build(
     tix: Tix,
     agent_output: str,
     task_id: str,
+    stage_metrics: Optional[dict[str, Any]] = None,
 ) -> ReconcileResult:
     """Reconcile BUILD stage output.
 
@@ -149,6 +150,8 @@ def reconcile_build(
         tix: Tix harness instance.
         agent_output: Full agent stdout.
         task_id: The task ID that was being built.
+        stage_metrics: Optional telemetry dict with keys like cost,
+            tokens_in, tokens_out, iterations, model, retries, kill_count.
 
     Returns:
         ReconcileResult with actions taken.
@@ -172,6 +175,13 @@ def reconcile_build(
         except TixError as e:
             result.errors.append(f"Failed to mark task done: {e}")
             result.ok = False
+
+        # Attach telemetry to the ticket if available
+        if stage_metrics and result.ok:
+            try:
+                tix.task_update(task_id, stage_metrics)
+            except TixError:
+                pass  # best-effort; don't fail the build over telemetry
 
     elif verdict == "blocked":
         # Task could not be completed — log why

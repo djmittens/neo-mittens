@@ -165,6 +165,9 @@ static tix_err_t task_add(tix_ctx_t *ctx, int argc, char **argv) {
     break;
   }
 
+  /* auto-fill author from git user.name */
+  tix_git_user_name(ticket.author, sizeof(ticket.author));
+
   /* stamp current branch on creation */
   tix_git_current_branch(ticket.branch, sizeof(ticket.branch));
 
@@ -232,6 +235,7 @@ static tix_err_t task_done(tix_ctx_t *ctx, int argc, char **argv) {
   ticket.updated_at = (i64)time(NULL);
   tix_git_rev_parse_head(ticket.done_at, sizeof(ticket.done_at));
   tix_git_current_branch(ticket.branch, sizeof(ticket.branch));
+  tix_timestamp_iso8601(ticket.completed_at, sizeof(ticket.completed_at));
 
   err = tix_db_upsert_ticket(&ctx->db, &ticket);
   if (err != TIX_OK) { return err; }
@@ -423,6 +427,79 @@ static tix_err_t task_delete(tix_ctx_t *ctx, int argc, char **argv) {
   return TIX_OK;
 }
 
+static tix_err_t task_update(tix_ctx_t *ctx, int argc, char **argv) {
+  if (argc < 2) {
+    fprintf(stderr, "usage: tix task update <id> '<json>'\n");
+    return TIX_ERR_INVALID_ARG;
+  }
+
+  const char *id = argv[0];
+  const char *input = argv[1];
+
+  tix_ticket_t ticket;
+  tix_err_t err = tix_db_get_ticket(&ctx->db, id, &ticket);
+  if (err != TIX_OK) {
+    fprintf(stderr, "error: ticket %s not found\n", id);
+    return err;
+  }
+
+  tix_json_obj_t obj;
+  err = tix_json_parse_line(input, &obj);
+  if (err != TIX_OK) {
+    fprintf(stderr, "error: invalid JSON: %s\n", tix_strerror(err));
+    return err;
+  }
+
+  /* merge provided fields onto existing ticket */
+  const char *v;
+  v = tix_json_get_str(&obj, "author");
+  if (v != NULL) { snprintf(ticket.author, sizeof(ticket.author), "%s", v); }
+  v = tix_json_get_str(&obj, "completed_at");
+  if (v != NULL) {
+    snprintf(ticket.completed_at, sizeof(ticket.completed_at), "%s", v);
+  }
+  v = tix_json_get_str(&obj, "model");
+  if (v != NULL) { snprintf(ticket.model, sizeof(ticket.model), "%s", v); }
+  v = tix_json_get_str(&obj, "notes");
+  if (v != NULL) { snprintf(ticket.notes, TIX_MAX_DESC_LEN, "%s", v); }
+  v = tix_json_get_str(&obj, "accept");
+  if (v != NULL) { snprintf(ticket.accept, TIX_MAX_DESC_LEN, "%s", v); }
+  v = tix_json_get_str(&obj, "kill_reason");
+  if (v != NULL) {
+    snprintf(ticket.kill_reason, TIX_MAX_KEYWORD_LEN, "%s", v);
+  }
+
+  if (tix_json_has_key(&obj, "cost")) {
+    ticket.cost = tix_json_get_double(&obj, "cost", 0.0);
+  }
+  if (tix_json_has_key(&obj, "tokens_in")) {
+    ticket.tokens_in = tix_json_get_num(&obj, "tokens_in", 0);
+  }
+  if (tix_json_has_key(&obj, "tokens_out")) {
+    ticket.tokens_out = tix_json_get_num(&obj, "tokens_out", 0);
+  }
+  if (tix_json_has_key(&obj, "iterations")) {
+    ticket.iterations = (i32)tix_json_get_num(&obj, "iterations", 0);
+  }
+  if (tix_json_has_key(&obj, "retries")) {
+    ticket.retries = (i32)tix_json_get_num(&obj, "retries", 0);
+  }
+  if (tix_json_has_key(&obj, "kill_count")) {
+    ticket.kill_count = (i32)tix_json_get_num(&obj, "kill_count", 0);
+  }
+
+  ticket.updated_at = (i64)time(NULL);
+
+  err = tix_db_upsert_ticket(&ctx->db, &ticket);
+  if (err != TIX_OK) { return err; }
+
+  err = tix_plan_append_ticket(ctx->plan_path, &ticket);
+  if (err != TIX_OK) { return err; }
+
+  printf("{\"id\":\"%s\",\"status\":\"updated\"}\n", id);
+  return TIX_OK;
+}
+
 static tix_err_t task_prioritize(tix_ctx_t *ctx, int argc, char **argv) {
   if (argc < 2) {
     fprintf(stderr,
@@ -466,7 +543,7 @@ tix_err_t tix_cmd_task(tix_ctx_t *ctx, int argc, char **argv) {
   if (argc < 1) {
     fprintf(stderr,
             "usage: tix task "
-            "<add|done|accept|reject|delete|prioritize>\n");
+            "<add|done|accept|reject|delete|prioritize|update>\n");
     return TIX_ERR_INVALID_ARG;
   }
 
@@ -491,6 +568,9 @@ tix_err_t tix_cmd_task(tix_ctx_t *ctx, int argc, char **argv) {
   }
   if (strcmp(sub, "prioritize") == 0) {
     return task_prioritize(ctx, argc - 1, argv + 1);
+  }
+  if (strcmp(sub, "update") == 0) {
+    return task_update(ctx, argc - 1, argv + 1);
   }
 
   fprintf(stderr, "error: unknown task subcommand: %s\n", sub);

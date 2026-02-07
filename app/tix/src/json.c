@@ -3,6 +3,7 @@
 #include "log.h"
 
 #include <ctype.h>
+#include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
 
@@ -122,7 +123,8 @@ tix_err_t tix_json_parse_line(const char *line, tix_json_obj_t *obj) {
     } else if (*p == '-' || isdigit((unsigned char)*p)) {
       f->type = TIX_JSON_NUMBER;
       char *end = NULL;
-      f->num_val = strtoll(p, &end, 10);
+      f->dbl_val = strtod(p, &end);
+      f->num_val = (i64)f->dbl_val;
       p = end;
     } else {
       return TIX_ERR_PARSE;
@@ -158,6 +160,20 @@ i64 tix_json_get_num(const tix_json_obj_t *obj, const char *key, i64 def) {
     if (strcmp(obj->fields[i].key, key) == 0) {
       if (obj->fields[i].type == TIX_JSON_NUMBER) {
         return obj->fields[i].num_val;
+      }
+      return def;
+    }
+  }
+  return def;
+}
+
+double tix_json_get_double(const tix_json_obj_t *obj, const char *key,
+                           double def) {
+  if (obj == NULL || key == NULL) { return def; }
+  for (u32 i = 0; i < obj->field_count; i++) {
+    if (strcmp(obj->fields[i].key, key) == 0) {
+      if (obj->fields[i].type == TIX_JSON_NUMBER) {
+        return obj->fields[i].dbl_val;
       }
       return def;
     }
@@ -321,6 +337,44 @@ sz tix_json_write_ticket(const void *vticket, char *buf, sz buf_len) {
       TIX_BUF_PRINTF(p, end, 0, "\"%s\"", t->deps[i]);
     }
     TIX_BUF_PRINTF(p, end, 0, "]");
+  }
+
+  /* identity & attribution */
+  if (t->author[0] != '\0') {
+    char esc_author[TIX_MAX_NAME_LEN * 2];
+    tix_json_escape(t->author, esc_author, sizeof(esc_author));
+    TIX_BUF_PRINTF(p, end, 0, ",\"author\":\"%s\"", esc_author);
+  }
+
+  /* completion timing */
+  if (t->completed_at[0] != '\0') {
+    TIX_BUF_PRINTF(p, end, 0, ",\"completed_at\":\"%s\"", t->completed_at);
+  }
+
+  /* agent telemetry - skip zero values */
+  if (t->cost > 0.0) {
+    TIX_BUF_PRINTF(p, end, 0, ",\"cost\":%.4f", t->cost);
+  }
+  if (t->tokens_in > 0) {
+    TIX_BUF_PRINTF(p, end, 0, ",\"tokens_in\":%lld", (long long)t->tokens_in);
+  }
+  if (t->tokens_out > 0) {
+    TIX_BUF_PRINTF(p, end, 0, ",\"tokens_out\":%lld",
+                   (long long)t->tokens_out);
+  }
+  if (t->iterations > 0) {
+    TIX_BUF_PRINTF(p, end, 0, ",\"iterations\":%d", (int)t->iterations);
+  }
+  if (t->model[0] != '\0') {
+    char esc_model[TIX_MAX_NAME_LEN * 2];
+    tix_json_escape(t->model, esc_model, sizeof(esc_model));
+    TIX_BUF_PRINTF(p, end, 0, ",\"model\":\"%s\"", esc_model);
+  }
+  if (t->retries > 0) {
+    TIX_BUF_PRINTF(p, end, 0, ",\"retries\":%d", (int)t->retries);
+  }
+  if (t->kill_count > 0) {
+    TIX_BUF_PRINTF(p, end, 0, ",\"kill_count\":%d", (int)t->kill_count);
   }
 
   TIX_BUF_PRINTF(p, end, 0, "}");
