@@ -85,6 +85,26 @@ tix_err_t tix_ticket_set_spec(tix_ticket_t *t, const char *spec) {
   return TIX_OK;
 }
 
+tix_err_t tix_ticket_add_label(tix_ticket_t *t, const char *label) {
+  if (t == NULL || label == NULL) { return TIX_ERR_INVALID_ARG; }
+  if (t->label_count >= TIX_MAX_LABELS) { return TIX_ERR_OVERFLOW; }
+  sz len = strlen(label);
+  if (len == 0 || len >= TIX_MAX_KEYWORD_LEN) { return TIX_ERR_OVERFLOW; }
+  /* skip duplicates silently */
+  if (tix_ticket_has_label(t, label)) { return TIX_OK; }
+  memcpy(t->labels[t->label_count], label, len + 1);
+  t->label_count++;
+  return TIX_OK;
+}
+
+int tix_ticket_has_label(const tix_ticket_t *t, const char *label) {
+  if (t == NULL || label == NULL) { return 0; }
+  for (u32 i = 0; i < t->label_count; i++) {
+    if (strcmp(t->labels[i], label) == 0) { return 1; }
+  }
+  return 0;
+}
+
 tix_err_t tix_ticket_add_dep(tix_ticket_t *t, const char *dep_id) {
   if (t == NULL || dep_id == NULL) { return TIX_ERR_INVALID_ARG; }
   if (t->dep_count >= TIX_MAX_DEPS) { return TIX_ERR_OVERFLOW; }

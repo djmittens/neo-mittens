@@ -7,6 +7,45 @@
 #include <string.h>
 #include <sys/stat.h>
 
+static const char CACHE_DB_PATTERN[] = ".tix/cache.db";
+
+/* Ensure .tix/cache.db is listed in the repo .gitignore.
+ * Scans existing lines; appends only if not already present. */
+static tix_err_t ensure_gitignore(const char *repo_root) {
+  char gi_path[TIX_MAX_PATH_LEN];
+  int n = snprintf(gi_path, sizeof(gi_path), "%s/.gitignore", repo_root);
+  if (n < 0 || (sz)n >= sizeof(gi_path)) { return TIX_ERR_OVERFLOW; }
+
+  /* scan existing .gitignore for the pattern */
+  FILE *fp = fopen(gi_path, "r");
+  if (fp != NULL) {
+    char line[TIX_MAX_LINE_LEN];
+    while (fgets(line, (int)sizeof(line), fp) != NULL) {
+      /* strip trailing newline for comparison */
+      sz len = strlen(line);
+      while (len > 0 && (line[len - 1] == '\n' || line[len - 1] == '\r')) {
+        line[--len] = '\0';
+      }
+      if (strcmp(line, CACHE_DB_PATTERN) == 0) {
+        fclose(fp);
+        return TIX_OK; /* already present */
+      }
+    }
+    fclose(fp);
+  }
+
+  /* append the pattern */
+  fp = fopen(gi_path, "a");
+  if (fp == NULL) {
+    fprintf(stderr, "warning: could not open .gitignore for writing\n");
+    return TIX_ERR_IO;
+  }
+  fprintf(fp, "%s\n", CACHE_DB_PATTERN);
+  fclose(fp);
+  printf("added %s to .gitignore\n", CACHE_DB_PATTERN);
+  return TIX_OK;
+}
+
 tix_err_t tix_cmd_init(int argc, char **argv) {
   TIX_UNUSED(argc);
   TIX_UNUSED(argv);
@@ -91,6 +130,9 @@ tix_err_t tix_cmd_init(int argc, char **argv) {
   err = tix_db_init_schema(&db);
   tix_db_close(&db);
   if (err != TIX_OK) { return err; }
+
+  /* ensure cache.db is gitignored */
+  ensure_gitignore(repo_root);
 
   printf("tix initialized in %s\n", tix_dir);
   return TIX_OK;

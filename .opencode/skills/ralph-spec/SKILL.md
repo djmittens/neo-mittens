@@ -472,7 +472,7 @@ Write tests first against a stub/interface:
 
 Once the spec is written:
 
-1. **Plan**: `ralph plan <spec>` generates tasks from the spec (stored in `ralph/plan.jsonl`)
+1. **Plan**: `ralph plan <spec>` generates tasks from the spec (stored in `.tix/plan.jsonl`)
 2. **Construct**: `ralph construct <spec>` enters construct mode, running the staged loop:
    - **INVESTIGATE**: Converts issues into actionable tasks
    - **BUILD**: Executes tasks in priority/dependency order
@@ -535,7 +535,7 @@ Logs are auto-cleared on system restart.
 
 **Plan mode behavior:**
 - Prompts to clear/keep existing tasks before starting
-- Uses batch `ralph task add '[...]'` for efficiency
+- Uses `tix.task_batch_add()` for efficient batch task creation
 - Runs multiple iterations for complex specs
 - Minimum 15 minute timeout per iteration
 

@@ -25,6 +25,7 @@ typedef int32_t tix_err_t;
 #define TIX_MAX_LINE_LEN     8192
 #define TIX_MAX_KEYWORD_LEN  64
 #define TIX_MAX_KEYWORDS     64
+#define TIX_MAX_LABELS       16
 #define TIX_MAX_DEPS         32
 #define TIX_MAX_BATCH        128
 #define TIX_MAX_CHILDREN     256

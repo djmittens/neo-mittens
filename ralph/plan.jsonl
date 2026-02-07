@@ -98,3 +98,4 @@
 {"t":"accept","id":"t-qma5wg","done_at":"559aef7","reason":"python -m ralph construct .ralph/specs/test.md runs without stub command not implemented error","name":"Wire up cmd_construct in cli.py instead of _stub_command"}
 {"t":"accept","id":"t-h5p75d","done_at":"9f3330f","reason":"","name":"Auto-initialize state when plan.jsonl missing during construct"}
 {"t":"accept","id":"t-tb3m2i","done_at":"b81c3e0","reason":"","name":"Fix E2E test hang by adding timeout and excluding interactive commands"}
+{"t":"note","id":"n-5147fcc3","name":"test note","s":"p","author":"Nick"}

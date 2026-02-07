@@ -1,0 +1,219 @@
+.TH TIX\-QUERY 1 "February 2026" "tix" "User Commands"
+.SH NAME
+tix\-query \- query tickets using TQL, raw SQL, or filter flags
+.SH SYNOPSIS
+.B tix q
+.I "tql\-query"
+.br
+.B tix q sql
+.I "sql\-query"
+.br
+.B tix q
+.br
+.B tix q full
+.br
+.B tix query tasks
+.RI [ --flags ]
+.br
+.B tix query issues
+.RI [ --flags ]
+.SH DESCRIPTION
+.B tix q
+(alias:
+.BR "tix query" )
+provides three query modes:
+.PP
+.B TQL pipeline
+\(em a domain\-aware pipe language that compiles to SQL.
+This is the primary query interface, designed for agents and scripts
+that need to compose arbitrary queries.
+.PP
+.B Raw SQL
+\(em direct SQL access to the SQLite cache for complex queries
+(window functions, CTEs, cross\-table joins) that exceed TQL's
+expressiveness.
+.PP
+.B Legacy filter flags
+\(em backward\-compatible flag\-based filtering for simple cases.
+.SH TQL PIPELINE MODE
+.B tix q
+.I "tql\-query"
+.PP
+The query string must start with a source keyword and may contain pipe\-delimited
+stages.
+See
+.BR tql (7)
+for the full language reference.
+.PP
+.B Examples:
+.RS
+.nf
+tix q "tasks"
+tix q "tasks | status=done"
+tix q "tasks | priority=high author=alice | sort created_at desc | limit 5"
+tix q "tickets | group author | count | sort count desc"
+tix q "tasks | label=blocked | select id,name,author"
+tix q "issues | label~module:* | count"
+tix q "tasks | group author | count | sum cost | avg cost"
+.fi
+.RE
+.PP
+.B Output:
+A JSON array on stdout.
+For row queries, each element is an object with column names as keys.
+For aggregate queries, elements have the group\-by field and aggregate
+result columns.
+.PP
+.RS
+.nf
+\fRRow query:\fP
+[{"id":"T\-a1b2c3d4","type":0,"status":0,"name":"..."},...]
+
+\fRAggregate query:\fP
+[{"author":"alice","count":5,"sum_cost":12.50},
+ {"author":"bob","count":3,"sum_cost":8.00}]
+.fi
+.RE
+.SH RAW SQL MODE
+.B tix q sql
+.I "sql\-query"
+.PP
+Execute raw SQL against the SQLite ticket cache.
+Only
+.B SELECT
+and
+.B WITH
+(CTE) statements are allowed; DDL and DML are rejected.
+.PP
+All remaining arguments after
+.B sql
+are joined with spaces, so quoting is flexible.
+.PP
+.B Examples:
+.RS
+.nf
+tix q sql "SELECT author, COUNT(*) as n FROM tickets GROUP BY author ORDER BY n DESC"
+tix q sql "SELECT t.id, t.name, tl.label FROM tickets t JOIN ticket_labels tl ON t.id = tl.ticket_id"
+tix q sql "WITH recent AS (SELECT * FROM tickets WHERE created_at > 1700000000) SELECT * FROM recent"
+.fi
+.RE
+.PP
+.B Output:
+JSON array of objects, one per row, with column names as keys.
+.PP
+.B Schema reference
+(for writing raw SQL):
+.PP
+.B tickets
+table columns:
+.BR id ,
+.BR type " (0=task, 1=issue, 2=note),"
+.BR status " (0=pending, 1=done, 2=accepted),"
+.BR priority " (0=none, 1=low, 2=medium, 3=high),"
+.BR name ,
+.BR spec ,
+.BR notes ,
+.BR accept ,
+.BR done_at ,
+.BR branch ,
+.BR parent ,
+.BR created_from ,
+.BR supersedes ,
+.BR kill_reason ,
+.BR created_from_name ,
+.BR supersedes_name ,
+.BR supersedes_reason ,
+.BR created_at " (unix epoch),"
+.BR updated_at " (unix epoch),"
+.BR commit_hash ,
+.BR author ,
+.BR completed_at ,
+.BR cost " (real),"
+.BR tokens_in " (integer),"
+.BR tokens_out " (integer),"
+.BR iterations ,
+.BR model ,
+.BR retries ,
+.BR kill_count .
+.PP
+.B ticket_deps
+.RI ( ticket_id ", " dep_id ).
+.PP
+.B ticket_labels
+.RI ( ticket_id ", " label ).
+.PP
+.B tombstones
+.RI ( id ", " done_at ", " reason ", " name ", " is_accept ", " timestamp ).
+.PP
+.B keywords
+.RI ( ticket_id ", " keyword ", " weight ).
+.SH FULL DUMP MODE
+.B tix q
+(no arguments) or
+.B tix q full
+.PP
+Returns the complete ticket state as a structured JSON object:
+.PP
+.RS
+.nf
+{
+  "tasks": {
+    "pending": [...],
+    "done": [...]
+  },
+  "issues": [...],
+  "notes": [...],
+  "meta": {
+    "branch": "main",
+    "commit": "abc123..."
+  }
+}
+.fi
+.RE
+.SH LEGACY FILTER MODE
+.B tix query tasks
+.RI [ --flags ]
+.br
+.B tix query issues
+.RI [ --flags ]
+.PP
+.B Flags:
+.TP
+.B \-\-done
+Show done tasks instead of pending (tasks only).
+.TP
+.BI \-\-label " str"
+Filter by label.
+.TP
+.BI \-\-spec " str"
+Filter by spec.
+.TP
+.BI \-\-author " str"
+Filter by author.
+.TP
+.BI \-\-priority " str"
+Filter by priority
+.RI ( high | medium | low | none ).
+.PP
+.B Output:
+JSON array of matching ticket objects.
+.PP
+Bare
+.B "tix query tasks"
+or
+.B "tix query issues"
+(no flags) is equivalent to the TQL queries
+.B "tasks"
+or
+.BR "issues" .
+.SH EXIT STATUS
+.TP
+.B 0
+Query succeeded.
+.TP
+.B 1
+Parse error, SQL error, or invalid arguments.
+.SH SEE ALSO
+.BR tix (1),
+.BR tql (7),
+.BR tix\-plan (5)

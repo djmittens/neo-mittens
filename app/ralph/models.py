@@ -1,8 +1,16 @@
-"""Ralph data models for tasks, issues, tombstones, and plan configuration."""
+"""Ralph data models for tasks, issues, and tombstones.
+
+These dataclasses define the schema for ticket records. The tix binary
+owns the plan.jsonl file — all reads and writes go through the tix CLI
+(see ralph.tix). These models are used only for deserializing tix CLI
+JSON output and for the powerplant/ralph legacy monolith.
+
+Note: RalphPlanConfig was removed — configuration now lives in
+~/.config/ralph/config.toml via GlobalConfig.
+"""
 
 from dataclasses import dataclass, field
 from typing import Any, Optional
-import json
 
 
 @dataclass
@@ -96,10 +104,6 @@ class Task:
             timeout_ms=d.get("timeout_ms"),
         )
 
-    def to_jsonl(self) -> str:
-        """Serialize to JSONL string."""
-        return json.dumps(self.to_dict())
-
 
 @dataclass
 class Issue:
@@ -131,10 +135,6 @@ class Issue:
             spec=d.get("spec", ""),
             priority=d.get("priority"),
         )
-
-    def to_jsonl(self) -> str:
-        """Serialize to JSONL string."""
-        return json.dumps(self.to_dict())
 
 
 @dataclass
@@ -190,43 +190,4 @@ class Tombstone:
             notes=d.get("notes"),
         )
 
-    def to_jsonl(self) -> str:
-        """Serialize to JSONL string."""
-        return json.dumps(self.to_dict())
 
-
-@dataclass
-class RalphPlanConfig:
-    """Configuration from plan.jsonl config record."""
-
-    timeout_ms: int = 900000
-    max_iterations: int = 10
-    context_warn: float = 0.70
-    context_compact: float = 0.85
-    context_kill: float = 0.95
-
-    def to_dict(self) -> dict[str, Any]:
-        """Serialize config to dict for JSONL storage."""
-        return {
-            "t": "config",
-            "timeout_ms": self.timeout_ms,
-            "max_iterations": self.max_iterations,
-            "context_warn": self.context_warn,
-            "context_compact": self.context_compact,
-            "context_kill": self.context_kill,
-        }
-
-    @classmethod
-    def from_dict(cls, d: dict) -> "RalphPlanConfig":
-        """Deserialize config from dict."""
-        return cls(
-            timeout_ms=d.get("timeout_ms", 900000),
-            max_iterations=d.get("max_iterations", 10),
-            context_warn=d.get("context_warn", 0.70),
-            context_compact=d.get("context_compact", 0.85),
-            context_kill=d.get("context_kill", 0.95),
-        )
-
-    def to_jsonl(self) -> str:
-        """Serialize to JSONL string."""
-        return json.dumps(self.to_dict())

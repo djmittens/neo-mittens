@@ -15,14 +15,16 @@ def cmd_set_spec(config: dict, spec_file: str) -> int:
     """Set the current spec.
 
     Args:
-        config: Ralph configuration dict with plan_file.
+        config: Ralph configuration dict with repo_root.
         spec_file: Path to the spec file to set.
 
     Returns:
         Exit code (0 for success, 1 for error).
     """
-    plan_file = config.get("plan_file")
-    if not plan_file or not plan_file.exists():
+    repo_root = config.get("repo_root", Path.cwd())
+    ralph_dir = config.get("ralph_dir", repo_root / "ralph")
+
+    if not ralph_dir.exists():
         print(
             f"{Colors.YELLOW}Ralph not initialized. Run 'ralph init' first.{Colors.NC}"
         )
@@ -32,14 +34,13 @@ def cmd_set_spec(config: dict, spec_file: str) -> int:
     spec_path = Path(spec_file)
     if not spec_path.exists():
         # Try relative to ralph/specs/
-        ralph_dir = config.get("ralph_dir", Path.cwd() / "ralph")
         spec_path = ralph_dir / "specs" / spec_file
         if not spec_path.exists():
             print(f"{Colors.RED}Spec file not found: {spec_file}{Colors.NC}")
             return 1
 
     # Load state and update spec
-    state = load_state(plan_file)
+    state = load_state(repo_root)
     old_spec = state.spec
 
     # Set new spec (just the filename, not full path)
@@ -47,7 +48,7 @@ def cmd_set_spec(config: dict, spec_file: str) -> int:
     state.spec = new_spec
 
     # Save state
-    save_state(state, plan_file)
+    save_state(state, repo_root)
 
     if old_spec:
         print(f"{Colors.GREEN}Spec changed:{Colors.NC} {old_spec} -> {new_spec}")

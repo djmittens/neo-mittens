@@ -1,0 +1,238 @@
+.TH TIX 1 "February 2026" "tix" "User Commands"
+.SH NAME
+tix \- git\-based ticket management for software projects
+.SH SYNOPSIS
+.B tix
+.I command
+.RI [ args... ]
+.SH DESCRIPTION
+.B tix
+is a high\-performance CLI tool for managing tasks, issues, and notes inside
+a git repository.
+Tickets are stored as append\-only JSONL in
+.BR plan.jsonl ,
+which is committed alongside source code.
+A local SQLite cache provides fast reads and query support.
+.PP
+All mutating commands append to
+.B plan.jsonl
+and update the local cache.
+.B tix
+never auto\-commits; the user (or orchestrator) decides when to commit.
+.PP
+Output is JSON on stdout for machine consumption, except for
+.BR status ,
+.BR report ,
+.BR tree ,
+and
+.BR init ,
+which produce human\-readable text.
+Errors are written to stderr.
+.SH COMMANDS
+.SS Initialization
+.TP
+.B tix init
+Initialize
+.B .tix/
+in the current git repository.
+Creates the config, plan file, SQLite cache, and updates
+.BR .gitignore .
+See
+.BR tix\-init (1).
+.SS Task Management
+.TP
+.BI "tix task " "sub [args]"
+Task operations.
+Subcommands:
+.BR add ,
+.BR done ,
+.BR accept ,
+.BR reject ,
+.BR delete ,
+.BR prioritize ,
+.BR update .
+See
+.BR tix\-task (1).
+.SS Issue Management
+.TP
+.BI "tix issue " "sub [args]"
+Issue operations.
+Subcommands:
+.BR add ,
+.BR done ,
+.BR done\-all ,
+.BR done\-ids .
+See
+.BR tix\-issue (1).
+.SS Note Management
+.TP
+.BI "tix note " "sub [args]"
+Note operations.
+Subcommands:
+.BR add ,
+.BR list ,
+.BR done .
+See
+.BR tix\-note (1).
+.SS Querying
+.TP
+.BI "tix q " """tql\-query"""
+Execute a TQL pipeline query.
+This is the primary query interface for agents and scripts.
+See
+.BR tix\-query (1)
+and
+.BR tql (7).
+.TP
+.BI "tix q sql " """sql\-query"""
+Execute raw SQL against the ticket cache.
+Only
+.B SELECT
+and
+.B WITH
+statements are allowed.
+See
+.BR tix\-query (1).
+.TP
+.BI "tix query " "[tasks|issues|full] [--flags]"
+Legacy filter\-based query.
+See
+.BR tix\-query (1).
+.SS Reporting
+.TP
+.B tix status
+Human\-readable dashboard showing task progress, open issues, and
+reference integrity.
+.TP
+.BI "tix report " "[velocity|actors|models]"
+Generate reports on project progress, agent throughput, cost, and
+model usage.
+See
+.BR tix\-report (1).
+.SS Navigation
+.TP
+.B tix log
+Show git history of plan.jsonl changes as a JSON array.
+Returns up to 20 commits with hash, author, message, and timestamp.
+.TP
+.BI "tix tree " "[id]"
+Render ASCII dependency trees.
+If
+.I id
+is given, show the tree rooted at that ticket.
+Otherwise show all trees.
+.TP
+.BI "tix search " "query"
+Search tickets by keywords.
+Returns scored results and a keyword cloud as JSON.
+.SS Integrity
+.TP
+.B tix validate
+Check ticket graph integrity: broken references, orphan dependencies,
+missing names, invalid IDs.
+Exits 0 if valid, 1 if errors found.
+Suitable as a CI gate.
+.SS Batch Operations
+.TP
+.BI "tix batch " "file|json"
+Execute multiple operations from a JSON array (inline or from a file).
+See
+.BR tix\-batch (1).
+.SS Cache Management
+.TP
+.BI "tix sync " "[branch] [--all]"
+Rebuild the SQLite cache by replaying git history.
+With no arguments, syncs the current branch.
+With
+.IR branch ,
+syncs a specific branch.
+With
+.BR \-\-all ,
+syncs all branches.
+.TP
+.B tix compact
+Full sync followed by plan.jsonl compaction.
+Removes historical cruft, deduplicates, and denormalizes references.
+.SH TICKET TYPES
+.TP
+.B Task
+A unit of work with a lifecycle:
+.IR pending " \(-> " done " \(-> " accepted .
+Tasks support dependencies, priorities, labels, specs, and agent telemetry.
+ID prefix:
+.BR T\- .
+.TP
+.B Issue
+A bug report or problem.
+No lifecycle\(emissues are either open (pending) or resolved (deleted).
+ID prefix:
+.BR I\- .
+.TP
+.B Note
+Ephemeral information.
+Notes are listed or archived (deleted).
+ID prefix:
+.BR N\- .
+.SH ID FORMAT
+Ticket IDs are 10 characters:
+a type prefix, a hyphen, and 8 hex digits.
+.PP
+.RS
+.nf
+T\-a1b2c3d4    task
+I\-e5f67890    issue
+N\-1a2b3c4d    note
+.fi
+.RE
+.SH EXIT STATUS
+.TP
+.B 0
+Command succeeded.
+.TP
+.B 1
+Command failed.
+Error details are on stderr.
+.SH ENVIRONMENT
+.TP
+.B TIX_LOG
+Set log level.
+Values:
+.BR error ,
+.BR warn ,
+.BR info ,
+.BR debug ,
+.BR trace .
+Logs are written to stderr.
+.SH FILES
+.TP
+.B .tix/
+Per\-repository tix directory (created by
+.BR "tix init" ).
+.TP
+.B .tix/config.toml
+Configuration file.
+Settings:
+.BR plan_path ,
+.BR main_branch ,
+.BR color .
+.TP
+.B .tix/cache.db
+SQLite cache (gitignored).
+Rebuilt automatically from plan.jsonl when stale.
+.TP
+.B plan.jsonl
+Append\-only ticket store.
+Git\-tracked, committed with source code.
+Default location is
+.BR .tix/plan.jsonl ;
+configurable.
+See
+.BR tix\-plan (5).
+.SH SEE ALSO
+.BR tix\-task (1),
+.BR tix\-issue (1),
+.BR tix\-note (1),
+.BR tix\-query (1),
+.BR tix\-report (1),
+.BR tql (7),
+.BR tix\-plan (5)

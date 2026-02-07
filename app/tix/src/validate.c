@@ -1,4 +1,5 @@
 #include "validate.h"
+#include "color.h"
 #include "ticket.h"
 #include "log.h"
 
@@ -346,21 +347,25 @@ tix_err_t tix_validate_print(const tix_validation_result_t *r,
   char *p = buf;
   char *end = buf + buf_len;
 
-  TIX_BUF_PRINTF(p, end, TIX_ERR_OVERFLOW, "Validation %s\n",
+  TIX_BUF_PRINTF(p, end, TIX_ERR_OVERFLOW, "%s%sValidation %s",
+                 tix_c(TIX_BOLD),
+                 r->valid ? tix_c(TIX_BRIGHT_GREEN) : tix_c(TIX_BRIGHT_RED),
                  r->valid ? "PASSED" : "FAILED");
-  TIX_BUF_PRINTF(p, end, TIX_ERR_OVERFLOW, "============\n");
+  TIX_BUF_PRINTF(p, end, TIX_ERR_OVERFLOW, "%s\n", tix_c(TIX_RESET));
+  TIX_BUF_COLOR(p, end, TIX_ERR_OVERFLOW, TIX_DIM, "============\n");
 
   for (u32 i = 0; i < r->error_count; i++) {
-    TIX_BUF_PRINTF(p, end, TIX_ERR_OVERFLOW,
-                   "ERROR: %s\n", r->errors[i]);
+    TIX_BUF_COLOR(p, end, TIX_ERR_OVERFLOW, TIX_BOLD TIX_RED, "ERROR:");
+    TIX_BUF_PRINTF(p, end, TIX_ERR_OVERFLOW, " %s\n", r->errors[i]);
   }
   for (u32 i = 0; i < r->warning_count; i++) {
-    TIX_BUF_PRINTF(p, end, TIX_ERR_OVERFLOW,
-                   "WARN:  %s\n", r->warnings[i]);
+    TIX_BUF_COLOR(p, end, TIX_ERR_OVERFLOW, TIX_BOLD TIX_YELLOW, "WARN: ");
+    TIX_BUF_PRINTF(p, end, TIX_ERR_OVERFLOW, " %s\n", r->warnings[i]);
   }
 
   if (r->error_count == 0 && r->warning_count == 0) {
-    TIX_BUF_PRINTF(p, end, TIX_ERR_OVERFLOW, "No issues found.\n");
+    TIX_BUF_COLOR(p, end, TIX_ERR_OVERFLOW, TIX_DIM,
+                  "No issues found.\n");
   }
 
   return TIX_OK;

@@ -1,0 +1,499 @@
+/*
+ * TQL SQL Compiler
+ *
+ * Compiles a parsed TQL pipeline (tql_pipeline_t) into parameterized SQL
+ * with bind values. Separated from tql.c (parser) to respect the
+ * 1000-line file limit.
+ */
+
+#include "tql.h"
+#include "log.h"
+
+#include <ctype.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+/* ---- Enum translation tables (shared with parser) ---- */
+
+typedef struct {
+  const char *name;
+  int value;
+} tql_compile_enum_t;
+
+static const tql_compile_enum_t STATUS_MAP[] = {
+  {"pending",  0},
+  {"done",     1},
+  {"accepted", 2},
+  {NULL, 0}
+};
+
+static const tql_compile_enum_t TYPE_MAP[] = {
+  {"task",  0},
+  {"issue", 1},
+  {"note",  2},
+  {NULL, 0}
+};
+
+static const tql_compile_enum_t PRIORITY_MAP[] = {
+  {"none",   0},
+  {"low",    1},
+  {"medium", 2},
+  {"high",   3},
+  {NULL, 0}
+};
+
+static const char *INT_FIELDS[] = {
+  "type", "status", "priority", "created_at", "updated_at",
+  "tokens_in", "tokens_out", "iterations", "retries", "kill_count",
+  NULL
+};
+
+static const char *DOUBLE_FIELDS[] = {
+  "cost",
+  NULL
+};
+
+static int is_int_field(const char *field) {
+  for (int i = 0; INT_FIELDS[i] != NULL; i++) {
+    if (strcmp(field, INT_FIELDS[i]) == 0) { return 1; }
+  }
+  return 0;
+}
+
+static int is_double_field(const char *field) {
+  for (int i = 0; DOUBLE_FIELDS[i] != NULL; i++) {
+    if (strcmp(field, DOUBLE_FIELDS[i]) == 0) { return 1; }
+  }
+  return 0;
+}
+
+static int translate_enum(const char *field, const char *value, int *out) {
+  const tql_compile_enum_t *map = NULL;
+
+  if (strcmp(field, "status") == 0) { map = STATUS_MAP; }
+  else if (strcmp(field, "type") == 0) { map = TYPE_MAP; }
+  else if (strcmp(field, "priority") == 0) { map = PRIORITY_MAP; }
+  else { return 0; }
+
+  for (int i = 0; map[i].name != NULL; i++) {
+    if (strcmp(value, map[i].name) == 0) {
+      *out = map[i].value;
+      return 1;
+    }
+  }
+  return 0;
+}
+
+/* ---- Compiler helpers ---- */
+
+static void convert_like_pattern(const char *src, char *dst, sz dst_len) {
+  sz j = 0;
+  for (sz i = 0; src[i] != '\0' && j < dst_len - 1; i++) {
+    if (src[i] == '*') {
+      dst[j++] = '%';
+    } else if (src[i] == '?') {
+      dst[j++] = '_';
+    } else {
+      dst[j++] = src[i];
+    }
+  }
+  dst[j] = '\0';
+}
+
+static const char *op_to_sql(tql_op_e op) {
+  switch (op) {
+    case TQL_OP_EQ:          return "=";
+    case TQL_OP_NE:          return "!=";
+    case TQL_OP_GT:          return ">";
+    case TQL_OP_LT:          return "<";
+    case TQL_OP_GE:          return ">=";
+    case TQL_OP_LE:          return "<=";
+    case TQL_OP_LIKE:        return "LIKE";
+    case TQL_OP_IS_NULL:     return "IS NULL";
+    case TQL_OP_IS_NOT_NULL: return "IS NOT NULL";
+    case TQL_OP_IN:          return "IN";
+    case TQL_OP_NOT_IN:      return "NOT IN";
+  }
+  return "=";
+}
+
+static const char *agg_to_sql(tql_agg_e func) {
+  switch (func) {
+    case TQL_AGG_COUNT:          return "COUNT";
+    case TQL_AGG_SUM:            return "SUM";
+    case TQL_AGG_AVG:            return "AVG";
+    case TQL_AGG_MIN:            return "MIN";
+    case TQL_AGG_MAX:            return "MAX";
+    case TQL_AGG_COUNT_DISTINCT: return "COUNT";
+  }
+  return "COUNT";
+}
+
+/* ---- Bind a single filter value ---- */
+
+static void bind_value(tql_compiled_t *out, const char *field,
+                       const char *value) {
+  int enum_val;
+  if (translate_enum(field, value, &enum_val)) {
+    out->binds[out->bind_count].is_int = 1;
+    out->binds[out->bind_count].ival = (i64)enum_val;
+  } else if (is_int_field(field)) {
+    out->binds[out->bind_count].is_int = 1;
+    out->binds[out->bind_count].ival = strtoll(value, NULL, 10);
+  } else if (is_double_field(field)) {
+    out->binds[out->bind_count].is_double = 1;
+    out->binds[out->bind_count].dval = strtod(value, NULL);
+  } else {
+    out->binds[out->bind_count].is_int = 0;
+    out->binds[out->bind_count].is_double = 0;
+    snprintf(out->binds[out->bind_count].sval, TQL_MAX_VALUE_LEN,
+             "%s", value);
+  }
+  out->bind_count++;
+}
+
+static void bind_string(tql_compiled_t *out, const char *value) {
+  out->binds[out->bind_count].is_int = 0;
+  out->binds[out->bind_count].is_double = 0;
+  snprintf(out->binds[out->bind_count].sval, TQL_MAX_VALUE_LEN, "%s", value);
+  out->bind_count++;
+}
+
+/* ---- Main compiler ---- */
+
+tix_err_t tql_compile(const tql_pipeline_t *p, tql_compiled_t *out,
+                      char *err_buf, sz err_len) {
+  if (p == NULL || out == NULL) { return TIX_ERR_INVALID_ARG; }
+  TIX_UNUSED(err_buf);
+  TIX_UNUSED(err_len);
+  memset(out, 0, sizeof(*out));
+
+  char *sql = out->sql;
+  char *end = sql + sizeof(out->sql);
+  int need_label_join = 0;
+
+  /* Check if any filter references "label" (non-negated) */
+  for (u32 i = 0; i < p->filter_count; i++) {
+    if (strcmp(p->filters[i].field, "label") == 0 && !p->filters[i].negated) {
+      need_label_join = 1;
+      break;
+    }
+  }
+
+  /* Also check group by on label */
+  if (p->has_group && strcmp(p->group_by, "label") == 0) {
+    need_label_join = 1;
+  }
+
+  /* SELECT clause */
+  if (p->has_distinct) {
+    TIX_BUF_PRINTF(sql, end, TIX_ERR_OVERFLOW, "SELECT DISTINCT ");
+  } else {
+    TIX_BUF_PRINTF(sql, end, TIX_ERR_OVERFLOW, "SELECT ");
+  }
+
+  if (p->agg_count > 0 || p->has_group) {
+    out->is_aggregate = 1;
+    int first = 1;
+
+    /* Group-by column first */
+    if (p->has_group) {
+      if (strcmp(p->group_by, "label") == 0) {
+        TIX_BUF_PRINTF(sql, end, TIX_ERR_OVERFLOW, "tl.label");
+      } else {
+        TIX_BUF_PRINTF(sql, end, TIX_ERR_OVERFLOW, "t.%s", p->group_by);
+      }
+      snprintf(out->columns[out->column_count], TQL_MAX_FIELD_LEN,
+               "%s", p->group_by);
+      out->column_count++;
+      first = 0;
+    }
+
+    /* Aggregate expressions */
+    for (u32 i = 0; i < p->agg_count; i++) {
+      if (!first) { TIX_BUF_PRINTF(sql, end, TIX_ERR_OVERFLOW, ", "); }
+      first = 0;
+
+      if (p->aggregates[i].field[0] == '\0') {
+        TIX_BUF_PRINTF(sql, end, TIX_ERR_OVERFLOW, "COUNT(*)");
+        snprintf(out->columns[out->column_count], TQL_MAX_FIELD_LEN,
+                 "count");
+      } else if (p->aggregates[i].func == TQL_AGG_COUNT_DISTINCT) {
+        TIX_BUF_PRINTF(sql, end, TIX_ERR_OVERFLOW,
+                        "COUNT(DISTINCT t.%s)", p->aggregates[i].field);
+        int cn = snprintf(out->columns[out->column_count],
+                          TQL_MAX_FIELD_LEN, "count_distinct_%.50s",
+                          p->aggregates[i].field);
+        if (cn < 0 || cn >= TQL_MAX_FIELD_LEN) {
+          out->columns[out->column_count][TQL_MAX_FIELD_LEN - 1] = '\0';
+        }
+      } else {
+        const char *func = agg_to_sql(p->aggregates[i].func);
+        TIX_BUF_PRINTF(sql, end, TIX_ERR_OVERFLOW,
+                        "%s(t.%s)", func, p->aggregates[i].field);
+        const char *fn_lower = "count";
+        switch (p->aggregates[i].func) {
+          case TQL_AGG_COUNT:          fn_lower = "count"; break;
+          case TQL_AGG_SUM:            fn_lower = "sum"; break;
+          case TQL_AGG_AVG:            fn_lower = "avg"; break;
+          case TQL_AGG_MIN:            fn_lower = "min"; break;
+          case TQL_AGG_MAX:            fn_lower = "max"; break;
+          case TQL_AGG_COUNT_DISTINCT: fn_lower = "count_distinct"; break;
+        }
+        int cn = snprintf(out->columns[out->column_count],
+                          TQL_MAX_FIELD_LEN, "%s_%.50s",
+                          fn_lower, p->aggregates[i].field);
+        if (cn < 0 || cn >= TQL_MAX_FIELD_LEN) {
+          out->columns[out->column_count][TQL_MAX_FIELD_LEN - 1] = '\0';
+        }
+      }
+      out->column_count++;
+    }
+  } else if (p->select_count > 0) {
+    for (u32 i = 0; i < p->select_count; i++) {
+      if (i > 0) { TIX_BUF_PRINTF(sql, end, TIX_ERR_OVERFLOW, ", "); }
+      if (strcmp(p->selects[i], "label") == 0) {
+        TIX_BUF_PRINTF(sql, end, TIX_ERR_OVERFLOW, "tl.label");
+      } else {
+        TIX_BUF_PRINTF(sql, end, TIX_ERR_OVERFLOW, "t.%s", p->selects[i]);
+      }
+      snprintf(out->columns[out->column_count], TQL_MAX_FIELD_LEN,
+               "%s", p->selects[i]);
+      out->column_count++;
+    }
+  } else {
+    if (need_label_join) {
+      TIX_BUF_PRINTF(sql, end, TIX_ERR_OVERFLOW, "DISTINCT t.*");
+    } else {
+      TIX_BUF_PRINTF(sql, end, TIX_ERR_OVERFLOW, "t.*");
+    }
+  }
+
+  /* FROM clause */
+  TIX_BUF_PRINTF(sql, end, TIX_ERR_OVERFLOW, " FROM tickets t");
+
+  if (need_label_join) {
+    int label_in_filter = 0;
+    for (u32 i = 0; i < p->filter_count; i++) {
+      if (strcmp(p->filters[i].field, "label") == 0 &&
+          !p->filters[i].negated) {
+        label_in_filter = 1;
+        break;
+      }
+    }
+    if (label_in_filter) {
+      TIX_BUF_PRINTF(sql, end, TIX_ERR_OVERFLOW,
+                      " INNER JOIN ticket_labels tl ON t.id = tl.ticket_id");
+    } else {
+      TIX_BUF_PRINTF(sql, end, TIX_ERR_OVERFLOW,
+                      " LEFT JOIN ticket_labels tl ON t.id = tl.ticket_id");
+    }
+  }
+
+  /* WHERE clause */
+  int has_where = 0;
+
+  if (p->source != TQL_SOURCE_TICKETS) {
+    TIX_BUF_PRINTF(sql, end, TIX_ERR_OVERFLOW, " WHERE t.type=?");
+    has_where = 1;
+    out->binds[out->bind_count].is_int = 1;
+    out->binds[out->bind_count].ival = (i64)p->source;
+    out->bind_count++;
+  }
+
+  /* User filters */
+  for (u32 i = 0; i < p->filter_count; i++) {
+    const tql_filter_t *f = &p->filters[i];
+    const char *conj = has_where ? " AND" : " WHERE";
+    int is_label = (strcmp(f->field, "label") == 0);
+    const char *cpfx = is_label ? "tl." : "t.";
+    const char *cname = is_label ? "label" : f->field;
+
+    /* Negated label: NOT EXISTS subquery */
+    if (is_label && f->negated) {
+      TIX_BUF_PRINTF(sql, end, TIX_ERR_OVERFLOW,
+                      "%s NOT EXISTS (SELECT 1 FROM ticket_labels nl "
+                      "WHERE nl.ticket_id = t.id AND nl.label", conj);
+      if (f->op == TQL_OP_LIKE) {
+        TIX_BUF_PRINTF(sql, end, TIX_ERR_OVERFLOW, " LIKE ?)");
+        char pat[TQL_MAX_VALUE_LEN];
+        convert_like_pattern(f->value, pat, sizeof(pat));
+        bind_string(out, pat);
+      } else {
+        TIX_BUF_PRINTF(sql, end, TIX_ERR_OVERFLOW, " = ?)");
+        bind_string(out, f->value);
+      }
+      has_where = 1;
+      continue;
+    }
+
+    /* IS NULL / IS NOT NULL */
+    if (f->op == TQL_OP_IS_NULL) {
+      const char *kw = f->negated ? "IS NOT NULL" : "IS NULL";
+      TIX_BUF_PRINTF(sql, end, TIX_ERR_OVERFLOW,
+                      "%s %s%s %s", conj, cpfx, cname, kw);
+      has_where = 1;
+      continue;
+    }
+    if (f->op == TQL_OP_IS_NOT_NULL) {
+      const char *kw = f->negated ? "IS NULL" : "IS NOT NULL";
+      TIX_BUF_PRINTF(sql, end, TIX_ERR_OVERFLOW,
+                      "%s %s%s %s", conj, cpfx, cname, kw);
+      has_where = 1;
+      continue;
+    }
+
+    /* IN / NOT IN */
+    if (f->op == TQL_OP_IN || f->op == TQL_OP_NOT_IN) {
+      const char *kw = (f->op == TQL_OP_IN) ? "IN" : "NOT IN";
+      if (f->negated) {
+        kw = (f->op == TQL_OP_IN) ? "NOT IN" : "IN";
+      }
+      TIX_BUF_PRINTF(sql, end, TIX_ERR_OVERFLOW,
+                      "%s %s%s %s (", conj, cpfx, cname, kw);
+      for (u32 v = 0; v < f->or_count; v++) {
+        if (v > 0) { TIX_BUF_PRINTF(sql, end, TIX_ERR_OVERFLOW, ","); }
+        TIX_BUF_PRINTF(sql, end, TIX_ERR_OVERFLOW, "?");
+        bind_value(out, f->field, f->or_values[v]);
+      }
+      TIX_BUF_PRINTF(sql, end, TIX_ERR_OVERFLOW, ")");
+      has_where = 1;
+      continue;
+    }
+
+    /* LIKE filter */
+    if (f->op == TQL_OP_LIKE) {
+      const char *kw = f->negated ? "NOT LIKE" : "LIKE";
+      TIX_BUF_PRINTF(sql, end, TIX_ERR_OVERFLOW,
+                      "%s %s%s %s ?", conj, cpfx, cname, kw);
+      char pat[TQL_MAX_VALUE_LEN];
+      convert_like_pattern(f->value, pat, sizeof(pat));
+      bind_string(out, pat);
+      has_where = 1;
+      continue;
+    }
+
+    /* Standard comparison */
+    {
+      const char *op_str = op_to_sql(f->op);
+      if (f->negated) {
+        switch (f->op) {
+          case TQL_OP_EQ: op_str = "!="; break;
+          case TQL_OP_NE: op_str = "="; break;
+          case TQL_OP_GT: op_str = "<="; break;
+          case TQL_OP_LT: op_str = ">="; break;
+          case TQL_OP_GE: op_str = "<"; break;
+          case TQL_OP_LE: op_str = ">"; break;
+          default: break;
+        }
+      }
+      TIX_BUF_PRINTF(sql, end, TIX_ERR_OVERFLOW,
+                      "%s %s%s %s ?", conj, cpfx, cname, op_str);
+      bind_value(out, f->field, f->value);
+    }
+    has_where = 1;
+  }
+
+  /* GROUP BY */
+  if (p->has_group) {
+    if (strcmp(p->group_by, "label") == 0) {
+      TIX_BUF_PRINTF(sql, end, TIX_ERR_OVERFLOW, " GROUP BY tl.label");
+    } else {
+      TIX_BUF_PRINTF(sql, end, TIX_ERR_OVERFLOW, " GROUP BY t.%s",
+                      p->group_by);
+    }
+  }
+
+  /* HAVING */
+  for (u32 i = 0; i < p->having_count; i++) {
+    const tql_having_t *h = &p->havings[i];
+    const char *hconj = (i == 0) ? " HAVING" : " AND";
+
+    int found_col = 0;
+    for (u32 c = 0; c < out->column_count; c++) {
+      if (strcmp(h->column, out->columns[c]) == 0) {
+        TIX_BUF_PRINTF(sql, end, TIX_ERR_OVERFLOW,
+                        "%s %u %s ?", hconj, c + 1, op_to_sql(h->op));
+        found_col = 1;
+        break;
+      }
+    }
+    if (!found_col) {
+      TIX_BUF_PRINTF(sql, end, TIX_ERR_OVERFLOW,
+                      "%s %s %s ?", hconj, h->column, op_to_sql(h->op));
+    }
+
+    /* Bind having value (detect int vs float) */
+    int is_int_val = 1;
+    for (const char *vp = h->value; *vp != '\0'; vp++) {
+      if (*vp != '-' && (*vp < '0' || *vp > '9')) {
+        is_int_val = 0;
+        break;
+      }
+    }
+    if (is_int_val) {
+      out->binds[out->bind_count].is_int = 1;
+      out->binds[out->bind_count].ival = strtoll(h->value, NULL, 10);
+    } else {
+      out->binds[out->bind_count].is_double = 1;
+      out->binds[out->bind_count].dval = strtod(h->value, NULL);
+    }
+    out->bind_count++;
+  }
+
+  /* ORDER BY */
+  if (p->sort_count > 0) {
+    TIX_BUF_PRINTF(sql, end, TIX_ERR_OVERFLOW, " ORDER BY ");
+    for (u32 i = 0; i < p->sort_count; i++) {
+      if (i > 0) { TIX_BUF_PRINTF(sql, end, TIX_ERR_OVERFLOW, ", "); }
+      const char *dir = (p->sorts[i].dir == TQL_SORT_DESC) ? "DESC" : "ASC";
+
+      int is_agg_alias = 0;
+      for (u32 c = 0; c < out->column_count; c++) {
+        if (strcmp(p->sorts[i].field, out->columns[c]) == 0 &&
+            out->is_aggregate) {
+          TIX_BUF_PRINTF(sql, end, TIX_ERR_OVERFLOW, "%u %s", c + 1, dir);
+          is_agg_alias = 1;
+          break;
+        }
+      }
+      if (!is_agg_alias) {
+        if (strcmp(p->sorts[i].field, "label") == 0) {
+          TIX_BUF_PRINTF(sql, end, TIX_ERR_OVERFLOW, "tl.label %s", dir);
+        } else {
+          TIX_BUF_PRINTF(sql, end, TIX_ERR_OVERFLOW, "t.%s %s",
+                          p->sorts[i].field, dir);
+        }
+      }
+    }
+  } else if (!p->has_group && p->agg_count == 0) {
+    TIX_BUF_PRINTF(sql, end, TIX_ERR_OVERFLOW,
+                    " ORDER BY t.priority DESC, t.created_at ASC");
+  }
+
+  /* LIMIT */
+  if (p->has_limit) {
+    TIX_BUF_PRINTF(sql, end, TIX_ERR_OVERFLOW, " LIMIT %u", p->limit);
+  }
+
+  /* OFFSET */
+  if (p->has_offset) {
+    if (!p->has_limit) {
+      TIX_BUF_PRINTF(sql, end, TIX_ERR_OVERFLOW, " LIMIT -1");
+    }
+    TIX_BUF_PRINTF(sql, end, TIX_ERR_OVERFLOW, " OFFSET %u", p->offset);
+  }
+
+  return TIX_OK;
+}
+
+/* ---- Convenience ---- */
+
+tix_err_t tql_prepare(const char *query, tql_compiled_t *out,
+                      char *err_buf, sz err_len) {
+  tql_pipeline_t pipeline;
+  tix_err_t err = tql_parse(query, &pipeline, err_buf, err_len);
+  if (err != TIX_OK) { return err; }
+  return tql_compile(&pipeline, out, err_buf, err_len);
+}

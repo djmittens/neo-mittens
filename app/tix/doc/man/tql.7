@@ -1,0 +1,287 @@
+.TH TQL 7 "February 2026" "tix" "Miscellaneous"
+.SH NAME
+tql \- Tix Query Language reference
+.SH DESCRIPTION
+TQL is a pipe\-based query language for the
+.BR tix (1)
+ticket system.
+It provides a domain\-aware syntax that compiles to SQL, with automatic
+enum translation, label table joins, and structured JSON output.
+.PP
+TQL is designed to be composable by agents and scripts without knowledge
+of the underlying SQLite schema.
+For queries that exceed TQL's expressiveness, use the raw SQL escape
+hatch:
+.BR "tix q sql" .
+.SH SYNTAX
+A TQL query is a pipeline of stages separated by
+.B |
+(pipe) characters:
+.PP
+.RS
+.I source
+.RI "| " filters " | " stage " | " stage " ..."
+.RE
+.PP
+The first word must be a
+.BR source .
+Subsequent pipe segments contain filters or transformation stages.
+Filters can also appear inline after the source keyword.
+.SH SOURCES
+The source determines which ticket types are included in the query.
+.TP
+.B tasks
+Task tickets only (type=0).
+.TP
+.B issues
+Issue tickets only (type=1).
+.TP
+.B notes
+Note tickets only (type=2).
+.TP
+.B tickets
+All ticket types (no type filter).
+.SH FILTERS
+Filters restrict the result set.
+Multiple filters within the same pipe segment combine with AND logic.
+Each filter has the form
+.IR field operator value .
+.SS Operators
+.TS
+tab(|);
+lb lb lb
+l l l.
+Operator|Syntax|SQL equivalent
+equals|field=value|field = ?
+not equals|field!=value|field != ?
+greater than|field>value|field > ?
+less than|field<value|field < ?
+greater or equal|field>=value|field >= ?
+less or equal|field<=value|field <= ?
+pattern match|field~pattern|field LIKE ?
+.TE
+.SS Pattern matching
+The
+.B ~
+operator uses glob\-style patterns converted to SQL LIKE:
+.TP
+.B *
+matches any sequence (converted to
+.BR % ).
+.TP
+.B ?
+matches any single character (converted to
+.BR _ ).
+.PP
+.B Example:
+.B name~Build*
+matches names starting with "Build".
+.SS Enum sugar
+Status, type, and priority fields accept human\-readable names that are
+automatically translated to their integer values:
+.PP
+.TS
+tab(|);
+lb lb lb
+l l l.
+Field|Names|Values
+status|pending, done, accepted|0, 1, 2
+type|task, issue, note|0, 1, 2
+priority|none, low, medium, high|0, 1, 2, 3
+.TE
+.PP
+.B Example:
+.B status=done
+is equivalent to
+.BR status=1 .
+.SS Label filter
+The pseudo\-field
+.B label
+triggers an automatic JOIN on the
+.B ticket_labels
+table:
+.PP
+.RS
+.nf
+tasks | label=blocked
+tasks | label~module:*
+.fi
+.RE
+.SS Quoted values
+Values containing spaces can be quoted with double quotes:
+.PP
+.RS
+.B name="Build the parser"
+.RE
+.SH STAGES
+Stages transform the result set.
+Each stage occupies its own pipe segment.
+.SS select \fIf1,f2,...\fR
+Choose specific columns instead of all columns.
+Column names are comma\-separated with no spaces.
+.PP
+.RS
+.nf
+tasks | select id,name,author,cost
+.fi
+.RE
+.SS group \fIfield\fR
+Group results by a field.
+Must be combined with at least one aggregate.
+.PP
+.RS
+.nf
+tasks | group author | count
+tasks | group label | count
+.fi
+.RE
+.PP
+The special field
+.B label
+groups by the
+.B ticket_labels
+table (triggers a JOIN).
+.SS count
+Count rows (or rows per group if
+.B group
+is active).
+Produces a
+.B count
+column in the output.
+.SS sum \fIfield\fR
+Sum a numeric field.
+Produces a column named
+.BI sum_ field
+(e.g.,
+.BR sum_cost ).
+.SS avg \fIfield\fR
+Average a numeric field.
+Produces
+.BI avg_ field .
+.SS min \fIfield\fR
+Minimum of a field.
+Produces
+.BI min_ field .
+.SS max \fIfield\fR
+Maximum of a field.
+Produces
+.BI max_ field .
+.SS sort \fIfield\fR [\fIasc\fR|\fIdesc\fR]
+Order results by a field.
+Default direction is
+.BR asc .
+Multiple sort fields can be specified, separated by commas or spaces.
+.PP
+When sorting aggregate results, use the aggregate column name:
+.PP
+.RS
+.nf
+tasks | group author | count | sort count desc
+.fi
+.RE
+.PP
+If no explicit sort is specified and the query is not an aggregate,
+results are ordered by
+.B priority DESC, created_at ASC
+by default.
+.SS limit \fIN\fR
+Limit the number of returned rows.
+.I N
+must be a positive integer.
+.SH AVAILABLE FIELDS
+.TS
+tab(|);
+lb lb
+l l.
+Field|Description
+id|ticket ID (e.g., T\-a1b2c3d4)
+type|ticket type (0=task, 1=issue, 2=note)
+status|status (0=pending, 1=done, 2=accepted)
+priority|priority (0=none, 1=low, 2=medium, 3=high)
+name|ticket name / description
+spec|spec file path
+notes|free\-form notes
+accept|acceptance criteria
+done_at|git commit hash when done
+branch|git branch
+parent|parent ticket ID
+created_from|source ticket ID
+supersedes|superseded ticket ID
+kill_reason|reason task was killed
+author|who created the ticket
+completed_at|ISO 8601 completion timestamp
+cost|dollar cost (real)
+tokens_in|input tokens (integer)
+tokens_out|output tokens (integer)
+iterations|loop iterations (integer)
+model|model name
+retries|retry count
+kill_count|kill count
+created_at|creation unix epoch
+updated_at|last update unix epoch
+label|pseudo\-field for ticket labels
+.TE
+.SH EXAMPLES
+.PP
+All pending tasks:
+.RS
+.B tix q "tasks"
+.RE
+.PP
+High\-priority tasks by alice:
+.RS
+.B tix q "tasks | priority=high author=alice"
+.RE
+.PP
+Task count per author, sorted:
+.RS
+.B tix q "tasks | group author | count | sort count desc"
+.RE
+.PP
+Total cost by model:
+.RS
+.B tix q "tasks | status=done | group model | sum cost | sort sum_cost desc"
+.RE
+.PP
+Blocked issues in the parser module:
+.RS
+.B tix q "issues | label~module:parser*"
+.RE
+.PP
+Top 5 most expensive completed tasks:
+.RS
+.B tix q "tasks | status=done | sort cost desc | limit 5"
+.RE
+.PP
+All tickets across types created after a timestamp:
+.RS
+.B tix q "tickets | created_at>1700000000 | select id,type,name"
+.RE
+.PP
+Tasks with labels, grouped by label:
+.RS
+.B tix q "tasks | group label | count | sort count desc"
+.RE
+.SH LIMITS
+.TP
+.B TQL_MAX_FILTERS
+16 filters per query.
+.TP
+.B TQL_MAX_SELECT
+16 selected fields.
+.TP
+.B TQL_MAX_SORTS
+4 sort clauses.
+.TP
+.B TQL_MAX_AGGREGATES
+8 aggregate functions per query.
+.TP
+.B TQL_MAX_SQL_LEN
+4096 bytes of generated SQL.
+.TP
+.B TQL_MAX_BINDS
+32 bound parameters.
+.SH SEE ALSO
+.BR tix (1),
+.BR tix\-query (1),
+.BR tix\-plan (5)

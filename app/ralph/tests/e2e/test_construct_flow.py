@@ -19,7 +19,6 @@ import pytest
 
 from ralph.config import GlobalConfig
 from ralph.context import Metrics
-from ralph.models import RalphPlanConfig
 from ralph.stages.base import (
     ConstructStateMachine,
     Stage,
@@ -27,45 +26,9 @@ from ralph.stages.base import (
     StageResult,
 )
 from ralph.state import RalphState, load_state, save_state
+from ralph.tests.conftest import MockTix as _MockTix
 
 APP_DIR = Path(__file__).parent.parent.parent.parent
-
-
-class _MockTix:
-    """Controllable mock Tix for construct flow tests."""
-
-    def __init__(
-        self,
-        tasks: list | None = None,
-        done: list | None = None,
-        issues: list | None = None,
-    ):
-        self._tasks = list(tasks or [])
-        self._done = list(done or [])
-        self._issues = list(issues or [])
-        self.rejected: list[tuple[str, str]] = []
-
-    def query_tasks(self) -> list[dict]:
-        """Return pending tasks."""
-        return self._tasks
-
-    def query_done_tasks(self) -> list[dict]:
-        """Return done tasks."""
-        return self._done
-
-    def query_issues(self) -> list[dict]:
-        """Return open issues."""
-        return self._issues
-
-    def task_reject(self, task_id: str, reason: str) -> dict:
-        """Record a task rejection."""
-        self.rejected.append((task_id, reason))
-        return {"id": task_id, "status": "p"}
-
-    def issue_done_ids(self, ids: list[str]) -> dict:
-        """Record issue resolution."""
-        self._issues = [i for i in self._issues if i.get("id") not in ids]
-        return {"count": len(ids)}
 
 
 def run_ralph(*args: str, cwd: Path) -> subprocess.CompletedProcess:
@@ -103,21 +66,20 @@ def init_ralph_with_git(tmp_path: Path) -> Path:
         ["git", "commit", "-m", "init"],
         cwd=tmp_path, capture_output=True, check=True,
     )
-    return tmp_path / "ralph" / "plan.jsonl"
+    return tmp_path
 
 
 def create_test_state(
-    plan_path: Path,
+    repo_root: Path,
     spec: str = "test-spec.md",
     stage: Stage = Stage.INVESTIGATE,
 ) -> RalphState:
     """Create an orchestration-only test state."""
     state = RalphState(
-        config=RalphPlanConfig(),
         spec=spec,
         stage=stage.name,
     )
-    save_state(state, plan_path)
+    save_state(state, repo_root)
     return state
 
 
@@ -126,8 +88,8 @@ class TestConstructStageTransitions:
 
     def test_investigate_to_build_transition(self, tmp_path: Path):
         """Test BUILD stage runs when pending tasks exist."""
-        plan_path = init_ralph_with_git(tmp_path)
-        create_test_state(plan_path, stage=Stage.BUILD)
+        repo_root = init_ralph_with_git(tmp_path)
+        create_test_state(repo_root, stage=Stage.BUILD)
 
         mock_tix = _MockTix(tasks=[{"id": "t-test01", "name": "Test task"}])
         stages_run = []
@@ -147,8 +109,8 @@ class TestConstructStageTransitions:
             stage_timeout_ms=60000,
             context_limit=100000,
             run_stage_fn=mock_run_stage,
-            load_state_fn=lambda: load_state(plan_path),
-            save_state_fn=lambda st: save_state(st, plan_path),
+            load_state_fn=lambda: load_state(repo_root),
+            save_state_fn=lambda st: save_state(st, repo_root),
             tix=mock_tix,
         )
 
@@ -160,8 +122,8 @@ class TestConstructStageTransitions:
 
     def test_build_to_verify_transition(self, tmp_path: Path):
         """Test transition from BUILD to VERIFY stage."""
-        plan_path = init_ralph_with_git(tmp_path)
-        create_test_state(plan_path, stage=Stage.VERIFY)
+        repo_root = init_ralph_with_git(tmp_path)
+        create_test_state(repo_root, stage=Stage.VERIFY)
 
         # Start with a done task, mock run clears it
         mock_tix = _MockTix(
@@ -176,9 +138,9 @@ class TestConstructStageTransitions:
             if stage == Stage.VERIFY:
                 # Simulate: after verify, task is accepted (no more done)
                 mock_tix._done = []
-                state = load_state(plan_path)
+                state = load_state(repo_root)
                 state.batch_completed.append("t-test01")
-                save_state(state, plan_path)
+                save_state(state, repo_root)
             return StageResult(stage=stage, outcome=StageOutcome.SUCCESS)
 
         config = GlobalConfig.load()
@@ -190,8 +152,8 @@ class TestConstructStageTransitions:
             stage_timeout_ms=60000,
             context_limit=100000,
             run_stage_fn=mock_run_stage,
-            load_state_fn=lambda: load_state(plan_path),
-            save_state_fn=lambda st: save_state(st, plan_path),
+            load_state_fn=lambda: load_state(repo_root),
+            save_state_fn=lambda st: save_state(st, repo_root),
             tix=mock_tix,
         )
 
@@ -201,8 +163,8 @@ class TestConstructStageTransitions:
 
     def test_failure_triggers_decompose(self, tmp_path: Path):
         """Test that stage failure triggers DECOMPOSE in next iteration."""
-        plan_path = init_ralph_with_git(tmp_path)
-        create_test_state(plan_path, stage=Stage.BUILD)
+        repo_root = init_ralph_with_git(tmp_path)
+        create_test_state(repo_root, stage=Stage.BUILD)
 
         mock_tix = _MockTix(tasks=[{"id": "t-test01", "name": "Test task"}])
         stages_run = []
@@ -231,8 +193,8 @@ class TestConstructStageTransitions:
             stage_timeout_ms=60000,
             context_limit=100000,
             run_stage_fn=mock_run_stage,
-            load_state_fn=lambda: load_state(plan_path),
-            save_state_fn=lambda st: save_state(st, plan_path),
+            load_state_fn=lambda: load_state(repo_root),
+            save_state_fn=lambda st: save_state(st, repo_root),
             tix=mock_tix,
         )
 
@@ -245,8 +207,8 @@ class TestConstructStageTransitions:
 
     def test_complete_when_no_pending_tasks(self, tmp_path: Path):
         """Test spec completion when no pending or done tasks remain."""
-        plan_path = init_ralph_with_git(tmp_path)
-        create_test_state(plan_path, stage=Stage.VERIFY)
+        repo_root = init_ralph_with_git(tmp_path)
+        create_test_state(repo_root, stage=Stage.VERIFY)
 
         # No tasks, no issues — should complete
         mock_tix = _MockTix()
@@ -265,8 +227,8 @@ class TestConstructStageTransitions:
             stage_timeout_ms=60000,
             context_limit=100000,
             run_stage_fn=mock_run_stage,
-            load_state_fn=lambda: load_state(plan_path),
-            save_state_fn=lambda st: save_state(st, plan_path),
+            load_state_fn=lambda: load_state(repo_root),
+            save_state_fn=lambda st: save_state(st, repo_root),
             tix=mock_tix,
         )
 
@@ -280,8 +242,8 @@ class TestConstructStageTransitions:
 
         The flow is: BUILD -> VERIFY -> (if issues) INVESTIGATE -> BUILD.
         """
-        plan_path = init_ralph_with_git(tmp_path)
-        create_test_state(plan_path, stage=Stage.BUILD)
+        repo_root = init_ralph_with_git(tmp_path)
+        create_test_state(repo_root, stage=Stage.BUILD)
 
         mock_tix = _MockTix(tasks=[{"id": "t-test01", "name": "Test task"}])
         stages_run = []
@@ -301,16 +263,16 @@ class TestConstructStageTransitions:
                 mock_tix._done = []
                 mock_tix._tasks = [{"id": "t-test01", "name": "Test task"}]
                 mock_tix._issues = [{"id": "i-test01"}]
-                state = load_state(plan_path)
+                state = load_state(repo_root)
                 state.batch_completed.append("t-test01")
-                save_state(state, plan_path)
+                save_state(state, repo_root)
 
             if stage == Stage.INVESTIGATE:
                 # Investigate resolves issue
                 mock_tix._issues = []
-                state = load_state(plan_path)
+                state = load_state(repo_root)
                 state.batch_completed.append("i-test01")
-                save_state(state, plan_path)
+                save_state(state, repo_root)
 
             return StageResult(stage=stage, outcome=StageOutcome.SUCCESS)
 
@@ -323,8 +285,8 @@ class TestConstructStageTransitions:
             stage_timeout_ms=60000,
             context_limit=100000,
             run_stage_fn=mock_run_stage,
-            load_state_fn=lambda: load_state(plan_path),
-            save_state_fn=lambda st: save_state(st, plan_path),
+            load_state_fn=lambda: load_state(repo_root),
+            save_state_fn=lambda st: save_state(st, repo_root),
             tix=mock_tix,
         )
 
@@ -339,8 +301,8 @@ class TestConstructStageTransitions:
 
     def test_verify_skips_investigate_when_no_issues(self, tmp_path: Path):
         """When VERIFY passes everything and no issues, go to COMPLETE."""
-        plan_path = init_ralph_with_git(tmp_path)
-        create_test_state(plan_path, stage=Stage.VERIFY)
+        repo_root = init_ralph_with_git(tmp_path)
+        create_test_state(repo_root, stage=Stage.VERIFY)
 
         mock_tix = _MockTix(
             done=[{"id": "t-test01", "name": "Test task"}],
@@ -354,9 +316,9 @@ class TestConstructStageTransitions:
             if stage == Stage.VERIFY:
                 # Accept task, no issues
                 mock_tix._done = []
-                state = load_state(plan_path)
+                state = load_state(repo_root)
                 state.batch_completed.append("t-test01")
-                save_state(state, plan_path)
+                save_state(state, repo_root)
             return StageResult(stage=stage, outcome=StageOutcome.SUCCESS)
 
         config = GlobalConfig.load()
@@ -368,8 +330,8 @@ class TestConstructStageTransitions:
             stage_timeout_ms=60000,
             context_limit=100000,
             run_stage_fn=mock_run_stage,
-            load_state_fn=lambda: load_state(plan_path),
-            save_state_fn=lambda st: save_state(st, plan_path),
+            load_state_fn=lambda: load_state(repo_root),
+            save_state_fn=lambda st: save_state(st, repo_root),
             tix=mock_tix,
         )
 

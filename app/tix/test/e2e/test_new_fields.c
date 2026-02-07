@@ -497,7 +497,7 @@ static void test_schema_version_migration(TIX_TEST_ARGS()) {
   /* Schema version should be updated */
   char ver[32];
   tix_db_get_meta(&db, "schema_version", ver, sizeof(ver));
-  ASSERT_STR_EQ(ver, "2");
+  ASSERT_STR_EQ(ver, "3");
 
   tix_db_close(&db);
   cleanup_env(tmpdir);

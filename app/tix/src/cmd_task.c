@@ -136,6 +136,23 @@ static tix_err_t task_add(tix_ctx_t *ctx, int argc, char **argv) {
     snprintf(ticket.supersedes, TIX_MAX_ID_LEN, "%s", ss);
   }
 
+  /* labels - parse from JSON array */
+  for (u32 i = 0; i < obj.field_count; i++) {
+    if (strcmp(obj.fields[i].key, "labels") != 0) { continue; }
+    if (obj.fields[i].type != TIX_JSON_ARRAY) { continue; }
+    for (u32 j = 0; j < obj.fields[i].arr_count; j++) {
+      const char *label = obj.fields[i].arr_vals[j];
+      if (label[0] == '\0') { continue; }
+      tix_err_t lerr = tix_ticket_add_label(&ticket, label);
+      if (lerr == TIX_ERR_OVERFLOW) {
+        fprintf(stderr, "error: too many labels (max %d)\n",
+                TIX_MAX_LABELS);
+        return TIX_ERR_OVERFLOW;
+      }
+    }
+    break;
+  }
+
   /* deps - validate each exists, is a task, and is not a duplicate */
   for (u32 i = 0; i < obj.field_count; i++) {
     if (strcmp(obj.fields[i].key, "deps") != 0) { continue; }
@@ -486,6 +503,19 @@ static tix_err_t task_update(tix_ctx_t *ctx, int argc, char **argv) {
   }
   if (tix_json_has_key(&obj, "kill_count")) {
     ticket.kill_count = (i32)tix_json_get_num(&obj, "kill_count", 0);
+  }
+
+  /* labels - replace if provided */
+  for (u32 i = 0; i < obj.field_count; i++) {
+    if (strcmp(obj.fields[i].key, "labels") != 0) { continue; }
+    if (obj.fields[i].type != TIX_JSON_ARRAY) { continue; }
+    ticket.label_count = 0;
+    for (u32 j = 0; j < obj.fields[i].arr_count; j++) {
+      const char *label = obj.fields[i].arr_vals[j];
+      if (label[0] == '\0') { continue; }
+      tix_ticket_add_label(&ticket, label);
+    }
+    break;
   }
 
   ticket.updated_at = (i64)time(NULL);

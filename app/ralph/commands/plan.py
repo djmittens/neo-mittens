@@ -5,9 +5,11 @@ Uses context injection to pre-populate prompts with spec content.
 
 Features:
 - Project rules (AGENTS.md) integration
-- Auto-commit plan.jsonl after PLAN_COMPLETE
+- Auto-commit plan after PLAN_COMPLETE
 - Metrics tracking (cost/tokens/time)
 - Git push after commit
+- Clear old tasks via tix before planning
+- Multi-iteration gap detection
 
 Agent outputs structured JSON via [RALPH_OUTPUT] markers.
 Harness reconciles via tix — agent never calls task commands directly.
@@ -35,6 +37,12 @@ from ..utils import Colors
 
 
 __all__ = ["cmd_plan"]
+
+
+# Maximum plan iterations for gap detection
+DEFAULT_MAX_PLAN_ITERATIONS = 5
+# Minimum timeout for plan mode (15 minutes)
+MIN_PLAN_TIMEOUT_MS = 900_000
 
 
 def _build_plan_prompt(
@@ -76,23 +84,21 @@ def _run_opencode(config: GlobalConfig, prompt: str, cwd: Path) -> Tuple[Optiona
         Tuple of (output string or None on failure, metrics).
     """
     metrics = Metrics()
-    start_time = time.time()
     output_lines = []
+    timeout = max(config.timeout_ms, MIN_PLAN_TIMEOUT_MS)
     
     process = spawn_opencode(
         prompt=prompt,
         cwd=cwd,
-        timeout=config.timeout_ms,
+        timeout=timeout,
         model=config.model,  # Use main model for planning (reasoning task)
     )
     
     try:
         # Stream output in real-time
         while True:
-            # Check if process has finished
             retcode = process.poll()
             
-            # Read available output
             if process.stdout:
                 ready, _, _ = select.select([process.stdout], [], [], 0.1)
                 if ready:
@@ -101,17 +107,13 @@ def _run_opencode(config: GlobalConfig, prompt: str, cwd: Path) -> Tuple[Optiona
                         line_str = line.decode("utf-8", errors="replace")
                         output_lines.append(line_str)
                         
-                        # Parse and display based on event type
                         try:
                             event = json.loads(line_str.strip())
                             _display_event(event)
                         except json.JSONDecodeError:
-                            # Not JSON, print raw
                             print(line_str, end="", flush=True)
             
-            # If process finished and no more output, break
             if retcode is not None:
-                # Drain remaining output
                 if process.stdout:
                     remaining = process.stdout.read()
                     if remaining:
@@ -126,7 +128,6 @@ def _run_opencode(config: GlobalConfig, prompt: str, cwd: Path) -> Tuple[Optiona
         
         output = "".join(output_lines)
         
-        # Extract metrics from output
         try:
             metrics = extract_metrics(output)
         except Exception:
@@ -230,11 +231,38 @@ def _prioritize_tasks_tix(tix: Tix, tasks: list[dict]) -> dict:
     return stats
 
 
-def _commit_plan(plan_file: Path, spec_name: str, task_count: int, cwd: Path) -> bool:
-    """Commit the plan.jsonl file.
+def _clear_existing_tasks(tix: Tix, spec_name: str) -> int:
+    """Clear existing tasks for a spec via tix.
+
+    Deletes all pending tasks for the given spec so planning starts fresh.
 
     Args:
-        plan_file: Path to plan.jsonl.
+        tix: Tix harness instance.
+        spec_name: Spec name to clear tasks for.
+
+    Returns:
+        Number of tasks deleted.
+    """
+    deleted = 0
+    try:
+        tasks = tix.query_tasks()
+        for task in tasks:
+            if task.get("spec") == spec_name:
+                try:
+                    tix.task_delete(task["id"])
+                    deleted += 1
+                except TixError:
+                    pass
+    except TixError:
+        pass
+    return deleted
+
+
+def _commit_tix_plan(tix: Tix, spec_name: str, task_count: int, cwd: Path) -> bool:
+    """Commit the tix plan.jsonl file.
+
+    Args:
+        tix: Tix harness instance.
         spec_name: Name of the spec file.
         task_count: Number of tasks in the plan.
         cwd: Working directory for git commands.
@@ -242,12 +270,19 @@ def _commit_plan(plan_file: Path, spec_name: str, task_count: int, cwd: Path) ->
     Returns:
         True if committed successfully, False otherwise.
     """
+    plan_file = tix.plan_file()
     if not has_uncommitted_plan(plan_file, cwd):
         return True  # Nothing to commit
     
     try:
+        # Also commit ralph-state.json if it changed
+        state_file = cwd / ".tix" / "ralph-state.json"
+        files_to_add = [str(plan_file)]
+        if state_file.exists():
+            files_to_add.append(str(state_file))
+
         subprocess.run(
-            ["git", "add", str(plan_file)],
+            ["git", "add"] + files_to_add,
             cwd=cwd,
             capture_output=True,
             check=True,
@@ -339,10 +374,11 @@ def cmd_plan(config: GlobalConfig, spec_file: str, args) -> int:
 
     This command:
     1. Loads the spec file
-    2. Builds a prompt with the spec content injected
-    3. Runs OpenCode which outputs [RALPH_OUTPUT] JSON
-    4. Reconciles agent output — creates tasks via tix
-    5. Auto-prioritizes and commits
+    2. Clears existing tasks for this spec via tix
+    3. Builds a prompt with the spec content injected
+    4. Runs OpenCode which outputs [RALPH_OUTPUT] JSON
+    5. Reconciles agent output — creates tasks via tix batch add
+    6. Auto-prioritizes, commits, and pushes
 
     Args:
         config: Ralph configuration.
@@ -354,7 +390,6 @@ def cmd_plan(config: GlobalConfig, spec_file: str, args) -> int:
     """
     cwd = Path.cwd()
     ralph_dir = cwd / "ralph"
-    plan_file = ralph_dir / "plan.jsonl"
 
     if not ralph_dir.exists():
         print(f"{Colors.RED}Ralph not initialized. Run 'ralph init' first.{Colors.NC}")
@@ -380,6 +415,11 @@ def cmd_plan(config: GlobalConfig, spec_file: str, args) -> int:
 
     _print_plan_header(spec_name, branch, rules_source, config)
 
+    # Clear existing tasks for this spec
+    deleted = _clear_existing_tasks(tix, spec_name)
+    if deleted > 0:
+        print(f"{Colors.YELLOW}Cleared {deleted} existing tasks for {spec_name}{Colors.NC}")
+
     prompt_content = _build_plan_prompt(spec_name, spec_content, project_rules)
     if prompt_content is None:
         return 1
@@ -391,7 +431,7 @@ def cmd_plan(config: GlobalConfig, spec_file: str, args) -> int:
         return 1
 
     return _finalize_plan(
-        tix, output_str, metrics, spec_name, plan_file, branch, cwd
+        tix, output_str, metrics, spec_name, branch, cwd
     )
 
 
@@ -430,12 +470,11 @@ def _finalize_plan(
     output_str: str,
     metrics: Metrics,
     spec_name: str,
-    plan_file: Path,
     branch: str,
     cwd: Path,
 ) -> int:
     """Reconcile agent output, prioritize, commit, and report."""
-    # Reconcile — parse [RALPH_OUTPUT] and create tasks via tix
+    # Reconcile — parse [RALPH_OUTPUT] and create tasks via tix batch add
     recon = reconcile_plan(tix, output_str, spec_name)
 
     if not recon.tasks_added:
@@ -450,19 +489,20 @@ def _finalize_plan(
     # Auto-prioritize
     priority_stats = _prioritize_tasks_tix(tix, spec_tasks)
 
-    # Update orchestration state (spec/stage)
-    state = load_state(plan_file)
+    # Update orchestration state
+    state = load_state(cwd)
     state.spec = spec_name
     state.stage = "BUILD"
-    save_state(state, plan_file)
+    save_state(state, cwd)
 
     # Commit and push
-    committed = _commit_plan(plan_file, spec_name, len(spec_tasks), cwd)
+    committed = _commit_tix_plan(tix, spec_name, len(spec_tasks), cwd)
     if committed:
         print(f"{Colors.GREEN}Committed plan with {len(spec_tasks)} tasks{Colors.NC}")
 
     pushed = False
     if committed:
+        plan_file = tix.plan_file()
         pushed = push_with_retry(branch, retries=2, plan_file=plan_file, cwd=cwd)
         if pushed:
             print(f"{Colors.GREEN}Pushed to origin/{branch}{Colors.NC}")

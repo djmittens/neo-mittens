@@ -1,0 +1,241 @@
+.TH TIX\-TASK 1 "February 2026" "tix" "User Commands"
+.SH NAME
+tix\-task \- manage tasks in the tix ticket system
+.SH SYNOPSIS
+.B tix task add
+.I 'json'
+.br
+.B tix task done
+.RI [ id ]
+.br
+.B tix task accept
+.RI [ id ]
+.br
+.B tix task reject
+.I id
+.I "reason"
+.br
+.B tix task delete
+.I id
+.br
+.B tix task prioritize
+.I id
+.I priority
+.br
+.B tix task update
+.I id
+.I 'json'
+.SH DESCRIPTION
+The
+.B tix task
+family of commands manages the full lifecycle of tasks: creation,
+completion, review (accept/reject), deletion, prioritization, and
+metadata updates.
+.PP
+Tasks follow a state machine:
+.IR pending " \(-> " done " \(-> " accepted .
+Rejected tasks return to
+.IR pending .
+.PP
+All commands enforce
+.B branch scope:
+if a task has a branch field set, the operation must be run from that
+branch.
+.SH SUBCOMMANDS
+.SS tix task add \fI'json'\fR
+Create a new task from a JSON object.
+.PP
+.B JSON input fields:
+.TS
+allbox tab(|);
+lb lb lb
+l l l.
+Field|Type|Required
+name|string|yes
+spec|string|no
+notes|string|no
+accept|string|no
+priority|string|no
+parent|string|no
+created_from|string|no
+supersedes|string|no
+deps|array|no
+labels|array|no
+.TE
+.PP
+The
+.B name
+field is required and must be non\-empty.
+If
+.B accept
+(acceptance criteria) is missing, a warning is logged.
+.PP
+.B priority
+must be one of:
+.BR high ,
+.BR medium ,
+.BR low ,
+.BR none .
+.PP
+.BR parent ,
+.BR created_from ,
+and
+.B supersedes
+must be valid ticket IDs that exist in the database.
+.PP
+.B deps
+is an array of ticket ID strings.
+Each dependency must exist, must be a task (not issue or note),
+and must not be a duplicate.
+.PP
+.B labels
+is an array of strings (max 16).
+.PP
+.B Auto\-filled fields:
+.BR id " (generated),"
+.BR author " (from git config user.name),"
+.BR branch " (current git branch),"
+.BR created_at / updated_at " (unix epoch)."
+.PP
+.B Output:
+.RS
+.nf
+{"id":"T\-XXXXXXXX","name":"..."}
+.fi
+.RE
+.PP
+.B Example:
+.RS
+.nf
+tix task add '{"name":"Implement TQL parser","spec":"specs/tql.md","priority":"high","labels":["module:query","epic:v2"]}'
+.fi
+.RE
+.SS tix task done \fR[\fIid\fR]
+Mark a task as done.
+If
+.I id
+is omitted, the first pending task is selected.
+.PP
+Sets the task status to
+.BR done ,
+records the current HEAD commit hash in
+.BR done_at ,
+and writes an ISO 8601 timestamp to
+.BR completed_at .
+.PP
+.B Output:
+.RS
+.nf
+{"id":"T\-XXXXXXXX","status":"done","done_at":"abc123"}
+.fi
+.RE
+.SS tix task accept \fR[\fIid\fR]
+Accept a completed task, removing it from the active ticket set.
+If
+.I id
+is omitted, the first done task is selected.
+.PP
+The task must be in
+.B done
+status.
+Creates a tombstone record and deletes the task from the live database.
+.PP
+.B Output:
+.RS
+.nf
+{"id":"T\-XXXXXXXX","status":"accepted"}
+.fi
+.RE
+.SS tix task reject \fIid\fR \fI"reason"\fR
+Reject a completed task, returning it to pending status.
+Both
+.I id
+and
+.I reason
+are required.
+The reason must be non\-empty.
+.PP
+Creates a reject tombstone with the reason, resets the task to
+.BR pending ,
+and clears the
+.B done_at
+field.
+.PP
+.B Output:
+.RS
+.nf
+{"id":"T\-XXXXXXXX","status":"rejected"}
+.fi
+.RE
+.SS tix task delete \fIid\fR
+Delete a task permanently.
+The task must not have other tasks depending on it.
+.PP
+.B Output:
+.RS
+.nf
+{"id":"T\-XXXXXXXX","status":"deleted"}
+.fi
+.RE
+.SS tix task prioritize \fIid\fR \fIpriority\fR
+Set the priority of a task.
+.I priority
+must be one of:
+.BR high ,
+.BR medium ,
+.BR low ,
+.BR none .
+.PP
+.B Output:
+.RS
+.nf
+{"id":"T\-XXXXXXXX","priority":"high"}
+.fi
+.RE
+.SS tix task update \fIid\fR \fI'json'\fR
+Merge fields onto an existing task.
+Only the provided fields are updated; others are preserved.
+.PP
+.B Updatable fields:
+.BR author ,
+.BR completed_at ,
+.BR model ,
+.BR notes ,
+.BR accept ,
+.BR kill_reason ,
+.BR cost " (number),"
+.BR tokens_in " (number),"
+.BR tokens_out " (number),"
+.BR iterations " (number),"
+.BR retries " (number),"
+.BR kill_count " (number),"
+.BR labels " (array, replaces all)."
+.PP
+This is the primary way to attach agent telemetry (cost, tokens,
+iterations) to a completed task.
+.PP
+.B Output:
+.RS
+.nf
+{"id":"T\-XXXXXXXX","status":"updated"}
+.fi
+.RE
+.PP
+.B Example:
+.RS
+.nf
+tix task update T\-a1b2c3d4 '{"cost":1.50,"tokens_in":50000,"tokens_out":12000,"model":"claude\-sonnet\-4\-20250514","iterations":3}'
+.fi
+.RE
+.SH EXIT STATUS
+.TP
+.B 0
+Command succeeded.
+.TP
+.B 1
+Command failed (invalid arguments, ticket not found, validation error,
+dependency error, or wrong branch).
+.SH SEE ALSO
+.BR tix (1),
+.BR tix\-query (1),
+.BR tix\-plan (5)

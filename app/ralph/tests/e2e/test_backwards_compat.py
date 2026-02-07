@@ -1,10 +1,10 @@
 """E2E tests for backwards compatibility with existing Ralph data.
 
-Since state.py is now orchestration-only (ticket data owned by tix),
+Since state.py now stores orchestration in .tix/ralph-state.json,
 these tests verify that:
-1. load_state reads spec, stage, config records correctly
-2. Ticket records are ignored (not loaded into RalphState)
-3. Prompts, config, and other subsystems still work
+1. load_state reads from .tix/ralph-state.json correctly
+2. Prompts, config, and other subsystems still work
+3. RalphState no longer has ticket data fields
 """
 
 import json
@@ -19,119 +19,66 @@ def get_repo_root() -> Path:
     """Find the repository root by looking for ralph/ directory."""
     current = Path.cwd()
     while current != current.parent:
-        if (current / "ralph" / "plan.jsonl").exists():
-            return current
         if (current / "ralph" / "PROMPT_build.md").exists():
             return current
         current = current.parent
     return Path.cwd().parent
 
 
-class TestReadsExistingPlanJsonl:
-    """Tests for loading existing plan.jsonl files."""
+class TestReadsExistingState:
+    """Tests for loading state from .tix/ralph-state.json."""
 
-    def test_reads_existing_plan_jsonl(self, tmp_path):
-        """Test that load_state reads orchestration fields from plan.jsonl."""
+    def test_reads_state_from_tix_dir(self, tmp_path):
+        """Test that load_state reads from .tix/ralph-state.json."""
         from ralph.state import load_state
 
-        repo_root = get_repo_root()
-        plan_file = repo_root / "ralph" / "plan.jsonl"
-        if not plan_file.exists():
-            pytest.skip("ralph/plan.jsonl not found in repo")
+        tix_dir = tmp_path / ".tix"
+        tix_dir.mkdir()
+        (tix_dir / "ralph-state.json").write_text(json.dumps({
+            "spec": "test-spec.md",
+            "stage": "BUILD",
+        }))
 
-        state = load_state(plan_file)
+        state = load_state(tmp_path)
+        assert state.spec == "test-spec.md"
+        assert state.stage == "BUILD"
 
+    def test_empty_repo_returns_default_state(self, tmp_path):
+        """Test that missing state file returns default RalphState."""
+        from ralph.state import load_state
+
+        state = load_state(tmp_path)
         assert state is not None
-        assert hasattr(state, "stage")
-        assert hasattr(state, "spec")
-        assert hasattr(state, "config")
-        assert hasattr(state, "batch_items")
-
-    def test_reads_sample_plan_jsonl_copy(self, tmp_path):
-        """Test loading a copied plan.jsonl into tmp directory."""
-        from ralph.state import load_state
-
-        repo_root = get_repo_root()
-        plan_file = repo_root / "ralph" / "plan.jsonl"
-        if not plan_file.exists():
-            pytest.skip("ralph/plan.jsonl not found in repo")
-
-        tmp_plan = tmp_path / "plan.jsonl"
-        shutil.copy(plan_file, tmp_plan)
-
-        state = load_state(tmp_plan)
-
-        assert state is not None
-        assert isinstance(state.stage, str)
-        assert isinstance(state.batch_items, list)
-
-    def test_parses_orchestration_fields(self, tmp_path):
-        """Test that orchestration fields are parsed from plan.jsonl."""
-        from ralph.state import load_state
-
-        repo_root = get_repo_root()
-        plan_file = repo_root / "ralph" / "plan.jsonl"
-        if not plan_file.exists():
-            pytest.skip("ralph/plan.jsonl not found in repo")
-
-        state = load_state(plan_file)
-
-        # Stage should be a valid stage string
-        valid_stages = {"PLAN", "INVESTIGATE", "BUILD", "VERIFY", "DECOMPOSE", "COMPLETE"}
-        assert state.stage in valid_stages
+        assert state.stage == "PLAN"
+        assert state.spec is None
 
     def test_does_not_have_ticket_fields(self, tmp_path):
         """Test that RalphState no longer has ticket attributes."""
-        from ralph.state import load_state
+        from ralph.state import RalphState
 
-        repo_root = get_repo_root()
-        plan_file = repo_root / "ralph" / "plan.jsonl"
-        if not plan_file.exists():
-            pytest.skip("ralph/plan.jsonl not found in repo")
-
-        state = load_state(plan_file)
+        state = RalphState()
 
         # These fields are now owned by tix
         assert not hasattr(state, "tasks")
         assert not hasattr(state, "issues")
         assert not hasattr(state, "tombstones")
         assert not hasattr(state, "current_task_id")
+        assert not hasattr(state, "config")
 
-    def test_synthetic_plan_jsonl(self, tmp_path):
-        """Test loading a synthetic plan.jsonl with known content."""
-        from ralph.state import load_state
+    def test_state_roundtrip(self, tmp_path):
+        """Test save/load roundtrip for orchestration state."""
+        from ralph.state import RalphState, load_state, save_state
 
-        plan_content = [
-            {"t": "config", "timeout_ms": 300000, "max_iterations": 10},
-            {"t": "spec", "spec": "test-spec.md"},
-            {"t": "stage", "stage": "BUILD"},
-            # Ticket records should be ignored
-            {
-                "t": "task",
-                "id": "t-abc123",
-                "spec": "test-spec.md",
-                "name": "Test task",
-                "s": "p",
-                "notes": "Test notes here",
-                "accept": "test passes",
-                "deps": [],
-                "priority": "high",
-            },
-        ]
+        original = RalphState(spec="my-spec.md", stage="VERIFY")
+        original.batch_items = ["t-1"]
+        original.batch_attempt = 2
+        save_state(original, tmp_path)
 
-        plan_file = tmp_path / "plan.jsonl"
-        plan_file.write_text(
-            "\n".join(json.dumps(line) for line in plan_content)
-        )
-
-        state = load_state(plan_file)
-
-        assert state.spec == "test-spec.md"
-        assert state.stage == "BUILD"
-        assert state.config is not None
-        assert state.config.timeout_ms == 300000
-        # No ticket data on state
-        assert not hasattr(state, "tasks")
+        restored = load_state(tmp_path)
+        assert restored.spec == "my-spec.md"
+        assert restored.stage == "VERIFY"
+        assert restored.batch_items == ["t-1"]
+        assert restored.batch_attempt == 2
 
 
 class TestLoadsExistingPrompts:

@@ -38,6 +38,8 @@ typedef struct {
   char supersedes[TIX_MAX_ID_LEN];
   char deps[TIX_MAX_DEPS][TIX_MAX_ID_LEN];
   u32 dep_count;
+  char labels[TIX_MAX_LABELS][TIX_MAX_KEYWORD_LEN];
+  u32 label_count;
   char kill_reason[TIX_MAX_KEYWORD_LEN];
   /* denormalized reference context (populated at compact time) */
   char created_from_name[TIX_MAX_NAME_LEN];
@@ -87,6 +89,10 @@ tix_err_t tix_ticket_add_dep(tix_ticket_t *t, const char *dep_id);
 /* Write current time as ISO 8601 with timezone offset (e.g. "2026-02-07T14:30:00-08:00").
    Buffer must be at least 32 bytes. */
 tix_err_t tix_timestamp_iso8601(char *out, sz out_len);
+
+/* label helpers */
+tix_err_t tix_ticket_add_label(tix_ticket_t *t, const char *label);
+int tix_ticket_has_label(const tix_ticket_t *t, const char *label);
 
 /* validation helpers (shared by cmd_task, batch, validate) */
 int tix_is_valid_ticket_id(const char *id);

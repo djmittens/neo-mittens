@@ -27,6 +27,10 @@ def mock_tix():
     tix.task_delete.return_value = {"id": "t-abc", "status": "deleted"}
     tix.issue_add.return_value = {"id": "i-new123"}
     tix.issue_done_all.return_value = {"count": 2}
+    # task_batch_add returns a list of {"id": ...} for each task added
+    tix.task_batch_add.side_effect = lambda tasks: [
+        {"id": f"t-batch{i}"} for i in range(len(tasks))
+    ]
     return tix
 
 
@@ -119,11 +123,17 @@ class TestReconcileVerify:
         assert len(result.tasks_accepted) == 2
 
     def test_mixed_results(self, mock_tix):
+        mock_tix.query_full.return_value = {
+            "tasks": {"pending": [], "done": [{"id": "t-2", "reject_count": 0}]},
+        }
+        mock_tix.task_update.return_value = {"id": "t-2", "status": "updated"}
         output = '[RALPH_OUTPUT]\n{"results": [{"task_id": "t-1", "passed": true}, {"task_id": "t-2", "passed": false, "reason": "test fails"}]}\n[/RALPH_OUTPUT]'
         result = reconcile_verify(mock_tix, output)
         assert len(result.tasks_accepted) == 1
         assert len(result.tasks_rejected) == 1
         mock_tix.task_reject.assert_called_once_with("t-2", "test fails")
+        # reject_count should be incremented
+        mock_tix.task_update.assert_called_once_with("t-2", {"reject_count": 1})
 
     def test_with_new_tasks(self, mock_tix):
         output = '[RALPH_OUTPUT]\n{"results": [], "new_tasks": [{"name": "Fix X", "notes": "...", "accept": "..."}]}\n[/RALPH_OUTPUT]'
@@ -246,10 +256,10 @@ class TestReconcilePlan:
         result = reconcile_plan(mock_tix, output, "my-spec.md")
         assert result.ok
         assert len(result.tasks_added) == 2
-        # Check spec was set
-        calls = mock_tix.task_add.call_args_list
-        for call in calls:
-            assert call[0][0]["spec"] == "my-spec.md"
+        # Check spec was set via batch add
+        batch_call = mock_tix.task_batch_add.call_args[0][0]
+        for task_data in batch_call:
+            assert task_data["spec"] == "my-spec.md"
 
 
 # =============================================================================

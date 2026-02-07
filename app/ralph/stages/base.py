@@ -9,7 +9,7 @@ if TYPE_CHECKING:
     from ralph.config import GlobalConfig
     from ralph.context import Metrics, LoopDetector
     from ralph.state import RalphState
-    from ralph.tix import Tix
+    from ralph.tix import Tix, TixProtocol
 
 logger = logging.getLogger(__name__)
 
@@ -69,7 +69,7 @@ class ConstructStateMachine:
         ],
         load_state_fn: Callable[[], "RalphState"],
         save_state_fn: Callable[["RalphState"], None],
-        tix: Optional["Tix"] = None,
+        tix: Optional["TixProtocol"] = None,
         loop_detector: Optional["LoopDetector"] = None,
     ):
         """Initialize the state machine.
@@ -82,7 +82,7 @@ class ConstructStateMachine:
             run_stage_fn: Function to actually run a stage
             load_state_fn: Function to load orchestration state
             save_state_fn: Function to save orchestration state
-            tix: Tix instance for ticket queries
+            tix: Tix-compatible instance for ticket queries
             loop_detector: Optional loop detector
         """
         self.config = config
@@ -145,6 +145,143 @@ class ConstructStateMachine:
             return [i.get("id", "") for i in self.tix.query_issues()]
         except Exception:
             return []
+
+    def _escalate_stuck_tasks(self) -> int:
+        """Detect tasks stuck in reject loops and escalate them.
+
+        A task with reject_count >= max_retries_per_task is stuck.
+        Creates an issue describing the pattern and rejects the task
+        so the next INVESTIGATE stage can address the root cause.
+
+        Returns:
+            Number of tasks escalated.
+        """
+        if not self.tix:
+            return 0
+        max_retries = getattr(self.config, "max_retries_per_task", 3)
+        try:
+            tasks = self.tix.query_tasks()
+        except Exception:
+            return 0
+
+        escalated = 0
+        for task in tasks:
+            reject_count = task.get("reject_count", 0)
+            if reject_count < max_retries:
+                continue
+
+            task_id = task.get("id", "")
+            task_name = task.get("name", "")
+            reason = task.get("reject", "unknown")
+            logger.warning(
+                "Task %s rejected %d times — escalating to issue",
+                task_id, reject_count,
+            )
+            try:
+                self.tix.issue_add(
+                    f"Task '{task_name}' ({task_id}) has been rejected "
+                    f"{reject_count} times. Last reason: {reason}"
+                )
+                self.tix.task_reject(
+                    task_id,
+                    f"escalated: rejected {reject_count} times",
+                )
+            except Exception:
+                pass
+            escalated += 1
+
+        return escalated
+
+    @staticmethod
+    def _token_similarity(a: str, b: str) -> float:
+        """Jaccard similarity over word tokens.
+
+        Args:
+            a: First normalized string.
+            b: Second normalized string.
+
+        Returns:
+            Similarity score between 0.0 and 1.0.
+        """
+        tokens_a = set(a.split())
+        tokens_b = set(b.split())
+        if not tokens_a and not tokens_b:
+            return 1.0
+        if not tokens_a or not tokens_b:
+            return 0.0
+        intersection = tokens_a & tokens_b
+        union = tokens_a | tokens_b
+        return len(intersection) / len(union)
+
+    def _deduplicate_issues(self) -> int:
+        """Merge duplicate issues before INVESTIGATE.
+
+        Uses a two-pass strategy:
+        1. Exact match on normalized text (lowercase, collapse whitespace).
+        2. Fuzzy match via Jaccard token similarity for near-duplicates.
+
+        When duplicates are found, keeps the first and resolves the rest
+        via tix.
+
+        Returns:
+            Number of duplicate issues resolved.
+        """
+        if not self.tix:
+            return 0
+        try:
+            issues = self.tix.query_issues()
+        except Exception:
+            return 0
+        if len(issues) < 2:
+            return 0
+
+        threshold = getattr(
+            self.config, "issue_similarity_threshold", 0.8
+        )
+
+        # Build normalized descriptions
+        entries: list[tuple[str, str, str]] = []  # (id, normalized, raw)
+        for issue in issues:
+            desc = issue.get("desc", "")
+            issue_id = issue.get("id", "")
+            normalized = " ".join(desc.lower().split())
+            entries.append((issue_id, normalized, desc))
+
+        kept_ids: set[str] = set()
+        kept_descs: list[str] = []  # normalized descs of kept issues
+        dup_ids: list[str] = []
+
+        for issue_id, normalized, _raw in entries:
+            is_dup = False
+            # Pass 1: exact match
+            if normalized in kept_descs:
+                is_dup = True
+            # Pass 2: fuzzy match (only if not already exact)
+            if not is_dup and threshold < 1.0:
+                for kept in kept_descs:
+                    if self._token_similarity(normalized, kept) >= threshold:
+                        is_dup = True
+                        break
+
+            if is_dup:
+                dup_ids.append(issue_id)
+            else:
+                kept_ids.add(issue_id)
+                kept_descs.append(normalized)
+
+        if not dup_ids:
+            return 0
+
+        try:
+            self.tix.issue_done_ids(dup_ids)
+            logger.info(
+                "Deduplicated %d issue(s): %s", len(dup_ids), dup_ids
+            )
+        except Exception as e:
+            logger.warning("Failed to deduplicate issues: %s", e)
+            return 0
+
+        return len(dup_ids)
 
     # =========================================================================
     # Iteration dispatch
@@ -215,6 +352,7 @@ class ConstructStateMachine:
 
     def _run_investigate(self, state: "RalphState") -> tuple[bool, bool]:
         """Run INVESTIGATE stage with bounded batching."""
+        self._deduplicate_issues()
         issue_ids = self._get_issue_ids()
         if issue_ids:
             batch_size = self._effective_batch_size(
@@ -260,6 +398,8 @@ class ConstructStateMachine:
 
     def _run_build(self, state: "RalphState") -> tuple[bool, bool]:
         """Run BUILD stage. Transitions to VERIFY."""
+        self._escalate_stuck_tasks()
+
         if self._has_pending_tasks():
             result = self._run_stage_with_state(Stage.BUILD, state)
 

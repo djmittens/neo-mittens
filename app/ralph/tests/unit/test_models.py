@@ -1,7 +1,6 @@
 """Unit tests for ralph.models module."""
 
-import pytest
-from ralph.models import Task, Issue, Tombstone, RalphPlanConfig
+from ralph.models import Task, Issue, Tombstone
 
 
 class TestTask:
@@ -335,84 +334,4 @@ class TestTombstone:
         assert restored.notes == original.notes
 
 
-class TestRalphPlanConfig:
-    """Tests for RalphPlanConfig model."""
 
-    def test_ralph_plan_config_defaults(self):
-        """Test RalphPlanConfig with default values."""
-        config = RalphPlanConfig()
-        assert config.timeout_ms == 900000
-        assert config.max_iterations == 10
-        assert config.context_warn == 0.70
-        assert config.context_compact == 0.85
-        assert config.context_kill == 0.95
-
-    def test_ralph_plan_config_custom(self):
-        """Test RalphPlanConfig with custom values."""
-        config = RalphPlanConfig(
-            timeout_ms=600000,
-            max_iterations=5,
-            context_warn=0.60,
-            context_compact=0.80,
-            context_kill=0.90,
-        )
-        assert config.timeout_ms == 600000
-        assert config.max_iterations == 5
-        assert config.context_warn == 0.60
-        assert config.context_compact == 0.80
-        assert config.context_kill == 0.90
-
-    def test_ralph_plan_config_to_dict(self):
-        """Test RalphPlanConfig serialization to dict."""
-        config = RalphPlanConfig(timeout_ms=120000, max_iterations=3)
-        d = config.to_dict()
-        assert d["t"] == "config"
-        assert d["timeout_ms"] == 120000
-        assert d["max_iterations"] == 3
-        assert d["context_warn"] == 0.70
-        assert d["context_compact"] == 0.85
-        assert d["context_kill"] == 0.95
-
-    def test_ralph_plan_config_from_dict(self):
-        """Test RalphPlanConfig deserialization from dict."""
-        d = {
-            "t": "config",
-            "timeout_ms": 300000,
-            "max_iterations": 15,
-            "context_warn": 0.50,
-            "context_compact": 0.75,
-            "context_kill": 0.92,
-        }
-        config = RalphPlanConfig.from_dict(d)
-        assert config.timeout_ms == 300000
-        assert config.max_iterations == 15
-        assert config.context_warn == 0.50
-        assert config.context_compact == 0.75
-        assert config.context_kill == 0.92
-
-    def test_ralph_plan_config_from_dict_defaults(self):
-        """Test RalphPlanConfig from_dict with missing keys uses defaults."""
-        d = {"t": "config"}
-        config = RalphPlanConfig.from_dict(d)
-        assert config.timeout_ms == 900000
-        assert config.max_iterations == 10
-        assert config.context_warn == 0.70
-        assert config.context_compact == 0.85
-        assert config.context_kill == 0.95
-
-    def test_ralph_plan_config_roundtrip(self):
-        """Test RalphPlanConfig serialization roundtrip."""
-        original = RalphPlanConfig(
-            timeout_ms=450000,
-            max_iterations=8,
-            context_warn=0.65,
-            context_compact=0.82,
-            context_kill=0.93,
-        )
-        d = original.to_dict()
-        restored = RalphPlanConfig.from_dict(d)
-        assert restored.timeout_ms == original.timeout_ms
-        assert restored.max_iterations == original.max_iterations
-        assert restored.context_warn == original.context_warn
-        assert restored.context_compact == original.context_compact
-        assert restored.context_kill == original.context_kill

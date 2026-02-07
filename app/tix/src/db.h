@@ -3,6 +3,7 @@
 #include "types.h"
 #include "common.h"
 #include "ticket.h"
+#include "tql.h"
 #include "sqlite3.h"
 
 typedef struct {
@@ -27,6 +28,22 @@ tix_err_t tix_db_list_tickets(tix_db_t *db, tix_ticket_type_e type,
                               tix_ticket_t *out, u32 *count, u32 max);
 tix_err_t tix_db_count_tickets(tix_db_t *db, tix_ticket_type_e type,
                                tix_status_e status, u32 *count);
+
+/* Filter criteria for flexible queries. NULL/empty fields = no filter. */
+typedef struct {
+  tix_ticket_type_e type;
+  tix_status_e status;
+  const char *label;       /* match tickets with this label */
+  const char *spec;        /* match tickets with this spec (prefix match) */
+  const char *author;      /* match tickets by this author */
+  tix_priority_e priority; /* TIX_PRIORITY_NONE = no filter */
+  int filter_priority;     /* 1 = filter by priority field, 0 = ignore */
+} tix_db_filter_t;
+
+tix_err_t tix_db_list_tickets_filtered(tix_db_t *db,
+                                       const tix_db_filter_t *filter,
+                                       tix_ticket_t *out, u32 *count,
+                                       u32 max);
 
 tix_err_t tix_db_upsert_tombstone(tix_db_t *db, const tix_tombstone_t *ts);
 tix_err_t tix_db_list_tombstones(tix_db_t *db, int is_accept,
@@ -76,3 +93,13 @@ typedef struct {
 } tix_ref_counts_t;
 
 tix_err_t tix_db_count_refs(tix_db_t *db, tix_ref_counts_t *counts);
+
+/* ---- TQL execution ---- */
+
+/* Execute a compiled TQL query and write JSON results to stdout.
+   Handles both aggregate (objects with named columns) and row queries. */
+tix_err_t tix_db_exec_tql(tix_db_t *db, const tql_compiled_t *compiled);
+
+/* Execute raw SQL and write JSON results to stdout.
+   Each row is a JSON object with column names as keys. */
+tix_err_t tix_db_exec_raw_sql(tix_db_t *db, const char *sql);

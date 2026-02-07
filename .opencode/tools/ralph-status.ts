@@ -1,6 +1,7 @@
 import { tool } from "@opencode-ai/plugin"
 import { existsSync } from "fs"
 import { readdir, readFile } from "fs/promises"
+import { execSync } from "child_process"
 
 export default tool({
   description: `Show Ralph status for the current repository.
@@ -10,7 +11,7 @@ Reports: initialization state, spec count, task counts, and latest log.`,
   async execute(args, context) {
     const ralphDir = "ralph"
     const specsDir = `${ralphDir}/specs`
-    const planFile = `${ralphDir}/plan.jsonl`
+    const stateFile = ".tix/ralph-state.json"
     const logsDir = "build/ralph-logs"
 
     // Check if initialized
@@ -28,39 +29,48 @@ Reports: initialization state, spec count, task counts, and latest log.`,
     }
     results.push(`**Specs:** ${specCount} files`)
 
-    // Parse plan.jsonl for task counts
-    if (existsSync(planFile)) {
-      const content = await readFile(planFile, "utf-8")
-      const lines = content.trim().split("\n").filter(l => l.trim())
-      
-      let currentSpec = null
-      let pending = 0
-      let done = 0
-      let issues = 0
-      
-      for (const line of lines) {
-        try {
-          const obj = JSON.parse(line)
-          if (obj.t === "spec") {
-            currentSpec = obj.spec
-          } else if (obj.t === "task") {
-            if (obj.s === "p") pending++
-            else if (obj.s === "d") done++
-          } else if (obj.t === "issue") {
-            issues++
-          }
-        } catch (e) {
-          // Skip malformed lines
-        }
+    // Read orchestration state from ralph-state.json
+    let stage = "PLAN"
+    let spec: string | null = null
+    if (existsSync(stateFile)) {
+      try {
+        const content = await readFile(stateFile, "utf-8")
+        const state = JSON.parse(content)
+        stage = state.stage || "PLAN"
+        spec = state.spec || null
+      } catch {
+        // Ignore parse errors
       }
-      
-      results.push(`**Current spec:** ${currentSpec || "none"}`)
+    }
+
+    if (spec) {
+      results.push(`**Current spec:** ${spec}`)
+    }
+    results.push(`**Stage:** ${stage}`)
+
+    // Get ticket counts from tix CLI
+    try {
+      const queryOutput = execSync("tix query", {
+        encoding: "utf-8",
+        timeout: 5000,
+      }).trim()
+
+      const state = JSON.parse(queryOutput)
+      const pending = state.tasks?.pending?.length || 0
+      const done = state.tasks?.done?.length || 0
+      const issues = state.issues?.length || 0
+
       results.push(`**Tasks:** ${pending} pending, ${done} done`)
       if (issues > 0) {
         results.push(`**Issues:** ${issues}`)
       }
-    } else {
-      results.push("**Tasks:** No plan yet (run `ralph plan <spec>`)")
+    } catch {
+      // tix not available — check if initialized
+      if (existsSync(".tix")) {
+        results.push("**Tasks:** tix query failed (binary may need building)")
+      } else {
+        results.push("**Tasks:** No plan yet (run `ralph plan <spec>`)")
+      }
     }
 
     // Find latest log

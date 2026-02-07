@@ -1,8 +1,10 @@
 #include "cmd.h"
+#include "color.h"
 #include "log.h"
 
 #include <stdio.h>
 #include <string.h>
+#include <unistd.h>
 
 static void print_usage(void) {
   fprintf(stderr,
@@ -15,7 +17,9 @@ static void print_usage(void) {
     "  task <sub> [args]     Task operations (add|done|accept|reject|delete|prioritize|update)\n"
     "  issue <sub> [args]    Issue operations (add|done|done-all|done-ids)\n"
     "  note <sub> [args]     Note operations (add|list|done)\n"
-    "  query [sub] [args]    Query state (tasks|issues|full)\n"
+    "  q \"<tql>\"              TQL pipeline query (e.g. \"tasks | count\")\n"
+    "  q sql \"<sql>\"          Raw SQL query (SELECT/WITH only)\n"
+    "  query [sub] [args]    Legacy query (tasks|issues|full + --flags)\n"
     "  status                Human-readable dashboard\n"
     "  log                   Git history of plan changes\n"
     "  tree [id]             Dependency tree visualization\n"
@@ -58,6 +62,9 @@ int main(int argc, char **argv) {
   tix_err_t err = tix_ctx_init(&ctx);
   if (err != TIX_OK) { return 1; }
 
+  /* Initialize color support based on config + TTY detection */
+  tix_color_init(ctx.config.color, STDOUT_FILENO);
+
   int remaining_argc = argc - 2;
   char **remaining_argv = argv + 2;
 
@@ -67,7 +74,7 @@ int main(int argc, char **argv) {
     err = tix_cmd_issue(&ctx, remaining_argc, remaining_argv);
   } else if (strcmp(cmd, "note") == 0) {
     err = tix_cmd_note(&ctx, remaining_argc, remaining_argv);
-  } else if (strcmp(cmd, "query") == 0) {
+  } else   if (strcmp(cmd, "query") == 0 || strcmp(cmd, "q") == 0) {
     err = tix_cmd_query(&ctx, remaining_argc, remaining_argv);
   } else if (strcmp(cmd, "status") == 0) {
     err = tix_cmd_status(&ctx, remaining_argc, remaining_argv);

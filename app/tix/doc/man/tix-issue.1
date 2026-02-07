@@ -1,0 +1,76 @@
+.TH TIX\-ISSUE 1 "February 2026" "tix" "User Commands"
+.SH NAME
+tix\-issue \- manage issues in the tix ticket system
+.SH SYNOPSIS
+.B tix issue add
+.I "description"
+.br
+.B tix issue done
+.RI [ id ]
+.br
+.B tix issue done\-all
+.br
+.B tix issue done\-ids
+.IR id1 " " id2 " ..."
+.SH DESCRIPTION
+Issues are bug reports and problems tracked alongside tasks.
+Unlike tasks, issues have no lifecycle states\(emthey are either
+open (pending) or resolved (deleted).
+.PP
+Issue IDs use the prefix
+.BR I\- .
+.SH SUBCOMMANDS
+.SS tix issue add \fI"description"\fR
+Create a new issue.
+The description must be non\-empty.
+The author is auto\-filled from
+.BR "git config user.name" .
+.PP
+.B Output:
+.RS
+.nf
+{"id":"I\-XXXXXXXX","desc":"..."}
+.fi
+.RE
+.SS tix issue done \fR[\fIid\fR]
+Resolve a single issue.
+If
+.I id
+is omitted, the first pending issue is resolved.
+.PP
+.B Output:
+.RS
+.nf
+{"id":"I\-XXXXXXXX","status":"resolved"}
+.fi
+.RE
+.SS tix issue done\-all
+Resolve all pending issues at once.
+.PP
+.B Output:
+.RS
+.nf
+{"resolved":N}
+.fi
+.RE
+.SS tix issue done\-ids \fIid1\fR \fIid2\fR ...
+Resolve specific issues by ID.
+At least one ID is required.
+IDs that cannot be resolved are silently skipped.
+.PP
+.B Output:
+.RS
+.nf
+{"resolved":N}
+.fi
+.RE
+.SH EXIT STATUS
+.TP
+.B 0
+Command succeeded.
+.TP
+.B 1
+Invalid arguments or no issues found.
+.SH SEE ALSO
+.BR tix (1),
+.BR tix\-task (1)

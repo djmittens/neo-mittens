@@ -51,7 +51,7 @@ tix reads/writes `.tix/plan.jsonl` (the git-tracked source of truth) and caches 
 
 Single task:
 ```bash
-tix task add '{"name": "Implement feature X", "spec": "my-spec.md", "notes": "Details here", "accept": "tests pass", "priority": "high"}'
+tix task add '{"name": "Implement feature X", "spec": "my-spec.md", "notes": "Details here", "accept": "tests pass", "priority": "high", "labels": ["module:core", "epic:v2"]}'
 ```
 
 Batch add (faster, supports intra-batch dependencies):
@@ -71,6 +71,7 @@ tix task add '[
 | `notes` | No | Implementation details |
 | `accept` | No | Acceptance criteria |
 | `deps` | No | Array of dependency task IDs |
+| `labels` | No | Array of freeform label strings (max 16, e.g. `"module:parser"`) |
 | `priority` | No | `"high"`, `"medium"`, or `"low"` |
 | `parent` | No | Decomposed from task ID |
 | `created_from` | No | Created from issue ID |
@@ -115,6 +116,7 @@ tix task reject t-a1b2c3d4 "Tests fail on edge case"
 tix task delete t-a1b2c3d4        # Remove task entirely
 tix task prioritize t-a1b2c3d4 high  # Set priority
 tix task update t-a1b2c3d4 '{"cost": 0.52, "tokens_in": 50000}'  # Attach telemetry
+tix task update t-a1b2c3d4 '{"labels": ["module:parser", "epic:auth"]}'  # Set labels
 ```
 
 ## Issue Management
@@ -149,6 +151,15 @@ tix query tasks                   # Pending tasks only
 tix query tasks --done            # Done tasks
 tix query issues                  # Issues only
 tix query full                    # Full state with tombstones
+
+# Filtered queries (flags can be combined, AND logic):
+tix query tasks --label module:parser       # Filter by label
+tix query tasks --spec coverage.md          # Filter by spec file
+tix query tasks --author Alice              # Filter by author
+tix query tasks --priority high             # Filter by priority
+tix query tasks --label epic:auth --priority high  # Combined filters
+tix query tasks --done --label module:db    # Done tasks with label
+tix query issues --label urgent             # Issues with label
 ```
 
 Output format:
@@ -241,7 +252,7 @@ The SQLite cache uses schema versioning. When the schema version bumps (new fiel
 
 tix reads/writes `.tix/plan.jsonl` (append-only, line-delimited JSON):
 ```jsonl
-{"t":"task","id":"t-1a2b","name":"...","s":"p","author":"jane","spec":"coverage.md"}
+{"t":"task","id":"t-1a2b","name":"...","s":"p","author":"jane","spec":"coverage.md","labels":["module:core","epic:v2"]}
 {"t":"task","id":"t-1a2b","name":"...","s":"d","done_at":"abc123","completed_at":"2026-02-07T14:30:00-08:00","cost":0.52,"tokens_in":50000,"tokens_out":3000,"iterations":5,"model":"claude-sonnet-4-20250514"}
 {"t":"issue","id":"i-7g8h","name":"...","author":"ralph"}
 {"t":"accept","id":"t-1a2b","done_at":"abc123","reason":"","name":"..."}
@@ -263,10 +274,10 @@ Status values (`s`): `"p"` = pending, `"d"` = done, `"a"` = accepted. Zero/empty
 cd app/tix
 make build        # Debug build (Ninja)
 make build-asan   # AddressSanitizer build
-make test         # Run all 94 E2E tests
+make test         # Run all E2E tests
 make test-asan    # Tests under ASAN
 make lint         # clang-tidy
-make install      # Copy to powerplant/tix
+make help         # Show available targets
 ```
 
 ## Common Workflows
@@ -296,6 +307,24 @@ tix task accept t-xxxx            # Accept after verification
 ```bash
 tix task done t-xxxx
 tix task update t-xxxx '{"cost": 1.23, "tokens_in": 80000, "tokens_out": 5000, "iterations": 3, "model": "claude-sonnet-4-20250514"}'
+```
+
+### Using labels for organization
+
+```bash
+# Add tasks with labels for module/epic tracking
+tix task add '{"name": "Implement parser", "spec": "parser.md", "accept": "tests pass", "labels": ["module:parser", "epic:v2"]}'
+tix task add '{"name": "Fix DB schema", "spec": "db.md", "accept": "migration works", "labels": ["module:db", "epic:v2"]}'
+
+# Query by label
+tix query tasks --label module:parser     # All parser tasks
+tix query tasks --label epic:v2           # All v2 epic tasks
+
+# Update labels on existing task
+tix task update t-xxxx '{"labels": ["module:parser", "epic:v2", "blocked"]}'
+
+# Combine filters for precise queries
+tix query tasks --label epic:v2 --spec parser.md --priority high
 ```
 
 ### Investigating issues

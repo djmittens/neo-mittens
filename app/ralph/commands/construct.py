@@ -24,7 +24,7 @@ from ..config import GlobalConfig
 from ..context import Metrics, LoopDetector, SessionSummary
 from ..git import (
     get_current_branch,
-    has_uncommitted_plan,
+    has_uncommitted_tix,
     push_with_retry,
     sync_with_remote,
 )
@@ -45,7 +45,7 @@ from ..reconcile import (
     reconcile_decompose,
     ReconcileResult,
 )
-from ..tix import Tix, TixError
+from ..tix import Tix, TixError, TixProtocol
 from ..stages.base import (
     ConstructStateMachine,
     Stage,
@@ -87,9 +87,64 @@ def _check_opencode_available() -> Tuple[bool, str]:
         return False, f"Error checking opencode: {e}"
 
 
+def _load_spec_content(ralph_dir: Path, spec_name: str) -> str:
+    """Load spec file content for prompt injection.
+
+    Args:
+        ralph_dir: Path to ralph directory.
+        spec_name: Name of the spec file (e.g. "feature.md").
+
+    Returns:
+        Spec file content, or empty string if not found.
+    """
+    if not spec_name:
+        return ""
+    spec_path = ralph_dir / "specs" / spec_name
+    if not spec_path.exists():
+        return ""
+    try:
+        return spec_path.read_text()
+    except OSError:
+        return ""
+
+
+_PRIORITY_ORDER = {"high": 0, "medium": 1, "low": 2}
+
+
+def _pick_best_task(tasks: list[dict]) -> dict:
+    """Select the highest-priority task from a list of pending tasks.
+
+    Priority ordering:
+      0. Dependency readiness: tasks with unmet deps sort last
+      1. Priority field: high > medium > low > unset
+      2. Reject count: prefer fresher tasks (lower reject_count)
+      3. Original order preserved as tiebreaker
+
+    A dep is "unmet" if its ID is still in the pending task list.
+
+    Args:
+        tasks: Non-empty list of task dicts from tix.
+
+    Returns:
+        The best task to build next.
+    """
+    pending_ids = {t.get("id", "") for t in tasks}
+
+    def sort_key(task: dict) -> tuple[int, int, int]:
+        deps = task.get("deps") or []
+        unmet = 1 if any(d in pending_ids for d in deps) else 0
+        prio = _PRIORITY_ORDER.get(
+            task.get("priority", ""), 3
+        )
+        reject_count = task.get("reject_count", 0)
+        return (unmet, prio, reject_count)
+
+    return min(tasks, key=sort_key)
+
+
 def _build_stage_prompt_tix(
     stage: Stage,
-    tix: Tix,
+    tix: TixProtocol,
     state: RalphState,
     ralph_dir: Path,
     project_rules: Optional[str] = None,
@@ -105,22 +160,13 @@ def _build_stage_prompt_tix(
     stage_name = stage.name.lower()
     spec_name = state.spec or ""
     meta: dict = {}
-
-    # Read spec file content for prompt injection
-    spec_content = ""
-    if spec_name:
-        spec_path = ralph_dir / "specs" / spec_name
-        if spec_path.exists():
-            try:
-                spec_content = spec_path.read_text()
-            except OSError:
-                pass
+    spec_content = _load_spec_content(ralph_dir, spec_name)
     
     if stage == Stage.BUILD:
         tasks = tix.query_tasks()
         if not tasks:
             return None, None
-        task = tasks[0]
+        task = _pick_best_task(tasks)
         context = build_build_context(task, spec_name, spec_content)
         meta["task_id"] = task.get("id", "")
     elif stage == Stage.VERIFY:
@@ -174,7 +220,7 @@ def _build_stage_prompt_tix(
 
 def _reconcile_stage(
     stage: Stage,
-    tix: Tix,
+    tix: TixProtocol,
     agent_output: str,
     meta: dict,
 ) -> ReconcileResult:
@@ -207,18 +253,6 @@ def _reconcile_stage(
         )
     else:
         return ReconcileResult(ok=False, errors=[f"Unknown stage: {stage}"])
-
-
-def _should_skip_stage_tix(stage: Stage, tix: Tix) -> bool:
-    """Check if stage should be skipped based on tix state."""
-    if stage == Stage.INVESTIGATE:
-        return not tix.query_issues()
-    if stage == Stage.BUILD:
-        return not tix.query_tasks()
-    if stage == Stage.VERIFY:
-        full = tix.query_full()
-        return not full.get("tasks", {}).get("done", [])
-    return False
 
 
 def _make_result(
@@ -280,13 +314,10 @@ def _run_stage(
     ralph_dir: Path,
     project_rules: Optional[str],
     print_output: bool,
-    tix: Tix,
+    tix: TixProtocol,
     start_time: float,
 ) -> StageResult:
     """Run a stage using tix for ticket data and reconcile after."""
-    if _should_skip_stage_tix(stage, tix):
-        return _make_result(stage, StageOutcome.SKIP)
-
     prompt, meta = _build_stage_prompt_tix(
         stage, tix, state, ralph_dir, project_rules, config
     )
@@ -361,44 +392,37 @@ def _run_stage(
 
 def _validate_config(
     config: dict, args_spec: Optional[str] = None
-) -> Tuple[Optional[Path], Optional[Path], Optional[Path], Optional[str]]:
+) -> Tuple[Optional[Path], Optional[Path], Optional[str]]:
     """Validate and extract paths from config dict.
 
     Returns:
-        Tuple of (plan_file, repo_root, ralph_dir, error_message).
+        Tuple of (repo_root, ralph_dir, error_message).
     """
-    plan_file: Optional[Path] = config.get("plan_file")
     repo_root: Optional[Path] = config.get("repo_root")
     ralph_dir: Optional[Path] = config.get("ralph_dir")
 
-    if not plan_file or not plan_file.exists():
+    if not ralph_dir or not ralph_dir.exists():
         if args_spec:
-            # If spec is provided, initialize directory and create state with spec
+            # If spec is provided, initialize directory
             cmd_init()
-            # After init, compute paths from current directory
             repo_root = Path.cwd()
             global_config = GlobalConfig.load()
             ralph_dir = repo_root / global_config.ralph_dir
-            plan_file = ralph_dir / "plan.jsonl"
-            # Update config dict for caller
-            config["plan_file"] = plan_file
             config["repo_root"] = repo_root
             config["ralph_dir"] = ralph_dir
         else:
             return (
                 None,
                 None,
-                None,
-                "No plan file found. Run 'ralph init' or 'ralph plan' first.",
+                "Ralph not initialized. Run 'ralph init' or 'ralph plan' first.",
             )
     if not repo_root or not ralph_dir:
         return (
             None,
             None,
-            None,
             "Invalid configuration: missing repo_root or ralph_dir.",
         )
-    return plan_file, repo_root, ralph_dir, None
+    return repo_root, ralph_dir, None
 
 
 def _print_construct_header(
@@ -454,7 +478,7 @@ def _print_construct_header(
 
 
 def _run_acceptance_precheck(
-    tix: Tix,
+    tix: TixProtocol,
     repo_root: Path,
     timeout_seconds: int = 60,
 ) -> int:
@@ -465,7 +489,7 @@ def _run_acceptance_precheck(
     Tasks without a runnable accept command are left for the agent.
 
     Args:
-        tix: Tix instance.
+        tix: Tix-compatible instance.
         repo_root: Repository root for subprocess cwd.
         timeout_seconds: Max seconds per acceptance command.
 
@@ -678,13 +702,13 @@ def cmd_construct(
     """
     cwd = Path.cwd()
     spec = _get_spec_from_args(args)
-    plan_file_opt, repo_root_opt, ralph_dir_opt, error = _validate_config(config, spec)
+    repo_root_opt, ralph_dir_opt, error = _validate_config(config, spec)
 
-    if error or not plan_file_opt or not repo_root_opt or not ralph_dir_opt:
+    if error or not repo_root_opt or not ralph_dir_opt:
         print(f"{Colors.RED}{error or 'Invalid configuration'}{Colors.NC}")
         return 1
 
-    plan_file, repo_root, ralph_dir = plan_file_opt, repo_root_opt, ralph_dir_opt
+    repo_root, ralph_dir = repo_root_opt, ralph_dir_opt
     
     # Pre-flight check: validate opencode
     opencode_ok, opencode_error = _check_opencode_available()
@@ -696,10 +720,10 @@ def cmd_construct(
         return 1
     
     # Load state
-    state = load_state(plan_file)
+    state = load_state(repo_root)
     if spec and not state.spec:
         state.spec = spec
-        save_state(state, plan_file)
+        save_state(state, repo_root)
     
     if not state.spec:
         print(f"{Colors.YELLOW}No spec configured - run 'ralph plan <spec.md>' first{Colors.NC}")
@@ -759,8 +783,8 @@ def cmd_construct(
         run_stage_fn=_create_stage_wrapper(
             repo_root, ralph_dir, project_rules, tix_instance
         ),
-        load_state_fn=lambda: load_state(plan_file),
-        save_state_fn=lambda st: save_state(st, plan_file),
+        load_state_fn=lambda: load_state(repo_root),
+        save_state_fn=lambda st: save_state(st, repo_root),
         tix=tix_instance,
         loop_detector=loop_detector,
     )
@@ -785,6 +809,7 @@ def cmd_construct(
             metrics.total_iterations = iteration
             
             # Sync with remote before each iteration
+            plan_file = tix_instance.plan_file()
             sync_result = sync_with_remote(branch, plan_file, cwd)
             if sync_result == "conflict":
                 print(f"{Colors.RED}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━{Colors.NC}")
@@ -795,7 +820,7 @@ def cmd_construct(
                 break
             elif sync_result == "updated":
                 print(f"{Colors.CYAN}Synced with remote - reloading state{Colors.NC}")
-                state = load_state(plan_file)
+                state = load_state(repo_root)
             
             # Print iteration header
             if max_cost > 0:
@@ -824,10 +849,15 @@ def cmd_construct(
                 exit_reason = "loop_detected"
                 break
             
-            # Commit any plan changes
-            if has_uncommitted_plan(plan_file, cwd):
+            # Commit any tix plan changes
+            plan_file = tix_instance.plan_file()
+            state_file = cwd / ".tix" / "ralph-state.json"
+            if has_uncommitted_tix(plan_file, state_file, cwd):
+                files_to_add = [str(plan_file)]
+                if state_file.exists():
+                    files_to_add.append(str(state_file))
                 subprocess.run(
-                    ["git", "add", str(plan_file)],
+                    ["git", "add"] + files_to_add,
                     cwd=cwd,
                     capture_output=True,
                 )
@@ -840,16 +870,14 @@ def cmd_construct(
             # Push changes with retry
             if not push_with_retry(branch, retries=2, plan_file=plan_file, cwd=cwd):
                 print(f"{Colors.YELLOW}Push failed - continuing without push{Colors.NC}")
-            
 
-    
     except KeyboardInterrupt:
         print(f"\n{Colors.YELLOW}Interrupted by user{Colors.NC}")
         exit_reason = "interrupted"
     
     finally:
         # Reload final state
-        state = load_state(plan_file)
+        state = load_state(repo_root)
         
         # Print final report
         _print_final_report(metrics, exit_reason, iteration, state, tix_instance)

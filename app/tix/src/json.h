@@ -9,8 +9,9 @@
  * Only handles flat objects with string/number values and string arrays.
  */
 
-#define TIX_JSON_MAX_KEYS   32
-#define TIX_JSON_MAX_ARRLEN 32
+#define TIX_JSON_MAX_KEYS     32
+#define TIX_JSON_MAX_ARRLEN   32
+#define TIX_JSON_MAX_ARRVAL   64  /* max length per array element string */
 
 typedef enum {
   TIX_JSON_STRING,
@@ -27,8 +28,8 @@ typedef struct {
   i64 num_val;
   double dbl_val;  /* populated for NUMBER type alongside num_val */
   int bool_val;
-  /* for arrays of strings */
-  char arr_vals[TIX_JSON_MAX_ARRLEN][TIX_MAX_ID_LEN];
+  /* for arrays of strings (sized for labels; IDs fit too) */
+  char arr_vals[TIX_JSON_MAX_ARRLEN][TIX_JSON_MAX_ARRVAL];
   u32 arr_count;
 } tix_json_field_t;
 

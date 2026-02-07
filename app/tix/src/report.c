@@ -1,4 +1,5 @@
 #include "report.h"
+#include "color.h"
 #include "log.h"
 
 #include <stdio.h>
@@ -65,38 +66,54 @@ tix_err_t tix_report_print(const tix_report_t *r, char *buf, sz buf_len) {
   char *p = buf;
   char *end = buf + buf_len;
 
-  TIX_BUF_PRINTF(p, end, TIX_ERR_OVERFLOW, "Progress Report\n");
-  TIX_BUF_PRINTF(p, end, TIX_ERR_OVERFLOW, "===============\n");
+  TIX_BUF_COLOR(p, end, TIX_ERR_OVERFLOW, TIX_BOLD TIX_CYAN,
+                "Progress Report\n");
+  TIX_BUF_COLOR(p, end, TIX_ERR_OVERFLOW, TIX_DIM, "===============\n");
 
   u32 completed = r->done_tasks + r->accepted_tasks;
   int pct = (r->total_tasks > 0) ? (int)(completed * 100 / r->total_tasks) : 0;
 
-  TIX_BUF_PRINTF(p, end, TIX_ERR_OVERFLOW,
-                 "Tasks: %u total, %u pending, %u done, %u accepted (%d%%)\n",
-                 r->total_tasks, r->pending_tasks, r->done_tasks,
-                 r->accepted_tasks, pct);
+  TIX_BUF_PRINTF(p, end, TIX_ERR_OVERFLOW, "Tasks: ");
+  TIX_BUF_COLOR(p, end, TIX_ERR_OVERFLOW, TIX_BOLD, "%u", r->total_tasks);
+  TIX_BUF_PRINTF(p, end, TIX_ERR_OVERFLOW, " total, ");
+  TIX_BUF_COLOR(p, end, TIX_ERR_OVERFLOW, TIX_YELLOW, "%u pending",
+                r->pending_tasks);
+  TIX_BUF_PRINTF(p, end, TIX_ERR_OVERFLOW, ", ");
+  TIX_BUF_COLOR(p, end, TIX_ERR_OVERFLOW, TIX_GREEN, "%u done",
+                r->done_tasks);
+  TIX_BUF_PRINTF(p, end, TIX_ERR_OVERFLOW, ", ");
+  TIX_BUF_COLOR(p, end, TIX_ERR_OVERFLOW, TIX_BRIGHT_GREEN, "%u accepted",
+                r->accepted_tasks);
+  TIX_BUF_COLOR(p, end, TIX_ERR_OVERFLOW, TIX_DIM, " (%d%%)", pct);
+  TIX_BUF_PRINTF(p, end, TIX_ERR_OVERFLOW, "\n");
 
   if (r->total_issues > 0) {
-    TIX_BUF_PRINTF(p, end, TIX_ERR_OVERFLOW,
-                   "Issues: %u open\n", r->total_issues);
+    TIX_BUF_COLOR(p, end, TIX_ERR_OVERFLOW, TIX_MAGENTA,
+                  "Issues: %u open", r->total_issues);
+    TIX_BUF_PRINTF(p, end, TIX_ERR_OVERFLOW, "\n");
   }
   if (r->total_notes > 0) {
     TIX_BUF_PRINTF(p, end, TIX_ERR_OVERFLOW,
                    "Notes: %u\n", r->total_notes);
   }
   if (r->blocked_count > 0) {
+    TIX_BUF_COLOR(p, end, TIX_ERR_OVERFLOW, TIX_BOLD TIX_RED,
+                  "Blocked: %u", r->blocked_count);
     TIX_BUF_PRINTF(p, end, TIX_ERR_OVERFLOW,
-                   "Blocked: %u (waiting on dependencies)\n",
-                   r->blocked_count);
+                   " (waiting on dependencies)\n");
   }
 
   TIX_BUF_PRINTF(p, end, TIX_ERR_OVERFLOW, "\nBy Priority:\n");
-  TIX_BUF_PRINTF(p, end, TIX_ERR_OVERFLOW,
-                 "  High:   %u\n", r->high_priority);
-  TIX_BUF_PRINTF(p, end, TIX_ERR_OVERFLOW,
-                 "  Medium: %u\n", r->medium_priority);
-  TIX_BUF_PRINTF(p, end, TIX_ERR_OVERFLOW,
-                 "  Low:    %u\n", r->low_priority);
+  TIX_BUF_PRINTF(p, end, TIX_ERR_OVERFLOW, "  ");
+  TIX_BUF_COLOR(p, end, TIX_ERR_OVERFLOW, TIX_BRIGHT_RED,
+                "High:   %u", r->high_priority);
+  TIX_BUF_PRINTF(p, end, TIX_ERR_OVERFLOW, "\n  ");
+  TIX_BUF_COLOR(p, end, TIX_ERR_OVERFLOW, TIX_YELLOW,
+                "Medium: %u", r->medium_priority);
+  TIX_BUF_PRINTF(p, end, TIX_ERR_OVERFLOW, "\n  ");
+  TIX_BUF_COLOR(p, end, TIX_ERR_OVERFLOW, TIX_DIM,
+                "Low:    %u", r->low_priority);
+  TIX_BUF_PRINTF(p, end, TIX_ERR_OVERFLOW, "\n");
 
   return TIX_OK;
 }
@@ -239,23 +256,31 @@ tix_err_t tix_report_summary_print(const tix_summary_report_t *r,
   char *p = buf;
   char *end = buf + buf_len;
 
-  TIX_BUF_PRINTF(p, end, TIX_ERR_OVERFLOW, "tix report\n");
-  TIX_BUF_PRINTF(p, end, TIX_ERR_OVERFLOW, "==========\n");
+  TIX_BUF_COLOR(p, end, TIX_ERR_OVERFLOW, TIX_BOLD TIX_CYAN,
+                "tix report\n");
+  TIX_BUF_COLOR(p, end, TIX_ERR_OVERFLOW, TIX_DIM, "==========\n");
 
   /* --- Task summary line --- */
   u32 completed = r->done_tasks + r->accepted_tasks;
   int pct = (r->total_tasks > 0)
               ? (int)(completed * 100 / r->total_tasks) : 0;
-  TIX_BUF_PRINTF(p, end, TIX_ERR_OVERFLOW,
-                 "Tasks: %u total, %u done (%d%%), %u pending\n",
-                 r->total_tasks, completed, pct, r->pending_tasks);
+  TIX_BUF_PRINTF(p, end, TIX_ERR_OVERFLOW, "Tasks: ");
+  TIX_BUF_COLOR(p, end, TIX_ERR_OVERFLOW, TIX_BOLD, "%u", r->total_tasks);
+  TIX_BUF_PRINTF(p, end, TIX_ERR_OVERFLOW, " total, ");
+  TIX_BUF_COLOR(p, end, TIX_ERR_OVERFLOW, TIX_GREEN, "%u done",
+                completed);
+  TIX_BUF_COLOR(p, end, TIX_ERR_OVERFLOW, TIX_DIM, " (%d%%)", pct);
+  TIX_BUF_PRINTF(p, end, TIX_ERR_OVERFLOW, ", ");
+  TIX_BUF_COLOR(p, end, TIX_ERR_OVERFLOW, TIX_YELLOW, "%u pending",
+                r->pending_tasks);
+  TIX_BUF_PRINTF(p, end, TIX_ERR_OVERFLOW, "\n");
 
   /* Issues / notes / blocked on one line */
   if (r->total_issues > 0 || r->total_notes > 0 || r->blocked_count > 0) {
     int need_sep = 0;
     if (r->total_issues > 0) {
-      TIX_BUF_PRINTF(p, end, TIX_ERR_OVERFLOW,
-                     "Issues: %u open", r->total_issues);
+      TIX_BUF_COLOR(p, end, TIX_ERR_OVERFLOW, TIX_MAGENTA,
+                    "Issues: %u open", r->total_issues);
       need_sep = 1;
     }
     if (r->total_notes > 0) {
@@ -265,9 +290,10 @@ tix_err_t tix_report_summary_print(const tix_summary_report_t *r,
       need_sep = 1;
     }
     if (r->blocked_count > 0) {
-      TIX_BUF_PRINTF(p, end, TIX_ERR_OVERFLOW,
-                     "%sBlocked: %u",
-                     need_sep ? " | " : "", r->blocked_count);
+      TIX_BUF_PRINTF(p, end, TIX_ERR_OVERFLOW, "%s",
+                     need_sep ? " | " : "");
+      TIX_BUF_COLOR(p, end, TIX_ERR_OVERFLOW, TIX_RED,
+                    "Blocked: %u", r->blocked_count);
     }
     TIX_BUF_PRINTF(p, end, TIX_ERR_OVERFLOW, "%s", "\n");
   }
@@ -277,16 +303,23 @@ tix_err_t tix_report_summary_print(const tix_summary_report_t *r,
     TIX_BUF_PRINTF(p, end, TIX_ERR_OVERFLOW, "%s", "\n");
 
     if (r->total_cost > 0.0) {
-      TIX_BUF_PRINTF(p, end, TIX_ERR_OVERFLOW,
-                     "Cost: $%.4f total, $%.4f/task avg\n",
-                     r->total_cost, r->avg_cost);
+      TIX_BUF_PRINTF(p, end, TIX_ERR_OVERFLOW, "Cost: ");
+      TIX_BUF_COLOR(p, end, TIX_ERR_OVERFLOW, TIX_GREEN,
+                    "$%.4f", r->total_cost);
+      TIX_BUF_PRINTF(p, end, TIX_ERR_OVERFLOW, " total, ");
+      TIX_BUF_COLOR(p, end, TIX_ERR_OVERFLOW, TIX_DIM,
+                    "$%.4f/task avg", r->avg_cost);
+      TIX_BUF_PRINTF(p, end, TIX_ERR_OVERFLOW, "\n");
     }
 
     if (r->total_tokens_in > 0 || r->total_tokens_out > 0) {
-      TIX_BUF_PRINTF(p, end, TIX_ERR_OVERFLOW,
-                     "Tokens: %lld in / %lld out\n",
-                     (long long)r->total_tokens_in,
-                     (long long)r->total_tokens_out);
+      TIX_BUF_PRINTF(p, end, TIX_ERR_OVERFLOW, "Tokens: ");
+      TIX_BUF_COLOR(p, end, TIX_ERR_OVERFLOW, TIX_CYAN,
+                    "%lld in", (long long)r->total_tokens_in);
+      TIX_BUF_PRINTF(p, end, TIX_ERR_OVERFLOW, " / ");
+      TIX_BUF_COLOR(p, end, TIX_ERR_OVERFLOW, TIX_CYAN,
+                    "%lld out", (long long)r->total_tokens_out);
+      TIX_BUF_PRINTF(p, end, TIX_ERR_OVERFLOW, "\n");
     }
 
     /* Cycle time + iterations on one line */
@@ -319,14 +352,15 @@ tix_err_t tix_report_summary_print(const tix_summary_report_t *r,
     if (r->total_retries > 0 || r->total_kills > 0) {
       int need_sep = 0;
       if (r->total_retries > 0) {
-        TIX_BUF_PRINTF(p, end, TIX_ERR_OVERFLOW,
-                       "Retries: %u", r->total_retries);
+        TIX_BUF_COLOR(p, end, TIX_ERR_OVERFLOW, TIX_YELLOW,
+                      "Retries: %u", r->total_retries);
         need_sep = 1;
       }
       if (r->total_kills > 0) {
-        TIX_BUF_PRINTF(p, end, TIX_ERR_OVERFLOW,
-                       "%sKills: %u",
-                       need_sep ? " | " : "", r->total_kills);
+        TIX_BUF_PRINTF(p, end, TIX_ERR_OVERFLOW, "%s",
+                       need_sep ? " | " : "");
+        TIX_BUF_COLOR(p, end, TIX_ERR_OVERFLOW, TIX_RED,
+                      "Kills: %u", r->total_kills);
       }
       TIX_BUF_PRINTF(p, end, TIX_ERR_OVERFLOW, "%s", "\n");
     }
@@ -337,16 +371,22 @@ tix_err_t tix_report_summary_print(const tix_summary_report_t *r,
     TIX_BUF_PRINTF(p, end, TIX_ERR_OVERFLOW, "%s", "\n");
 
     if (r->top_model[0] != '\0') {
-      TIX_BUF_PRINTF(p, end, TIX_ERR_OVERFLOW,
-                     "Top model:  %s (%u tasks, $%.4f)\n",
-                     r->top_model, r->top_model_tasks,
-                     r->top_model_cost);
+      TIX_BUF_PRINTF(p, end, TIX_ERR_OVERFLOW, "Top model:  ");
+      TIX_BUF_COLOR(p, end, TIX_ERR_OVERFLOW, TIX_BOLD,
+                    "%s", r->top_model);
+      TIX_BUF_COLOR(p, end, TIX_ERR_OVERFLOW, TIX_DIM,
+                    " (%u tasks, $%.4f)",
+                    r->top_model_tasks, r->top_model_cost);
+      TIX_BUF_PRINTF(p, end, TIX_ERR_OVERFLOW, "\n");
     }
     if (r->top_author[0] != '\0') {
-      TIX_BUF_PRINTF(p, end, TIX_ERR_OVERFLOW,
-                     "Top author: %s (%u tasks, %u done)\n",
-                     r->top_author, r->top_author_total,
-                     r->top_author_done);
+      TIX_BUF_PRINTF(p, end, TIX_ERR_OVERFLOW, "Top author: ");
+      TIX_BUF_COLOR(p, end, TIX_ERR_OVERFLOW, TIX_BOLD,
+                    "%s", r->top_author);
+      TIX_BUF_COLOR(p, end, TIX_ERR_OVERFLOW, TIX_DIM,
+                    " (%u tasks, %u done)",
+                    r->top_author_total, r->top_author_done);
+      TIX_BUF_PRINTF(p, end, TIX_ERR_OVERFLOW, "\n");
     }
   }
 
@@ -412,32 +452,40 @@ tix_err_t tix_report_velocity_print(const tix_velocity_report_t *r,
   char *p = buf;
   char *end = buf + buf_len;
 
-  TIX_BUF_PRINTF(p, end, TIX_ERR_OVERFLOW, "Velocity Report\n");
-  TIX_BUF_PRINTF(p, end, TIX_ERR_OVERFLOW, "===============\n");
+  TIX_BUF_COLOR(p, end, TIX_ERR_OVERFLOW, TIX_BOLD TIX_CYAN,
+                "Velocity Report\n");
+  TIX_BUF_COLOR(p, end, TIX_ERR_OVERFLOW, TIX_DIM, "===============\n");
 
   if (r->completed == 0) {
-    TIX_BUF_PRINTF(p, end, TIX_ERR_OVERFLOW,
-                   "No completed tasks with telemetry data.\n");
+    TIX_BUF_COLOR(p, end, TIX_ERR_OVERFLOW, TIX_DIM,
+                  "No completed tasks with telemetry data.\n");
     return TIX_OK;
   }
 
-  TIX_BUF_PRINTF(p, end, TIX_ERR_OVERFLOW,
-                 "Completed tasks: %u\n", r->completed);
+  TIX_BUF_PRINTF(p, end, TIX_ERR_OVERFLOW, "Completed tasks: ");
+  TIX_BUF_COLOR(p, end, TIX_ERR_OVERFLOW, TIX_BOLD TIX_GREEN,
+                "%u", r->completed);
+  TIX_BUF_PRINTF(p, end, TIX_ERR_OVERFLOW, "\n");
 
-  TIX_BUF_PRINTF(p, end, TIX_ERR_OVERFLOW, "\nCost:\n");
-  TIX_BUF_PRINTF(p, end, TIX_ERR_OVERFLOW,
-                 "  Total:   $%.4f\n", r->total_cost);
-  TIX_BUF_PRINTF(p, end, TIX_ERR_OVERFLOW,
-                 "  Average: $%.4f/task\n", r->avg_cost);
+  TIX_BUF_COLOR(p, end, TIX_ERR_OVERFLOW, TIX_BOLD, "\nCost:\n");
+  TIX_BUF_PRINTF(p, end, TIX_ERR_OVERFLOW, "  Total:   ");
+  TIX_BUF_COLOR(p, end, TIX_ERR_OVERFLOW, TIX_GREEN,
+                "$%.4f", r->total_cost);
+  TIX_BUF_PRINTF(p, end, TIX_ERR_OVERFLOW, "\n  Average: ");
+  TIX_BUF_COLOR(p, end, TIX_ERR_OVERFLOW, TIX_DIM,
+                "$%.4f/task", r->avg_cost);
+  TIX_BUF_PRINTF(p, end, TIX_ERR_OVERFLOW, "\n");
 
-  TIX_BUF_PRINTF(p, end, TIX_ERR_OVERFLOW, "\nTokens:\n");
-  TIX_BUF_PRINTF(p, end, TIX_ERR_OVERFLOW,
-                 "  Input:  %lld\n", (long long)r->total_tokens_in);
-  TIX_BUF_PRINTF(p, end, TIX_ERR_OVERFLOW,
-                 "  Output: %lld\n", (long long)r->total_tokens_out);
+  TIX_BUF_COLOR(p, end, TIX_ERR_OVERFLOW, TIX_BOLD, "\nTokens:\n");
+  TIX_BUF_PRINTF(p, end, TIX_ERR_OVERFLOW, "  Input:  ");
+  TIX_BUF_COLOR(p, end, TIX_ERR_OVERFLOW, TIX_CYAN,
+                "%lld", (long long)r->total_tokens_in);
+  TIX_BUF_PRINTF(p, end, TIX_ERR_OVERFLOW, "\n  Output: ");
+  TIX_BUF_COLOR(p, end, TIX_ERR_OVERFLOW, TIX_CYAN,
+                "%lld", (long long)r->total_tokens_out);
+  TIX_BUF_PRINTF(p, end, TIX_ERR_OVERFLOW, "\n");
 
   if (r->avg_cycle_secs > 0.0) {
-    /* display as human-readable duration */
     double secs = r->avg_cycle_secs;
     if (secs < 60.0) {
       TIX_BUF_PRINTF(p, end, TIX_ERR_OVERFLOW,
@@ -457,12 +505,14 @@ tix_err_t tix_report_velocity_print(const tix_velocity_report_t *r,
   }
 
   if (r->total_retries > 0) {
-    TIX_BUF_PRINTF(p, end, TIX_ERR_OVERFLOW,
-                   "Total retries:  %u\n", r->total_retries);
+    TIX_BUF_COLOR(p, end, TIX_ERR_OVERFLOW, TIX_YELLOW,
+                  "Total retries:  %u", r->total_retries);
+    TIX_BUF_PRINTF(p, end, TIX_ERR_OVERFLOW, "\n");
   }
   if (r->total_kills > 0) {
-    TIX_BUF_PRINTF(p, end, TIX_ERR_OVERFLOW,
-                   "Total kills:    %u\n", r->total_kills);
+    TIX_BUF_COLOR(p, end, TIX_ERR_OVERFLOW, TIX_RED,
+                  "Total kills:    %u", r->total_kills);
+    TIX_BUF_PRINTF(p, end, TIX_ERR_OVERFLOW, "\n");
   }
 
   return TIX_OK;
@@ -530,36 +580,43 @@ tix_err_t tix_report_actors_print(const tix_actors_report_t *r,
   char *p = buf;
   char *end = buf + buf_len;
 
-  TIX_BUF_PRINTF(p, end, TIX_ERR_OVERFLOW, "Actors Report\n");
-  TIX_BUF_PRINTF(p, end, TIX_ERR_OVERFLOW, "=============\n");
+  TIX_BUF_COLOR(p, end, TIX_ERR_OVERFLOW, TIX_BOLD TIX_CYAN,
+                "Actors Report\n");
+  TIX_BUF_COLOR(p, end, TIX_ERR_OVERFLOW, TIX_DIM, "=============\n");
 
   if (r->count == 0) {
-    TIX_BUF_PRINTF(p, end, TIX_ERR_OVERFLOW,
-                   "No tasks with author information.\n");
+    TIX_BUF_COLOR(p, end, TIX_ERR_OVERFLOW, TIX_DIM,
+                  "No tasks with author information.\n");
     return TIX_OK;
   }
 
   /* header */
-  TIX_BUF_PRINTF(p, end, TIX_ERR_OVERFLOW,
-                 "%-20s %5s %5s %5s %10s %10s %6s\n",
-                 "Author", "Total", "Done", "Pend",
-                 "Cost", "Avg Cost", "Iters");
-  TIX_BUF_PRINTF(p, end, TIX_ERR_OVERFLOW,
-                 "%-20s %5s %5s %5s %10s %10s %6s\n",
-                 "--------------------", "-----", "-----", "-----",
-                 "----------", "----------", "------");
+  TIX_BUF_COLOR(p, end, TIX_ERR_OVERFLOW, TIX_BOLD,
+                "%-20s %5s %5s %5s %10s %10s %6s\n",
+                "Author", "Total", "Done", "Pend",
+                "Cost", "Avg Cost", "Iters");
+  TIX_BUF_COLOR(p, end, TIX_ERR_OVERFLOW, TIX_DIM,
+                "%-20s %5s %5s %5s %10s %10s %6s\n",
+                "--------------------", "-----", "-----", "-----",
+                "----------", "----------", "------");
 
   for (u32 i = 0; i < r->count; i++) {
     const tix_actor_entry_t *a = &r->actors[i];
-    /* truncate long author names for display (truncation intended) */
     char display_name[21];
     memset(display_name, 0, sizeof(display_name));
     memcpy(display_name, a->author,
            strlen(a->author) < 20 ? strlen(a->author) : 20);
 
+    TIX_BUF_COLOR(p, end, TIX_ERR_OVERFLOW, TIX_BOLD, "%-20s",
+                  display_name);
+    TIX_BUF_PRINTF(p, end, TIX_ERR_OVERFLOW, " %5u ", a->total);
+    TIX_BUF_COLOR(p, end, TIX_ERR_OVERFLOW, TIX_GREEN, "%5u",
+                  a->completed);
+    TIX_BUF_PRINTF(p, end, TIX_ERR_OVERFLOW, " ");
+    TIX_BUF_COLOR(p, end, TIX_ERR_OVERFLOW, TIX_YELLOW, "%5u",
+                  a->pending);
     TIX_BUF_PRINTF(p, end, TIX_ERR_OVERFLOW,
-                   "%-20s %5u %5u %5u %10.4f %10.4f %6.1f\n",
-                   display_name, a->total, a->completed, a->pending,
+                   " %10.4f %10.4f %6.1f\n",
                    a->total_cost, a->avg_cost, a->avg_iterations);
   }
 
@@ -629,37 +686,44 @@ tix_err_t tix_report_models_print(const tix_models_report_t *r,
   char *p = buf;
   char *end = buf + buf_len;
 
-  TIX_BUF_PRINTF(p, end, TIX_ERR_OVERFLOW, "Models Report\n");
-  TIX_BUF_PRINTF(p, end, TIX_ERR_OVERFLOW, "=============\n");
+  TIX_BUF_COLOR(p, end, TIX_ERR_OVERFLOW, TIX_BOLD TIX_CYAN,
+                "Models Report\n");
+  TIX_BUF_COLOR(p, end, TIX_ERR_OVERFLOW, TIX_DIM, "=============\n");
 
   if (r->count == 0) {
-    TIX_BUF_PRINTF(p, end, TIX_ERR_OVERFLOW,
-                   "No completed tasks with model information.\n");
+    TIX_BUF_COLOR(p, end, TIX_ERR_OVERFLOW, TIX_DIM,
+                  "No completed tasks with model information.\n");
     return TIX_OK;
   }
 
   /* header */
-  TIX_BUF_PRINTF(p, end, TIX_ERR_OVERFLOW,
-                 "%-30s %5s %10s %10s %10s %10s %6s\n",
-                 "Model", "Tasks", "Cost", "Avg Cost",
-                 "Tokens In", "Tokens Out", "Iters");
-  TIX_BUF_PRINTF(p, end, TIX_ERR_OVERFLOW,
-                 "%-30s %5s %10s %10s %10s %10s %6s\n",
-                 "------------------------------", "-----",
-                 "----------", "----------",
-                 "----------", "----------", "------");
+  TIX_BUF_COLOR(p, end, TIX_ERR_OVERFLOW, TIX_BOLD,
+                "%-30s %5s %10s %10s %10s %10s %6s\n",
+                "Model", "Tasks", "Cost", "Avg Cost",
+                "Tokens In", "Tokens Out", "Iters");
+  TIX_BUF_COLOR(p, end, TIX_ERR_OVERFLOW, TIX_DIM,
+                "%-30s %5s %10s %10s %10s %10s %6s\n",
+                "------------------------------", "-----",
+                "----------", "----------",
+                "----------", "----------", "------");
 
   for (u32 i = 0; i < r->count; i++) {
     const tix_model_entry_t *m = &r->models[i];
-    /* truncate long model names for display (truncation intended) */
     char display_model[31];
     memset(display_model, 0, sizeof(display_model));
     memcpy(display_model, m->model,
            strlen(m->model) < 30 ? strlen(m->model) : 30);
 
+    TIX_BUF_COLOR(p, end, TIX_ERR_OVERFLOW, TIX_BOLD, "%-30s",
+                  display_model);
+    TIX_BUF_PRINTF(p, end, TIX_ERR_OVERFLOW, " %5u ", m->total);
+    TIX_BUF_COLOR(p, end, TIX_ERR_OVERFLOW, TIX_GREEN,
+                  "%10.4f", m->total_cost);
+    TIX_BUF_PRINTF(p, end, TIX_ERR_OVERFLOW, " ");
+    TIX_BUF_COLOR(p, end, TIX_ERR_OVERFLOW, TIX_DIM,
+                  "%10.4f", m->avg_cost);
     TIX_BUF_PRINTF(p, end, TIX_ERR_OVERFLOW,
-                   "%-30s %5u %10.4f %10.4f %10lld %10lld %6.1f\n",
-                   display_model, m->total, m->total_cost, m->avg_cost,
+                   " %10lld %10lld %6.1f\n",
                    (long long)m->total_tokens_in,
                    (long long)m->total_tokens_out,
                    m->avg_iterations);

@@ -47,10 +47,10 @@ def get_current_branch(cwd: Optional[Path] = None) -> str:
 
 
 def has_uncommitted_plan(plan_file: Path, cwd: Optional[Path] = None) -> bool:
-    """Check if plan.jsonl has uncommitted changes (staged or unstaged).
+    """Check if a plan file has uncommitted changes (staged or unstaged).
 
     Args:
-        plan_file: Path to the plan.jsonl file.
+        plan_file: Path to the plan.jsonl file (tix or legacy).
         cwd: Working directory for git command. Defaults to current directory.
 
     Returns:
@@ -68,11 +68,44 @@ def has_uncommitted_plan(plan_file: Path, cwd: Optional[Path] = None) -> bool:
     return bool(result.stdout.strip())
 
 
-def _commit_plan_if_modified(plan_file: Optional[Path], cwd: Optional[Path]) -> None:
-    """Commit plan.jsonl changes if file has uncommitted modifications.
+def has_uncommitted_tix(
+    plan_file: Path,
+    state_file: Path,
+    cwd: Optional[Path] = None,
+) -> bool:
+    """Check if tix plan.jsonl or ralph-state.json have uncommitted changes.
 
     Args:
-        plan_file: Path to plan.jsonl
+        plan_file: Path to the tix plan.jsonl file.
+        state_file: Path to .tix/ralph-state.json.
+        cwd: Working directory for git command.
+
+    Returns:
+        True if either file has uncommitted changes.
+    """
+    files = []
+    if plan_file.exists():
+        files.append(str(plan_file))
+    if state_file.exists():
+        files.append(str(state_file))
+
+    if not files:
+        return False
+
+    result = subprocess.run(
+        ["git", "status", "--porcelain"] + files,
+        capture_output=True,
+        text=True,
+        cwd=cwd,
+    )
+    return bool(result.stdout.strip())
+
+
+def _commit_plan_if_modified(plan_file: Optional[Path], cwd: Optional[Path]) -> None:
+    """Commit plan file changes if file has uncommitted modifications.
+
+    Args:
+        plan_file: Path to plan.jsonl (tix or legacy)
         cwd: Working directory for git commands
     """
     if plan_file and has_uncommitted_plan(plan_file, cwd):

@@ -1,4 +1,5 @@
 #include "cmd.h"
+#include "color.h"
 #include "git.h"
 #include "report.h"
 #include "log.h"
@@ -23,26 +24,51 @@ tix_err_t tix_cmd_status(tix_ctx_t *ctx, int argc, char **argv) {
   err = tix_report_generate(&ctx->db, &report);
   if (err != TIX_OK) { return err; }
 
-  printf("tix status\n");
-  printf("==========\n");
-  printf("Branch: %s (%s)\n", branch, head);
+  /* Header */
+  printf("%s%stix status%s\n", tix_c(TIX_BOLD), tix_c(TIX_CYAN),
+         tix_c(TIX_RESET));
+  printf("%s==========%s\n", tix_c(TIX_DIM), tix_c(TIX_RESET));
+
+  /* Branch info */
+  printf("Branch: %s%s%s %s(%s)%s\n",
+         tix_c(TIX_BRIGHT_CYAN), branch, tix_c(TIX_RESET),
+         tix_c(TIX_DIM), head, tix_c(TIX_RESET));
   printf("Main:   %s\n\n", ctx->config.main_branch);
 
+  /* Task summary with progress bar */
   u32 completed = report.done_tasks + report.accepted_tasks;
   int pct = (report.total_tasks > 0)
               ? (int)(completed * 100 / report.total_tasks) : 0;
-  printf("Tasks: %u total, %u pending, %u done, %u accepted (%d%%)\n",
-         report.total_tasks, report.pending_tasks, report.done_tasks,
-         report.accepted_tasks, pct);
+
+  printf("Tasks: %s%s%u%s total, %s%u pending%s, "
+         "%s%u done%s, %s%s%u accepted%s %s(%d%%)%s\n",
+         tix_c(TIX_BOLD), tix_c(TIX_WHITE),
+         report.total_tasks, tix_c(TIX_RESET),
+         tix_c(TIX_YELLOW), report.pending_tasks, tix_c(TIX_RESET),
+         tix_c(TIX_GREEN), report.done_tasks, tix_c(TIX_RESET),
+         tix_c(TIX_BOLD), tix_c(TIX_BRIGHT_GREEN),
+         report.accepted_tasks, tix_c(TIX_RESET),
+         tix_c(TIX_DIM), pct, tix_c(TIX_RESET));
+
+  /* Progress bar */
+  if (report.total_tasks > 0) {
+    char bar[128];
+    tix_progress_bar(bar, sizeof(bar), pct, 30);
+    printf("       %s %d%%\n", bar, pct);
+  }
 
   if (report.total_issues > 0) {
-    printf("Issues: %u open\n", report.total_issues);
+    printf("%s%sIssues: %u open%s\n",
+           tix_c(TIX_BOLD), tix_c(TIX_MAGENTA),
+           report.total_issues, tix_c(TIX_RESET));
   }
   if (report.total_notes > 0) {
     printf("Notes: %u\n", report.total_notes);
   }
   if (report.blocked_count > 0) {
-    printf("Blocked: %u (waiting on dependencies)\n", report.blocked_count);
+    printf("%s%sBlocked: %u%s (waiting on dependencies)\n",
+           tix_c(TIX_BOLD), tix_c(TIX_RED),
+           report.blocked_count, tix_c(TIX_RESET));
   }
 
   /* show recent pending tasks */
@@ -52,12 +78,32 @@ tix_err_t tix_cmd_status(tix_ctx_t *ctx, int argc, char **argv) {
                       tasks, &count, 5);
 
   if (count > 0) {
-    printf("\nPending Tasks:\n");
+    printf("\n%s%sPending Tasks:%s\n", tix_c(TIX_BOLD),
+           tix_c(TIX_YELLOW), tix_c(TIX_RESET));
     for (u32 i = 0; i < count; i++) {
-      const char *prio = "";
-      if (tasks[i].priority == TIX_PRIORITY_HIGH) { prio = " [HIGH]"; }
-      if (tasks[i].priority == TIX_PRIORITY_MEDIUM) { prio = " [MED]"; }
-      printf("  %s %s%s\n", tasks[i].id, tasks[i].name, prio);
+      const char *prio_str = "";
+      const char *prio_color = "";
+      const char *reset = tix_c(TIX_RESET);
+      if (tasks[i].priority == TIX_PRIORITY_HIGH) {
+        prio_str = " [HIGH]";
+        prio_color = tix_c(TIX_BRIGHT_RED);
+      } else if (tasks[i].priority == TIX_PRIORITY_MEDIUM) {
+        prio_str = " [MED]";
+        prio_color = tix_c(TIX_YELLOW);
+      }
+      printf("  %s%s%s %s%s%s%s",
+             tix_c(TIX_DIM), tasks[i].id, tix_c(TIX_RESET),
+             tasks[i].name,
+             prio_color, prio_str, reset);
+      if (tasks[i].label_count > 0) {
+        printf(" %s[", tix_c(TIX_DIM));
+        for (u32 li = 0; li < tasks[i].label_count; li++) {
+          if (li > 0) { printf(","); }
+          printf("%s", tasks[i].labels[li]);
+        }
+        printf("]%s", tix_c(TIX_RESET));
+      }
+      printf("\n");
     }
   }
 
@@ -68,9 +114,12 @@ tix_err_t tix_cmd_status(tix_ctx_t *ctx, int argc, char **argv) {
                       issues, &count, 5);
 
   if (count > 0) {
-    printf("\nOpen Issues:\n");
+    printf("\n%s%sOpen Issues:%s\n", tix_c(TIX_BOLD),
+           tix_c(TIX_MAGENTA), tix_c(TIX_RESET));
     for (u32 i = 0; i < count; i++) {
-      printf("  %s %s\n", issues[i].id, issues[i].name);
+      printf("  %s%s%s %s\n",
+             tix_c(TIX_DIM), issues[i].id, tix_c(TIX_RESET),
+             issues[i].name);
     }
   }
 
@@ -82,13 +131,15 @@ tix_err_t tix_cmd_status(tix_ctx_t *ctx, int argc, char **argv) {
     u32 total_stale = refs.stale_deps + refs.stale_parents +
                       refs.stale_created_from + refs.stale_supersedes;
     if (total_broken > 0 || total_stale > 0) {
-      printf("\nReferences:\n");
+      printf("\n%sReferences:%s\n", tix_c(TIX_BOLD), tix_c(TIX_RESET));
       if (total_broken > 0) {
-        printf("  %u broken (run tix sync to search history)\n",
-               total_broken);
+        printf("  %s%s%u broken%s (run tix sync to search history)\n",
+               tix_c(TIX_BOLD), tix_c(TIX_RED),
+               total_broken, tix_c(TIX_RESET));
       }
       if (total_stale > 0) {
-        printf("  %u stale (target accepted/resolved)\n", total_stale);
+        printf("  %s%u stale%s (target accepted/resolved)\n",
+               tix_c(TIX_YELLOW), total_stale, tix_c(TIX_RESET));
       }
     }
   }

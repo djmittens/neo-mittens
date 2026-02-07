@@ -1,4 +1,5 @@
 #include "tree.h"
+#include "color.h"
 #include "ticket.h"
 #include "log.h"
 
@@ -20,26 +21,49 @@ static tix_err_t render_ticket_line(const tix_ticket_t *t, int depth,
   char *p = buf;
   char *end = buf + buf_len;
 
+  /* Tree connectors in dim color */
   for (int d = 0; d < depth; d++) {
     if (d == depth - 1) {
-      TIX_BUF_PRINTF(p, end, TIX_ERR_OVERFLOW, "%s",
-                     is_last ? "└── " : "├── ");
+      TIX_BUF_COLOR(p, end, TIX_ERR_OVERFLOW, TIX_DIM, "%s",
+                    is_last ? "└── " : "├── ");
     } else {
       int has_sibling = (prefix_mask >> d) & 1;
-      TIX_BUF_PRINTF(p, end, TIX_ERR_OVERFLOW, "%s",
-                     has_sibling ? "│   " : "    ");
+      TIX_BUF_COLOR(p, end, TIX_ERR_OVERFLOW, TIX_DIM, "%s",
+                    has_sibling ? "│   " : "    ");
     }
   }
 
-  TIX_BUF_PRINTF(p, end, TIX_ERR_OVERFLOW, "%s: %s [%s]",
-                 t->id, t->name, tix_status_str(t->status));
+  /* Ticket ID (dim) */
+  TIX_BUF_COLOR(p, end, TIX_ERR_OVERFLOW, TIX_DIM, "%s", t->id);
+  TIX_BUF_PRINTF(p, end, TIX_ERR_OVERFLOW, ": ");
 
+  /* Ticket name (bold for pending, normal for done) */
+  if (t->status == TIX_STATUS_PENDING) {
+    TIX_BUF_COLOR(p, end, TIX_ERR_OVERFLOW, TIX_BOLD, "%s", t->name);
+  } else {
+    TIX_BUF_PRINTF(p, end, TIX_ERR_OVERFLOW, "%s", t->name);
+  }
+
+  /* Status tag with color */
+  const char *sc = tix_status_color(t->status);
+  TIX_BUF_PRINTF(p, end, TIX_ERR_OVERFLOW, " %s[%s]%s",
+                 sc, tix_status_str(t->status), tix_c(TIX_RESET));
+
+  /* Priority indicator */
+  if (t->priority == TIX_PRIORITY_HIGH) {
+    TIX_BUF_COLOR(p, end, TIX_ERR_OVERFLOW, TIX_BRIGHT_RED, " [HIGH]");
+  } else if (t->priority == TIX_PRIORITY_MEDIUM) {
+    TIX_BUF_COLOR(p, end, TIX_ERR_OVERFLOW, TIX_YELLOW, " [MED]");
+  }
+
+  /* Dependency markers for pending tasks */
   if (t->dep_count > 0 && t->status == TIX_STATUS_PENDING) {
-    TIX_BUF_PRINTF(p, end, TIX_ERR_OVERFLOW, " (deps:");
+    TIX_BUF_COLOR(p, end, TIX_ERR_OVERFLOW, TIX_DIM, " (deps:");
     for (u32 i = 0; i < t->dep_count; i++) {
-      TIX_BUF_PRINTF(p, end, TIX_ERR_OVERFLOW, " %s", t->deps[i]);
+      TIX_BUF_COLOR(p, end, TIX_ERR_OVERFLOW, TIX_DIM, " %s",
+                    t->deps[i]);
     }
-    TIX_BUF_PRINTF(p, end, TIX_ERR_OVERFLOW, ")");
+    TIX_BUF_COLOR(p, end, TIX_ERR_OVERFLOW, TIX_DIM, ")");
   }
 
   TIX_BUF_PRINTF(p, end, TIX_ERR_OVERFLOW, "\n");
@@ -62,9 +86,12 @@ tix_err_t tix_tree_render(tix_db_t *db, const char *root_id,
     return TIX_OK;
   }
 
-  /* render root */
-  TIX_BUF_PRINTF(p, end, TIX_ERR_OVERFLOW, "%s: %s [%s]\n",
-                 root.id, root.name, tix_status_str(root.status));
+  /* render root - bold ID, colored status */
+  const char *rsc = tix_status_color(root.status);
+  TIX_BUF_COLOR(p, end, TIX_ERR_OVERFLOW, TIX_BOLD, "%s", root.id);
+  TIX_BUF_PRINTF(p, end, TIX_ERR_OVERFLOW, ": %s %s[%s]%s\n",
+                 root.name, rsc, tix_status_str(root.status),
+                 tix_c(TIX_RESET));
 
   /* find children (tickets that depend on this one) */
   const char *sql =
@@ -92,7 +119,7 @@ tix_err_t tix_tree_render(tix_db_t *db, const char *root_id,
     err = tix_db_get_ticket(db, children[i], &child);
     if (err != TIX_OK) { continue; }
 
-    char line[512];
+    char line[1024];
     int is_last = (i == child_count - 1) ? 1 : 0;
     tix_err_t line_len = render_ticket_line(&child, 1, is_last, 0,
                                              line, sizeof(line));
@@ -133,12 +160,12 @@ tix_err_t tix_tree_render_all(tix_db_t *db, char *buf, sz buf_len) {
   sqlite3_finalize(stmt);
 
   if (root_count == 0) {
-    TIX_BUF_PRINTF(p, end, TIX_ERR_OVERFLOW, "(no tasks)\n");
+    TIX_BUF_COLOR(p, end, TIX_ERR_OVERFLOW, TIX_DIM, "(no tasks)\n");
     return TIX_OK;
   }
 
   for (u32 i = 0; i < root_count; i++) {
-    char subtree[TIX_MAX_LINE_LEN * 2];
+    char subtree[TIX_MAX_LINE_LEN * 4];
     tix_err_t err = tix_tree_render(db, roots[i], subtree, sizeof(subtree));
     if (err == TIX_OK) {
       TIX_BUF_PRINTF(p, end, TIX_ERR_OVERFLOW, "%s", subtree);

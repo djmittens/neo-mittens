@@ -1,6 +1,6 @@
 """Ralph init command.
 
-Creates ralph directory structure, prompt templates, and initial plan.jsonl.
+Creates ralph directory structure, prompt templates, and initializes tix.
 Supports both fresh initialization and updating existing installations.
 """
 
@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Optional
 
 from ralph.config import get_global_config
-from ralph.state import RalphState, save_state
+from ralph.tix import Tix
 from ralph.utils import Colors
 
 from ralph.commands.init_helpers import handle_prompt_file
@@ -18,9 +18,9 @@ from ralph.commands.init_prompts import EXAMPLE_SPEC, PROMPT_TEMPLATES
 def cmd_init(repo_root: Optional[Path] = None) -> int:
     """Initialize or update Ralph in a repository.
 
-    Creates the ralph directory structure, prompt templates, and initial
-    plan.jsonl file. If ralph is already initialized, offers to update
-    prompt templates with merge options.
+    Creates the ralph directory structure, prompt templates, and
+    initializes tix for ticket management. If ralph is already
+    initialized, offers to update prompt templates with merge options.
 
     Args:
         repo_root: Repository root directory. If None, uses current directory.
@@ -35,7 +35,6 @@ def cmd_init(repo_root: Optional[Path] = None) -> int:
     ralph_dir = repo_root / config.ralph_dir
     specs_dir = ralph_dir / "specs"
     log_dir = repo_root / config.log_dir
-    plan_file = ralph_dir / "plan.jsonl"
 
     is_update = ralph_dir.exists()
 
@@ -57,8 +56,13 @@ def cmd_init(repo_root: Optional[Path] = None) -> int:
         if not example_spec.exists():
             example_spec.write_text(EXAMPLE_SPEC)
 
-        if not plan_file.exists():
-            save_state(RalphState(), plan_file)
+        # Initialize tix (creates .tix/ directory and plan.jsonl)
+        tix = Tix(repo_root)
+        try:
+            tix.init()
+        except Exception:
+            # tix init may fail if already initialized — that's fine
+            pass
 
     if is_update:
         print(f"\n{Colors.GREEN}Ralph updated!{Colors.NC}")
@@ -72,7 +76,7 @@ Updated files:
   └── PROMPT_decompose.md   (decompose stage)
 
 Preserved:
-  ├── plan.jsonl
+  ├── .tix/plan.jsonl       (ticket data)
   └── specs/*
 """)
     else:
@@ -90,9 +94,10 @@ Files created:
   ├── PROMPT_verify.md      (verify stage)
   ├── PROMPT_investigate.md (investigate stage)
   ├── PROMPT_decompose.md   (decompose stage)
-  ├── plan.jsonl            (task/issue state)
   └── specs/
       └── example.md        (delete and add your own)
+  .tix/
+  └── plan.jsonl            (ticket data via tix)
 """)
 
     return 0

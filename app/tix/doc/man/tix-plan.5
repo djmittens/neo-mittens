@@ -1,0 +1,181 @@
+.TH TIX\-PLAN 5 "February 2026" "tix" "File Formats"
+.SH NAME
+tix\-plan \- plan.jsonl file format for tix ticket storage
+.SH DESCRIPTION
+.B plan.jsonl
+is the source\-of\-truth for all ticket data in a tix\-managed repository.
+It is a line\-delimited JSON file (JSONL) where each line is a
+self\-contained JSON object representing a ticket operation.
+.PP
+The file is append\-only during normal operation.
+When a ticket is created, updated, or deleted, a new line is appended.
+The SQLite cache in
+.B .tix/cache.db
+is rebuilt from this file using last\-write\-wins semantics.
+.PP
+.B plan.jsonl
+is committed to git alongside source code, providing a complete
+history of ticket state changes.
+.SH LOCATION
+Default:
+.BR .tix/plan.jsonl .
+Configurable in
+.BR .tix/config.toml
+via the
+.B plan_path
+setting.
+.PP
+Legacy projects may use
+.BR ralph/plan.jsonl ,
+which is auto\-detected by
+.BR "tix init" .
+.SH LINE TYPES
+.SS Task line
+.RS
+.nf
+{"t":"task","id":"T\-a1b2c3d4","name":"Implement parser","s":"p","priority":"high","spec":"specs/parser.md","deps":["T\-11111111"],"labels":["module:parser"]}
+.fi
+.RE
+.SS Issue line
+.RS
+.nf
+{"t":"issue","id":"I\-e5f67890","desc":"Crash on empty input","s":"p"}
+.fi
+.RE
+.SS Note line
+.RS
+.nf
+{"t":"note","id":"N\-1a2b3c4d","name":"Design decision: use pipes","s":"p"}
+.fi
+.RE
+.SS Accept tombstone
+.RS
+.nf
+{"t":"accept","id":"T\-a1b2c3d4","done_at":"abc123","name":"Implement parser"}
+.fi
+.RE
+.SS Reject tombstone
+.RS
+.nf
+{"t":"reject","id":"T\-a1b2c3d4","reason":"Tests failing"}
+.fi
+.RE
+.SS Delete marker
+.RS
+.nf
+{"t":"delete","id":"I\-e5f67890"}
+.fi
+.RE
+.SH COMMON FIELDS
+.SS Type discriminator
+.TP
+.B t
+.RI ( required )
+Line type.
+One of:
+.BR task ,
+.BR issue ,
+.BR note ,
+.BR accept ,
+.BR reject ,
+.BR delete .
+.SS Status
+.TP
+.B s
+Status code.
+.B p
+= pending,
+.B d
+= done,
+.B a
+= accepted.
+Default is
+.BR p .
+.SS Identity
+.TP
+.B id
+Ticket ID.
+Format:
+.IR prefix \- hexhexhexhex
+(10 chars).
+.SS Ticket fields
+.TS
+tab(|);
+lb lb lb
+l l l.
+Field|Type|Description
+name|string|task/note name
+desc|string|issue description (alias for name)
+spec|string|spec file path
+notes|string|free\-form notes
+accept|string|acceptance criteria
+priority|string|high, medium, low, none
+parent|string|parent ticket ID
+created_from|string|source ticket ID
+supersedes|string|superseded ticket ID
+kill_reason|string|why the task was killed
+deps|array|dependency ticket IDs
+labels|array|label strings
+branch|string|git branch
+done_at|string|git commit hash when done
+author|string|who created the ticket
+completed_at|string|ISO 8601 completion timestamp
+created_from_name|string|denormalized source name
+supersedes_name|string|denormalized superseded name
+supersedes_reason|string|denormalized superseded kill reason
+.TE
+.SS Agent telemetry fields
+.TS
+tab(|);
+lb lb lb
+l l l.
+Field|Type|Description
+cost|number|dollar cost
+tokens_in|number|input tokens
+tokens_out|number|output tokens
+iterations|number|loop iterations
+model|string|model name
+retries|number|retry count
+kill_count|number|kill count
+.TE
+.SS Tombstone fields
+.TS
+tab(|);
+lb lb lb
+l l l.
+Field|Type|Description
+id|string|ticket ID being accepted/rejected
+done_at|string|git commit hash
+reason|string|rejection reason (reject only)
+name|string|ticket name (for history)
+.TE
+.SH REPLAY SEMANTICS
+When the cache is rebuilt from plan.jsonl:
+.IP 1. 4
+Lines are processed top\-to\-bottom (oldest first).
+.IP 2.
+Each ticket line is an upsert: later lines overwrite earlier ones
+for the same ID (last\-write\-wins).
+.IP 3.
+Accept tombstones delete the ticket from the live set.
+.IP 4.
+Delete markers delete the ticket from the live set.
+.IP 5.
+Reject tombstones are recorded; the subsequent updated ticket line
+(with status reset to pending) is what restores the ticket.
+.SH COMPACTION
+.B tix compact
+rewrites plan.jsonl to contain only the current live tickets,
+removing historical cruft.
+After compaction, the file contains one line per live ticket,
+sorted by ID, with no tombstones or delete markers.
+.PP
+Denormalized reference fields
+.RB ( created_from_name ,
+.BR supersedes_name ,
+.BR supersedes_reason )
+are baked in during compaction.
+.SH SEE ALSO
+.BR tix (1),
+.BR tix\-task (1),
+.BR tix\-query (1)

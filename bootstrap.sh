@@ -400,7 +400,60 @@ append_require_if_missing "$NVIM_DIR/init.lua"
 install_path_block "$HOME/.profile" "$SCRIPT_DIR/powerplant"
 install_path_block "$ZSHRC_PATH" "$SCRIPT_DIR/powerplant"
 
-# 4b) Add repo root and app/ to PYTHONPATH for ralph package imports
+# 4b) Pre-build tix if build tools are available (optional - wrapper auto-builds on first run)
+build_tix() {
+  local tix_src="$SCRIPT_DIR/app/tix"
+
+  # Check for required build tools
+  if ! command -v cmake >/dev/null 2>&1; then
+    echo "SKIP: cmake not found; tix will auto-build on first run when available"
+    return 0
+  fi
+  if ! command -v ninja >/dev/null 2>&1; then
+    echo "SKIP: ninja not found; tix will auto-build on first run when available"
+    return 0
+  fi
+
+  # Download SQLite amalgamation if missing
+  if [ ! -f "$tix_src/vendor/sqlite/sqlite3.c" ]; then
+    if ! command -v curl >/dev/null 2>&1; then
+      echo "SKIP: curl not found; cannot download SQLite for tix build"
+      return 0
+    fi
+    echo "Downloading SQLite amalgamation for tix..."
+    mkdir -p "$tix_src/vendor/sqlite"
+    local tmpdir
+    tmpdir="$(mktemp -d)"
+    if curl -fsSL "https://sqlite.org/2024/sqlite-amalgamation-3470200.zip" \
+        -o "$tmpdir/sqlite.zip" 2>/dev/null; then
+      unzip -qo "$tmpdir/sqlite.zip" -d "$tmpdir"
+      cp "$tmpdir"/sqlite-amalgamation-*/sqlite3.c "$tix_src/vendor/sqlite/"
+      cp "$tmpdir"/sqlite-amalgamation-*/sqlite3.h "$tix_src/vendor/sqlite/"
+      echo "OK: SQLite amalgamation downloaded"
+    else
+      echo "SKIP: Failed to download SQLite amalgamation"
+      rm -rf "$tmpdir"
+      return 0
+    fi
+    rm -rf "$tmpdir"
+  fi
+
+  # Build tix
+  if [ -x "$tix_src/build/tix" ]; then
+    echo "OK: tix already built"
+  else
+    echo "Building tix..."
+    if make -C "$tix_src" build >/dev/null 2>&1; then
+      echo "OK: tix built successfully"
+    else
+      echo "WARN: tix build failed (will retry on first run via wrapper)"
+    fi
+  fi
+}
+
+build_tix
+
+# 4c) Add repo root and app/ to PYTHONPATH for ralph package imports
 install_pythonpath_block "$HOME/.profile" "$SCRIPT_DIR"
 install_pythonpath_block "$ZSHRC_PATH" "$SCRIPT_DIR"
 install_pythonpath_block "$HOME/.profile" "$SCRIPT_DIR/app"

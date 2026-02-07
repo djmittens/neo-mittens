@@ -59,6 +59,8 @@ define run_tests
 	$(1)/test_error_paths
 	$(1)/test_sync
 	$(1)/test_new_fields
+	$(1)/test_labels
+	$(1)/test_tql
 	@echo "=== All tix tests passed ($(1)) ==="
 endef
 
@@ -79,13 +81,35 @@ lint: build/.cmake
 		-source-filter='.*/app/tix/src/.*\.c$$' \
 		-header-filter='.*/app/tix/src/.*\.h$$'
 
+# Man pages
+MAN_DIR = doc/man
+MAN_PAGES = $(wildcard $(MAN_DIR)/*.1 $(MAN_DIR)/*.5 $(MAN_DIR)/*.7)
+
+.PHONY: man
+man:
+	@for f in $(MAN_PAGES); do \
+		echo "Checking $$f ..."; \
+		man -l $$f > /dev/null 2>&1 || echo "  warning: $$f has issues"; \
+	done
+	@echo "Man pages: $(words $(MAN_PAGES)) files in $(MAN_DIR)/"
+
+.PHONY: install-man
+install-man:
+	@PREFIX=$${PREFIX:-/usr/local}; \
+	for f in $(MAN_DIR)/*.1; do \
+		install -Dm644 "$$f" "$$PREFIX/share/man/man1/$$(basename $$f)"; \
+	done; \
+	for f in $(MAN_DIR)/*.5; do \
+		install -Dm644 "$$f" "$$PREFIX/share/man/man5/$$(basename $$f)"; \
+	done; \
+	for f in $(MAN_DIR)/*.7; do \
+		install -Dm644 "$$f" "$$PREFIX/share/man/man7/$$(basename $$f)"; \
+	done; \
+	echo "Installed man pages to $$PREFIX/share/man/"
+
 .PHONY: clean
 clean:
 	rm -rf build build-asan build-tsan
-
-.PHONY: install
-install: build
-	cp build/tix ../../powerplant/tix
 
 .PHONY: help
 help:
@@ -96,5 +120,9 @@ help:
 	@echo "  make test        - Run all E2E tests"
 	@echo "  make test-asan   - Tests with ASAN"
 	@echo "  make lint        - Run clang-tidy"
+	@echo "  make man         - Check man pages"
+	@echo "  make install-man - Install man pages (PREFIX=/usr/local)"
 	@echo "  make clean       - Remove build directories"
-	@echo "  make install     - Copy binary to powerplant/"
+	@echo ""
+	@echo "powerplant/tix is a wrapper script that auto-builds on first run."
+	@echo "Just run 'tix' directly (or 'make build' to pre-build)."

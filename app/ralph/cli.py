@@ -167,9 +167,7 @@ def _build_config(global_config: GlobalConfig, include_ralph_dir: bool = True) -
     """Build config dict with common paths and global config."""
     cwd = Path.cwd()
     ralph_dir = cwd / "ralph"
-    plan_file = ralph_dir / "plan.jsonl"
     config = {
-        "plan_file": plan_file,
         "repo_root": cwd,
         **global_config.__dict__,
     }
@@ -441,7 +439,7 @@ def _add_construct_parser(subparsers) -> None:
     """Add construct subcommand with all its options."""
     p = subparsers.add_parser("construct", help="Run autonomous construction")
     p.add_argument(
-        "--spec", help="Spec file to construct (auto-initializes if plan.jsonl missing)"
+        "--spec", help="Spec file to construct (auto-initializes if not set up)"
     )
     p.add_argument(
         "--max-cost", type=float, default=0, help="Stop when cost exceeds $N"

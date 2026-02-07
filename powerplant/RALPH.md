@@ -80,7 +80,7 @@ ralph --completion-promise "ALL TESTS PASSING"  # Stop when done
 │                                                              │
 │  • Reads the specified spec                                  │
 │  • Analyzes existing code                                    │
-│  • Creates tasks in plan.jsonl                               │
+│  • Creates tasks in .tix/plan.jsonl                           │
 └─────────────────────┬───────────────────────────────────────┘
                       │
                       ▼
@@ -91,7 +91,7 @@ ralph --completion-promise "ALL TESTS PASSING"  # Stop when done
 │  ┌─────────────────────────────────────────────────────┐    │
 │  │  ITERATION LOOP (runs N times or until Ctrl+C)      │    │
 │  │                                                      │    │
-│  │  1. Read plan.jsonl                                  │    │
+│  │  1. Read .tix/plan.jsonl                              │    │
 │  │  2. Pick highest priority task                       │    │
 │  │  3. Implement it                                     │    │
 │  │  4. Run tests                                        │    │
@@ -134,7 +134,7 @@ ralph log                # Show state change history
 ralph stream             # Pipe opencode JSON for pretty output
 
 # Maintenance
-ralph validate           # Check plan.jsonl for issues
+ralph validate           # Check .tix/plan.jsonl for issues
 ralph compact            # Convert legacy tasks to tombstones
 ```
 
@@ -165,7 +165,7 @@ iterations to run before stopping. Default is **unlimited** (runs until Ctrl+C
 or no tasks remain). Use limits for unattended runs (e.g., `ralph 50` overnight).
 
 **Planning vs Construct:**
-- `ralph plan <spec.md>` - Analyzes spec and code, creates tasks in plan.jsonl. Does NOT write code.
+- `ralph plan <spec.md>` - Analyzes spec and code, creates tasks in `.tix/plan.jsonl`. Does NOT write code.
 - `ralph` / `ralph construct` - Implements tasks from the plan, one per iteration.
 
 ## Directory Structure
@@ -174,13 +174,15 @@ After `ralph init`, your repo will have:
 
 ```
 your-project/
+├── .tix/
+│   ├── plan.jsonl              # Auto-managed task list (JSONL format, owned by tix)
+│   └── ralph-state.json        # Orchestration state (stage, batch tracking)
 ├── ralph/
 │   ├── PROMPT_plan.md          # Planning mode instructions
 │   ├── PROMPT_build.md         # Build mode instructions
 │   ├── PROMPT_verify.md        # Verify stage instructions
 │   ├── PROMPT_investigate.md   # Investigate stage instructions
 │   ├── PROMPT_decompose.md     # Decompose stage instructions
-│   ├── plan.jsonl              # Auto-managed task list (JSONL format)
 │   └── specs/
 │       └── *.md                # Your requirement specs
 └── ... your code ...

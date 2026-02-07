@@ -15,7 +15,7 @@ import sys
 from dataclasses import dataclass, field
 from typing import Any, Optional
 
-from ralph.tix import Tix, TixError
+from ralph.tix import Tix, TixError, TixProtocol
 
 __all__ = [
     "ReconcileResult",
@@ -132,7 +132,7 @@ def _find_last_json_object(text: str) -> Optional[dict]:
 
 
 def reconcile_build(
-    tix: Tix,
+    tix: TixProtocol,
     agent_output: str,
     task_id: str,
     stage_metrics: Optional[dict[str, Any]] = None,
@@ -200,7 +200,7 @@ def reconcile_build(
 
 
 def reconcile_verify(
-    tix: Tix,
+    tix: TixProtocol,
     agent_output: str,
 ) -> ReconcileResult:
     """Reconcile VERIFY stage output.
@@ -261,7 +261,7 @@ def reconcile_verify(
 
 
 def reconcile_investigate(
-    tix: Tix,
+    tix: TixProtocol,
     agent_output: str,
     batch_issue_ids: Optional[list[str]] = None,
 ) -> ReconcileResult:
@@ -320,7 +320,7 @@ def reconcile_investigate(
 
 
 def reconcile_decompose(
-    tix: Tix,
+    tix: TixProtocol,
     agent_output: str,
     original_task_id: str,
     parent_depth: int = 0,
@@ -380,11 +380,11 @@ def reconcile_decompose(
 
 
 def reconcile_plan(
-    tix: Tix,
+    tix: TixProtocol,
     agent_output: str,
     spec_name: str,
 ) -> ReconcileResult:
-    """Reconcile PLAN stage output.
+    """Reconcile PLAN stage output using tix batch add.
 
     Expected agent output schema:
     {
@@ -393,6 +393,9 @@ def reconcile_plan(
             ...
         ]
     }
+
+    Uses tix batch add for efficiency — single subprocess call for all
+    tasks, with support for intra-batch dependency references.
 
     Args:
         tix: Tix harness instance.
@@ -410,9 +413,38 @@ def reconcile_plan(
         result.ok = False
         return result
 
-    for task_data in data.get("tasks", []):
+    raw_tasks = data.get("tasks", [])
+    if not raw_tasks:
+        result.errors.append("No tasks in plan output")
+        result.ok = False
+        return result
+
+    # Inject spec name into all tasks
+    tasks_to_add = []
+    for task_data in raw_tasks:
+        if not task_data.get("name"):
+            result.errors.append("Task missing name field")
+            continue
         task_data["spec"] = spec_name
-        _add_task(tix, task_data, result)
+        tasks_to_add.append(task_data)
+
+    if not tasks_to_add:
+        result.errors.append("No valid tasks to add")
+        result.ok = False
+        return result
+
+    # Batch add via tix (single subprocess call)
+    try:
+        added = tix.task_batch_add(tasks_to_add)
+        for resp in added:
+            task_id = resp.get("id", "")
+            if task_id:
+                result.tasks_added.append(task_id)
+    except TixError as e:
+        result.errors.append(f"Batch add failed: {e}")
+        # Fallback: try individual adds
+        for task_data in tasks_to_add:
+            _add_task(tix, task_data, result)
 
     return result
 
@@ -422,7 +454,7 @@ def reconcile_plan(
 # =============================================================================
 
 
-def _add_task(tix: Tix, task_data: dict, result: ReconcileResult) -> None:
+def _add_task(tix: TixProtocol, task_data: dict, result: ReconcileResult) -> None:
     """Add a single task via tix, updating result."""
     name = task_data.get("name", "")
     if not name:
@@ -438,7 +470,7 @@ def _add_task(tix: Tix, task_data: dict, result: ReconcileResult) -> None:
         result.errors.append(f"Failed to add task '{name}': {e}")
 
 
-def _accept_task(tix: Tix, task_id: str, result: ReconcileResult) -> None:
+def _accept_task(tix: TixProtocol, task_id: str, result: ReconcileResult) -> None:
     """Accept a task via tix, updating result."""
     try:
         tix.task_accept(task_id)
@@ -448,18 +480,44 @@ def _accept_task(tix: Tix, task_id: str, result: ReconcileResult) -> None:
 
 
 def _reject_task(
-    tix: Tix, task_id: str, reason: str, result: ReconcileResult
+    tix: TixProtocol, task_id: str, reason: str, result: ReconcileResult
 ) -> None:
-    """Reject a task via tix, updating result."""
+    """Reject a task via tix, updating result.
+
+    Also increments reject_count so the harness can detect stuck tasks.
+    """
     try:
         tix.task_reject(task_id, reason)
         result.tasks_rejected.append(task_id)
     except TixError as e:
         result.errors.append(f"Failed to reject {task_id}: {e}")
+        return
+
+    _increment_reject_count(tix, task_id)
+
+
+def _increment_reject_count(tix: TixProtocol, task_id: str) -> None:
+    """Increment reject_count on a task for pattern detection.
+
+    Best-effort: failure here does not affect reconciliation.
+    """
+    try:
+        full = tix.query_full()
+        all_tasks = (
+            full.get("tasks", {}).get("pending", [])
+            + full.get("tasks", {}).get("done", [])
+        )
+        task = next(
+            (t for t in all_tasks if t.get("id") == task_id), None
+        )
+        current = task.get("reject_count", 0) if task else 0
+        tix.task_update(task_id, {"reject_count": current + 1})
+    except (TixError, Exception):
+        pass
 
 
 def _add_issues(
-    tix: Tix, issues: list[dict], result: ReconcileResult
+    tix: TixProtocol, issues: list[dict], result: ReconcileResult
 ) -> None:
     """Add discovered issues via tix, updating result."""
     for issue in issues:

@@ -55,10 +55,14 @@ set(TIX_SOURCES
   src/validate.c
   src/batch.c
   src/json.c
+  src/color.c
   src/cmd_init.c
   src/cmd_task.c
   src/cmd_issue.c
   src/cmd_note.c
+  src/tql.c
+  src/tql_compile.c
+  src/tql_exec.c
   src/cmd_query.c
   src/cmd_status.c
   src/cmd_log.c
@@ -121,3 +125,5 @@ tix_add_test(test_error_paths     test/e2e/test_error_paths.c)
 tix_add_test(test_sync            test/e2e/test_sync.c)
 tix_add_test(test_new_fields      test/e2e/test_new_fields.c)
 target_link_libraries(test_new_fields PRIVATE m)
+tix_add_test(test_labels          test/e2e/test_labels.c)
+tix_add_test(test_tql             test/e2e/test_tql.c)

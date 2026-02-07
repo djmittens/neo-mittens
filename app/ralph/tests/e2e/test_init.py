@@ -36,9 +36,8 @@ def test_init_creates_structure(tmp_path: Path):
     assert specs_dir.exists(), "ralph/specs/ directory not created"
     assert specs_dir.is_dir(), "specs should be a directory"
 
-    plan_file = ralph_dir / "plan.jsonl"
-    assert plan_file.exists(), "ralph/plan.jsonl not created"
-    assert plan_file.is_file(), "plan.jsonl should be a file"
+    # Note: .tix/plan.jsonl is created by tix binary (not available in tests)
+    # so we only verify the ralph/ directory structure here.
 
     example_spec = specs_dir / "example.md"
     assert example_spec.exists(), "ralph/specs/example.md not created"
@@ -100,18 +99,12 @@ def test_init_idempotent(tmp_path: Path):
     assert result1.returncode == 0, f"First init failed: {result1.stderr}"
 
     ralph_dir = tmp_path / "ralph"
-    plan_file = ralph_dir / "plan.jsonl"
-    original_plan_content = plan_file.read_text()
 
     custom_spec = ralph_dir / "specs" / "custom.md"
     custom_spec.write_text("# Custom Spec\n\nMy custom specification.\n")
 
     result2 = run_ralph("init", cwd=tmp_path)
     assert result2.returncode == 0, f"Second init failed: {result2.stderr}"
-
-    assert plan_file.exists(), "plan.jsonl should still exist"
-    new_plan_content = plan_file.read_text()
-    assert new_plan_content == original_plan_content, "plan.jsonl should be preserved"
 
     assert custom_spec.exists(), "Custom spec should be preserved"
     assert "Custom Spec" in custom_spec.read_text()

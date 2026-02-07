@@ -1,0 +1,58 @@
+.TH TIX\-NOTE 1 "February 2026" "tix" "User Commands"
+.SH NAME
+tix\-note \- manage notes in the tix ticket system
+.SH SYNOPSIS
+.B tix note add
+.I "text"
+.br
+.B tix note list
+.br
+.B tix note done
+.I id
+.SH DESCRIPTION
+Notes are ephemeral information stored alongside tasks and issues.
+They are useful for recording decisions, context, or observations
+that don't warrant a task or issue.
+.PP
+Note IDs use the prefix
+.BR N\- .
+.SH SUBCOMMANDS
+.SS tix note add \fI"text"\fR
+Create a new note.
+The text must be non\-empty.
+The author is auto\-filled from
+.BR "git config user.name" .
+.PP
+.B Output:
+.RS
+.nf
+{"id":"N\-XXXXXXXX","text":"..."}
+.fi
+.RE
+.SS tix note list
+List all pending notes as a JSON array.
+.PP
+.B Output:
+.RS
+.nf
+[{"id":"N\-XXXXXXXX","type":2,"status":0,"name":"..."},...]
+.fi
+.RE
+.SS tix note done \fIid\fR
+Archive a note (delete it from active state).
+.PP
+.B Output:
+.RS
+.nf
+{"id":"N\-XXXXXXXX","status":"archived"}
+.fi
+.RE
+.SH EXIT STATUS
+.TP
+.B 0
+Command succeeded.
+.TP
+.B 1
+Invalid arguments.
+.SH SEE ALSO
+.BR tix (1)

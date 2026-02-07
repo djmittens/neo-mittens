@@ -61,17 +61,18 @@ def cmd_watch(config: dict) -> int:
     """Live progress dashboard.
 
     Args:
-        config: Ralph configuration dict with plan_file, repo_root, etc.
+        config: Ralph configuration dict with repo_root, etc.
 
     Returns:
         Exit code (0 for success).
     """
-    plan_file = config.get("plan_file")
-    if not plan_file or not plan_file.exists():
-        print(f"{Colors.RED}No plan file found. Run 'ralph init' first.{Colors.NC}")
+    repo_root = config.get("repo_root", Path.cwd())
+    ralph_dir = config.get("ralph_dir", repo_root / "ralph")
+
+    if not ralph_dir.exists():
+        print(f"{Colors.RED}Ralph not initialized. Run 'ralph init' first.{Colors.NC}")
         return 1
 
-    repo_root = config.get("repo_root", Path.cwd())
     tix: Optional[Tix] = None
     try:
         tix = Tix(repo_root)
@@ -79,6 +80,9 @@ def cmd_watch(config: dict) -> int:
             tix = None
     except Exception:
         tix = None
+
+    # Get the tix plan file for change detection
+    plan_file = tix.plan_file() if tix else repo_root / ".tix" / "plan.jsonl"
 
     dashboard = FallbackDashboard(config, tix=tix)
     dashboard.branch = _get_current_branch()
@@ -96,7 +100,7 @@ def cmd_watch(config: dict) -> int:
 
         if last_mtime is None or current_mtime != last_mtime:
             last_mtime = current_mtime
-            dashboard.ralph_state = load_state(plan_file)
+            dashboard.ralph_state = load_state(repo_root)
             dashboard.is_running = _count_running_processes_in_cwd() > 0
             dashboard.running_count = _count_running_processes_in_cwd()
             return [f"State refreshed at {time.strftime('%H:%M:%S')}"]

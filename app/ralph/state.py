@@ -3,8 +3,9 @@
 Manages stage transitions, batch tracking, and spec/config metadata.
 All ticket data (tasks, issues, tombstones) is owned by tix.
 
-load_state/save_state only read/write orchestration records from plan.jsonl
-(t: "spec", t: "stage", t: "config"). Ticket lines are preserved verbatim.
+State is stored in .tix/ralph-state.json — a small JSON file separate
+from tix's plan.jsonl. This cleanly separates orchestration concerns
+(stage, batch progress, decompose target) from ticket data.
 """
 
 from dataclasses import dataclass, field
@@ -12,7 +13,9 @@ from pathlib import Path
 from typing import Optional
 import json
 
-from ralph.models import RalphPlanConfig
+
+# Default state file location relative to repo root
+STATE_FILENAME = "ralph-state.json"
 
 
 @dataclass
@@ -22,7 +25,6 @@ class RalphState:
     Does NOT hold ticket data (tasks, issues, tombstones) — tix owns those.
     """
 
-    config: Optional[RalphPlanConfig] = None
     spec: Optional[str] = None
 
     # Explicit stage (persisted)
@@ -151,18 +153,28 @@ class RalphState:
         }
 
 
-def load_state(path: Path) -> RalphState:
-    """Load orchestration state from plan.jsonl file.
-
-    Only reads spec, stage, and config records. Ticket records
-    (task, issue, accept, reject) are ignored — tix owns those.
+def _state_path(repo_root: Path) -> Path:
+    """Get the path to ralph-state.json.
 
     Args:
-        path: Path to plan.jsonl file
+        repo_root: Repository root directory.
 
     Returns:
-        RalphState populated from the file, or empty state if file missing
+        Path to .tix/ralph-state.json
     """
+    return repo_root / ".tix" / STATE_FILENAME
+
+
+def load_state(repo_root: Path) -> RalphState:
+    """Load orchestration state from .tix/ralph-state.json.
+
+    Args:
+        repo_root: Repository root directory.
+
+    Returns:
+        RalphState populated from the file, or empty state if file missing.
+    """
+    path = _state_path(repo_root)
     state = RalphState()
 
     if not path.exists():
@@ -172,108 +184,58 @@ def load_state(path: Path) -> RalphState:
         content = path.read_text().strip()
         if not content:
             return state
-
-        for line in content.split("\n"):
-            if not line.strip():
-                continue
-            d = json.loads(line)
-            _dispatch_record(state, d)
-    except (json.JSONDecodeError, KeyError):
+        d = json.loads(content)
+        _populate_from_dict(state, d)
+    except (json.JSONDecodeError, KeyError, OSError):
         pass
 
     return state
 
 
-def _dispatch_record(state: RalphState, d: dict) -> None:
-    """Dispatch a parsed JSON record to the appropriate state field."""
-    t = d.get("t")
-    if t == "spec":
-        state.spec = d.get("spec")
-    elif t == "config":
-        state.config = RalphPlanConfig.from_dict(d)
-    elif t == "stage":
-        stage = d.get("stage", "PLAN")
-        # Migrate old RESCUE stage to INVESTIGATE
-        state.stage = "INVESTIGATE" if stage == "RESCUE" else stage
-        # DECOMPOSE state
-        state.decompose_target = d.get("decompose_target")
-        state.decompose_reason = d.get("decompose_reason")
-        state.decompose_log = d.get("decompose_log")
-        # Batch tracking
-        state.batch_items = d.get("batch_items", [])
-        state.batch_completed = d.get("batch_completed", [])
-        state.batch_attempt = d.get("batch_attempt", 0)
-    # task, issue, accept, reject records are ignored — tix owns them
+def _populate_from_dict(state: RalphState, d: dict) -> None:
+    """Populate RalphState fields from a dict."""
+    state.spec = d.get("spec")
+    stage = d.get("stage", "PLAN")
+    # Migrate old RESCUE stage to INVESTIGATE
+    state.stage = "INVESTIGATE" if stage == "RESCUE" else stage
+    state.decompose_target = d.get("decompose_target")
+    state.decompose_reason = d.get("decompose_reason")
+    state.decompose_log = d.get("decompose_log")
+    state.batch_items = d.get("batch_items", [])
+    state.batch_completed = d.get("batch_completed", [])
+    state.batch_attempt = d.get("batch_attempt", 0)
 
 
-def save_state(state: RalphState, path: Path) -> None:
-    """Save orchestration state to plan.jsonl file.
-
-    Preserves all non-orchestration lines (ticket data owned by tix)
-    and rewrites only the orchestration records (spec, stage, config).
+def save_state(state: RalphState, repo_root: Path) -> None:
+    """Save orchestration state to .tix/ralph-state.json.
 
     Args:
-        state: RalphState to save
-        path: Path to plan.jsonl file
+        state: RalphState to save.
+        repo_root: Repository root directory.
     """
-    # Read existing file and preserve ticket lines
-    preserved_lines: list[str] = []
-    if path.exists():
-        try:
-            content = path.read_text().strip()
-            if content:
-                for line in content.split("\n"):
-                    stripped = line.strip()
-                    if not stripped:
-                        continue
-                    try:
-                        d = json.loads(stripped)
-                        t = d.get("t")
-                        # Skip orchestration records — we'll rewrite them
-                        if t in ("spec", "stage", "config"):
-                            continue
-                        # Preserve everything else (task, issue, accept, reject, etc.)
-                        preserved_lines.append(stripped)
-                    except json.JSONDecodeError:
-                        # Preserve non-JSON lines too
-                        preserved_lines.append(stripped)
-        except OSError:
-            pass
+    path = _state_path(repo_root)
+    path.parent.mkdir(parents=True, exist_ok=True)
 
-    # Build orchestration lines
-    orch_lines: list[str] = []
-
-    if state.config:
-        orch_lines.append(state.config.to_jsonl())
+    d: dict = {"stage": state.stage}
 
     if state.spec:
-        orch_lines.append(json.dumps({"t": "spec", "spec": state.spec}))
+        d["spec"] = state.spec
 
-    orch_lines.append(_build_stage_record(state))
-
-    # Write: orchestration first, then preserved ticket data
-    all_lines = orch_lines + preserved_lines
-    path.write_text("\n".join(all_lines) + "\n" if all_lines else "")
+    _add_optional_fields(state, d)
+    path.write_text(json.dumps(d, indent=2) + "\n")
 
 
-def _build_stage_record(state: RalphState) -> str:
-    """Build the stage record JSON line."""
-    stage_record: dict = {"t": "stage", "stage": state.stage}
-
-    optional_fields = [
-        ("decompose_target", "decompose_target"),
-        ("decompose_reason", "decompose_reason"),
-        ("decompose_log", "decompose_log"),
-        ("batch_items", "batch_items"),
-        ("batch_completed", "batch_completed"),
+def _add_optional_fields(state: RalphState, d: dict) -> None:
+    """Add non-default optional fields to the state dict."""
+    optional = [
+        ("decompose_target", state.decompose_target),
+        ("decompose_reason", state.decompose_reason),
+        ("decompose_log", state.decompose_log),
+        ("batch_items", state.batch_items),
+        ("batch_completed", state.batch_completed),
     ]
-
-    for attr, key in optional_fields:
-        value = getattr(state, attr, None)
+    for key, value in optional:
         if value:
-            stage_record[key] = value
-
+            d[key] = value
     if state.batch_attempt > 0:
-        stage_record["batch_attempt"] = state.batch_attempt
-
-    return json.dumps(stage_record)
+        d["batch_attempt"] = state.batch_attempt

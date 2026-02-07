@@ -32,8 +32,10 @@ make build-asan   # AddressSanitizer build
 make test         # Run all 68 E2E tests
 make test-asan    # Tests under ASAN
 make lint         # clang-tidy
-make install      # Copy to powerplant/tix
 ```
+
+`powerplant/tix` is a wrapper script that auto-builds on first run.
+No `make install` needed — just `make build` and the wrapper picks up the binary.
 
 ## Testing
 

@@ -23,7 +23,7 @@
 - [ ] test/testing.h / testing.c (test framework)
 - [ ] .clang-tidy
 - [ ] .gitignore updates
-- [ ] bootstrap.sh updates
+- [x] bootstrap.sh updates
 - [ ] opencode skill + tool
 - [ ] claude commands
 - [ ] AGENTS.md
@@ -520,7 +520,7 @@ tix report
 | `make test-asan` | Tests with ASAN |
 | `make lint` | run-clang-tidy |
 | `make clean` | Remove build dirs |
-| `make install` | Copy binary to powerplant/ |
+| `make help` | Show available targets |
 
 ### SQLite Bundling
 SQLite amalgamation (`sqlite3.c` + `sqlite3.h`) is vendored in `app/tix/vendor/sqlite/`.
@@ -570,10 +570,14 @@ int main(void) {
 ## 12. Integration Points
 
 ### Bootstrap (bootstrap.sh)
-Add to existing bootstrap.sh:
-1. Build tix binary: `cd app/tix && make build`
-2. Symlink binary to `powerplant/tix`
-3. tix is then available on PATH via existing powerplant PATH setup
+`powerplant/tix` is a **wrapper script** (not a binary) that:
+1. Locates the real binary at `app/tix/build/tix`
+2. If missing, downloads SQLite amalgamation and runs `make build` automatically
+3. `exec`s the real binary transparently (signals, exit codes pass through)
+
+`bootstrap.sh` pre-builds tix during setup (optional, since the wrapper auto-builds).
+No `make install` step needed — local development just uses `make build` and the
+wrapper always picks up the latest binary from `app/tix/build/tix`.
 
 ### OpenCode Tool (.opencode/tools/tix-status.ts)
 Mirror `ralph-status.ts` pattern - read `.tix/cache.db` or shell out to `tix query`.

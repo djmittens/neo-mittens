@@ -13,7 +13,7 @@ Reports: task counts, pending tasks, open issues, and current branch.`,
     try {
       execSync("which tix", { stdio: "pipe" })
     } catch {
-      return "tix not found in PATH. Build with: cd app/tix && make build && make install"
+      return "tix not found in PATH. Run bootstrap.sh or: cd app/tix && make build"
     }
 
     // Check if initialized

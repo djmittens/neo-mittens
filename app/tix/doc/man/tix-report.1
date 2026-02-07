@@ -1,0 +1,90 @@
+.TH TIX\-REPORT 1 "February 2026" "tix" "User Commands"
+.SH NAME
+tix\-report \- generate project reports from tix ticket data
+.SH SYNOPSIS
+.B tix report
+.br
+.B tix report velocity
+.br
+.B tix report actors
+.br
+.B tix report models
+.SH DESCRIPTION
+.B tix report
+generates human\-readable reports from ticket data, including
+task progress, cost analysis, agent throughput metrics, and
+per\-author and per\-model breakdowns.
+.PP
+All output is human\-readable text on stdout (not JSON).
+.SH SUBCOMMANDS
+.SS tix report
+Executive summary (default when no subcommand given).
+Includes:
+.RS
+.IP \(bu 2
+Task counts (total, pending, done, accepted, completion percentage)
+.IP \(bu 2
+Cost summary (total and average per task)
+.IP \(bu 2
+Token usage (total in/out)
+.IP \(bu 2
+Cycle time metrics (average completion time)
+.IP \(bu 2
+Iteration and retry counts
+.IP \(bu 2
+Top model and top author by completed task count
+.RE
+.SS tix report velocity
+Detailed throughput and efficiency metrics:
+.RS
+.IP \(bu 2
+Completed task count
+.IP \(bu 2
+Total and average cost
+.IP \(bu 2
+Total tokens in and out
+.IP \(bu 2
+Average cycle time
+.IP \(bu 2
+Average iterations per task
+.IP \(bu 2
+Total retries and kills
+.RE
+.SS tix report actors
+Per\-author breakdown table with columns:
+.RS
+.IP \(bu 2
+Author name
+.IP \(bu 2
+Total tasks assigned
+.IP \(bu 2
+Completed vs. pending
+.IP \(bu 2
+Total and average cost
+.IP \(bu 2
+Average iterations
+.RE
+.SS tix report models
+Per\-model breakdown table with columns:
+.RS
+.IP \(bu 2
+Model name
+.IP \(bu 2
+Total tasks using this model
+.IP \(bu 2
+Total and average cost
+.IP \(bu 2
+Total tokens in and out
+.IP \(bu 2
+Average iterations
+.RE
+.SH EXIT STATUS
+.TP
+.B 0
+Report generated successfully.
+.TP
+.B 1
+Error or unknown subcommand.
+.SH SEE ALSO
+.BR tix (1),
+.BR tix\-query (1)

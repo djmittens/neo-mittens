@@ -4,15 +4,18 @@ All ticket mutations go through this module. The construct harness calls
 these functions instead of the agent calling CLI commands directly.
 """
 
+from __future__ import annotations
+
 import json
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Optional, Protocol, runtime_checkable
 
 __all__ = [
     "TixError",
     "TixResult",
+    "TixProtocol",
     "Tix",
 ]
 
@@ -36,6 +39,32 @@ class TixResult:
     ok: bool
     data: dict[str, Any]
     raw: str = ""
+
+
+@runtime_checkable
+class TixProtocol(Protocol):
+    """Structural interface for tix operations.
+
+    Both the real ``Tix`` class and test mocks satisfy this protocol.
+    Use this as the type annotation for functions that accept a tix-like
+    object (e.g. ``def reconcile(tix: TixProtocol, ...) -> ...``).
+    """
+
+    def query_tasks(self) -> list[dict]: ...
+    def query_done_tasks(self) -> list[dict]: ...
+    def query_issues(self) -> list[dict]: ...
+    def query_full(self) -> dict: ...
+    def task_add(self, task_json: dict) -> dict: ...
+    def task_batch_add(self, tasks: list[dict]) -> list[dict]: ...
+    def task_done(self, task_id: str | None = None) -> dict: ...
+    def task_accept(self, task_id: str | None = None) -> dict: ...
+    def task_reject(self, task_id: str, reason: str) -> dict: ...
+    def task_delete(self, task_id: str) -> dict: ...
+    def task_update(self, task_id: str, fields: dict) -> dict: ...
+    def issue_add(self, desc: str) -> dict: ...
+    def issue_done(self) -> dict: ...
+    def issue_done_all(self) -> dict: ...
+    def issue_done_ids(self, ids: list[str]) -> dict: ...
 
 
 class Tix:
@@ -149,6 +178,27 @@ class Tix:
         """
         result = self._run("task", "add", json.dumps(task_json))
         return result.data
+
+    def task_batch_add(self, tasks: list[dict]) -> list[dict]:
+        """Add multiple tasks in a single tix call (batch add).
+
+        Uses ``tix batch '[...]'`` which accepts a JSON array of task
+        objects.  The batch command returns ``{"success": N, "errors": N}``
+        rather than individual IDs, so we return a synthetic list of dicts
+        with a ``"batch": True`` marker.
+
+        Args:
+            tasks: List of task dicts with name, notes, accept, deps, etc.
+
+        Returns:
+            List of dicts, one per successfully added task.
+        """
+        if not tasks:
+            return []
+        result = self._run("batch", json.dumps(tasks))
+        # Batch returns {"success": N, "errors": N}
+        success = result.data.get("success", 0) if isinstance(result.data, dict) else 0
+        return [{"id": f"batch-{i}", "batch": True} for i in range(success)]
 
     def task_done(self, task_id: Optional[str] = None) -> dict:
         """Mark a task as done.
@@ -299,6 +349,24 @@ class Tix:
             TixResult.
         """
         return self._run("init", parse_json=False)
+
+    def plan_file(self) -> Path:
+        """Get the path to the tix plan.jsonl file.
+
+        Returns .tix/plan.jsonl if it exists, otherwise falls back to
+        ralph/plan.jsonl (legacy). This is the git-tracked source of truth
+        for ticket data.
+
+        Returns:
+            Path to the plan.jsonl file.
+        """
+        tix_plan = self.cwd / ".tix" / "plan.jsonl"
+        if tix_plan.exists():
+            return tix_plan
+        legacy = self.cwd / "ralph" / "plan.jsonl"
+        if legacy.exists():
+            return legacy
+        return tix_plan  # Default to .tix/ for new repos
 
     def is_available(self) -> bool:
         """Check if tix binary is available and working."""

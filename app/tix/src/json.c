@@ -62,7 +62,7 @@ static const char *parse_array_of_strings(const char *p,
   while (*p != '\0' && *p != ']' && field->arr_count < TIX_JSON_MAX_ARRLEN) {
     p = skip_ws(p);
     if (*p != '"') { break; }
-    p = parse_string(p, field->arr_vals[field->arr_count], TIX_MAX_ID_LEN);
+    p = parse_string(p, field->arr_vals[field->arr_count], TIX_JSON_MAX_ARRVAL);
     if (p == NULL) { return NULL; }
     field->arr_count++;
     p = skip_ws(p);
@@ -335,6 +335,17 @@ sz tix_json_write_ticket(const void *vticket, char *buf, sz buf_len) {
     for (u32 i = 0; i < t->dep_count; i++) {
       if (i > 0) { TIX_BUF_PRINTF(p, end, 0, ","); }
       TIX_BUF_PRINTF(p, end, 0, "\"%s\"", t->deps[i]);
+    }
+    TIX_BUF_PRINTF(p, end, 0, "]");
+  }
+
+  if (t->label_count > 0) {
+    TIX_BUF_PRINTF(p, end, 0, ",\"labels\":[");
+    for (u32 i = 0; i < t->label_count; i++) {
+      if (i > 0) { TIX_BUF_PRINTF(p, end, 0, ","); }
+      char esc_label[TIX_MAX_KEYWORD_LEN * 2];
+      tix_json_escape(t->labels[i], esc_label, sizeof(esc_label));
+      TIX_BUF_PRINTF(p, end, 0, "\"%s\"", esc_label);
     }
     TIX_BUF_PRINTF(p, end, 0, "]");
   }
