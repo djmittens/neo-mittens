@@ -1,109 +1,54 @@
 # VERIFY Stage
 
-All tasks are done. Verify they meet their acceptance criteria.
+Verify that done tasks meet their acceptance criteria.
 
-## Step 1: Get State
+## Done Tasks to Verify
 
-Run `ralph query` to get:
-- `spec`: the current spec name (e.g., "construct-mode.md")
-- `tasks.done`: list of done tasks with their acceptance criteria
+```json
+{{DONE_TASKS_JSON}}
+```
 
-## Step 2: Verify Each Done Task
+Total: {{DONE_COUNT}} tasks
 
-For EACH done task, spawn a subagent to verify:
+## Spec: {{SPEC_FILE}}
+
+## Instructions
+
+1. **For each done task**, spawn a subagent (Task tool) to verify its acceptance criteria. Run all verifications in parallel.
+
+2. Each subagent should:
+   - Search the codebase for the implementation
+   - Run any tests/commands in the acceptance criteria
+   - Return whether the task passes or fails, with evidence
+
+3. **Check spec acceptance criteria** in `ralph/specs/{{SPEC_FILE}}`:
+   - For checked criteria (`- [x]`): verify they still hold
+   - For unchecked criteria (`- [ ]`): identify what's missing
+
+4. For unchecked criteria not covered by existing tasks, include them in `new_tasks`.
+
+## Output
+
+When done, output your result between markers EXACTLY like this:
 
 ```
-Task: "Verify task '{task.name}' meets its acceptance criteria: {task.accept}
-
-1. Search codebase for the implementation
-2. Check if acceptance criteria is satisfied
-3. Run any tests mentioned in criteria
-
-Return JSON:
+[RALPH_OUTPUT]
 {
-  \"task_id\": \"{task.id}\",
-  \"passed\": true | false,
-  \"evidence\": \"<what you found>\",
-  \"reason\": \"<why it failed>\"  // only if passed=false
-}"
+  "results": [
+    {"task_id": "t-xxx", "passed": true},
+    {"task_id": "t-yyy", "passed": false, "reason": "test X fails with error Y"}
+  ],
+  "spec_complete": false,
+  "new_tasks": [
+    {"name": "Fix failing criterion", "notes": "Detailed: file paths, approach, min 50 chars", "accept": "measurable command + expected result"}
+  ]
+}
+[/RALPH_OUTPUT]
 ```
 
-**Run all verifications in parallel.**
+- `results`: one entry per done task — `passed: true` to accept, `passed: false` to reject
+- `reason`: required when `passed: false` — specific reason for rejection
+- `spec_complete`: true only if ALL spec criteria are satisfied and no new work needed
+- `new_tasks`: tasks for uncovered spec criteria (notes must have file paths, accept must be measurable)
 
-## Step 3: Apply Results
-
-### For each task:
-
-**If passed** → `ralph task accept <task-id>`
-
-**If failed** → Choose one:
-
-1. **Implementation bug** (can be fixed):
-   `ralph task reject <task-id> "<reason>"`
-
-2. **Architectural blocker** (cannot be done):
-   `ralph issue add "Task <task-id> blocked: <why>"`
-   `ralph task delete <task-id>`
-   
-Signs of architectural blocker:
-- "Cannot do X mid-execution"
-- Same rejection reason recurring
-- Requires changes outside this spec
-
-## Step 4: Verify Spec Acceptance Criteria
-
-Read the spec's **Acceptance Criteria section only** (not entire spec):
-`ralph/specs/<spec-name>` - scroll to "## Acceptance Criteria"
-
-### 4a: Verify Checked Criteria Still Pass
-
-For each **checked** criterion (`- [x]`), spawn a subagent to verify it still holds:
-
-```
-Task: "Verify spec acceptance criterion: {criterion_text}
-
-1. Search codebase for relevant implementation
-2. Run any tests or commands that verify this criterion
-3. Check that the implementation still satisfies this criterion
-
-Return JSON:
-{
-  \"criterion\": \"{criterion_text}\",
-  \"passed\": true | false,
-  \"evidence\": \"<what you found>\",
-  \"reason\": \"<why it failed>\"  // only if passed=false
-}"
-```
-
-**Run all verifications in parallel.**
-
-If any checked criterion no longer passes:
-- `ralph issue add "Spec criterion regressed: <criterion>. Reason: <why>"`
-- Uncheck it in the spec file
-
-### 4b: Create Tasks for Unchecked Criteria
-
-For any **unchecked** criteria (`- [ ]`) not covered by existing tasks, research what's needed and create a well-defined task:
-```
-ralph task add '{"name": "<specific action>", "notes": "<DETAILED: file paths + approach>", "accept": "<measurable verification>"}\'
-```
-
-**IMPORTANT**: 
-- `notes` MUST include SPECIFIC file paths and implementation approach (minimum 50 chars)
-- `notes` should answer: Which files? What functions/lines? What pattern to use?
-- `accept` MUST be measurable: command to run, expected exit code, or specific output to check
-- Vague notes like "implement X" or acceptance like "works correctly" will be REJECTED
-
-## Step 5: Final Decision
-
-If all tasks accepted and no new tasks created:
-```
-[RALPH] SPEC_COMPLETE
-```
-
-Otherwise:
-```
-[RALPH] SPEC_INCOMPLETE: <summary>
-```
-
-## EXIT after completing
+**You MUST output the [RALPH_OUTPUT] block as your final action before exiting.**

@@ -1,9 +1,12 @@
 """Fallback TUI dashboard for terminal output without Textual."""
 
 from dataclasses import dataclass, field
-from typing import Callable, List, Optional, Any
+from typing import Callable, List, Optional, Any, TYPE_CHECKING
 
 from ralph.utils import Colors
+
+if TYPE_CHECKING:
+    from ralph.tix import Tix
 
 
 @dataclass
@@ -24,13 +27,19 @@ class FallbackDashboard:
     Provides a basic terminal UI that refreshes on state changes.
     """
 
-    def __init__(self, config: Optional[dict] = None):
+    def __init__(
+        self,
+        config: Optional[dict] = None,
+        tix: Optional["Tix"] = None,
+    ):
         """Initialize the fallback dashboard.
 
         Args:
             config: Optional Ralph configuration dict.
+            tix: Optional Tix instance for ticket queries.
         """
         self.config = config or {}
+        self.tix = tix
         self.ralph_state: Optional[Any] = None
         self.is_running: bool = False
         self.running_count: int = 0
@@ -64,21 +73,30 @@ class FallbackDashboard:
             state = self.ralph_state
             lines.append("")
             lines.append(f"Spec: {getattr(state, 'spec', 'None')}")
+            lines.append(f"Stage: {getattr(state, 'stage', 'Unknown')}")
+
+            pending_count, done_count, issue_count = self._get_ticket_counts()
             lines.append(
-                f"Stage: {getattr(state.config, 'stage', 'Unknown') if hasattr(state, 'config') and state.config else 'Unknown'}"
+                f"Tasks: {pending_count} pending, {done_count} done"
             )
-
-            pending = getattr(state, "pending", [])
-            done = getattr(state, "done", [])
-            issues = getattr(state, "issues", [])
-
-            lines.append(f"Tasks: {len(pending)} pending, {len(done)} done")
-            lines.append(f"Issues: {len(issues)}")
+            lines.append(f"Issues: {issue_count}")
 
         lines.append(f"{Colors.CYAN}{'=' * 60}{Colors.NC}")
         lines.append("Press Ctrl+C to exit")
 
         return lines
+
+    def _get_ticket_counts(self) -> tuple[int, int, int]:
+        """Get ticket counts from tix or return zeros."""
+        if not self.tix:
+            return 0, 0, 0
+        try:
+            pending = len(self.tix.query_tasks())
+            done = len(self.tix.query_done_tasks())
+            issues = len(self.tix.query_issues())
+            return pending, done, issues
+        except Exception:
+            return 0, 0, 0
 
     def run_loop(
         self,

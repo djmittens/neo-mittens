@@ -33,9 +33,21 @@ tix_err_t tix_cmd_init(int argc, char **argv) {
   if (n < 0 || (sz)n >= sizeof(config_path)) { return TIX_ERR_OVERFLOW; }
 
   struct stat st;
+  tix_config_t cfg;
+  tix_config_defaults(&cfg);
+
+  /* detect legacy ralph/plan.jsonl and use it if present */
+  char legacy_path[TIX_MAX_PATH_LEN];
+  n = snprintf(legacy_path, sizeof(legacy_path),
+               "%s/ralph/plan.jsonl", repo_root);
+  if (n < 0 || (sz)n >= sizeof(legacy_path)) { return TIX_ERR_OVERFLOW; }
+
+  if (stat(legacy_path, &st) == 0) {
+    snprintf(cfg.plan_file, sizeof(cfg.plan_file), "ralph/plan.jsonl");
+    printf("found legacy %s, using it\n", legacy_path);
+  }
+
   if (stat(config_path, &st) != 0) {
-    tix_config_t cfg;
-    tix_config_defaults(&cfg);
     err = tix_config_save(&cfg, config_path);
     if (err != TIX_OK) {
       fprintf(stderr, "error: could not write config.toml\n");
@@ -44,15 +56,21 @@ tix_err_t tix_cmd_init(int argc, char **argv) {
     printf("created %s\n", config_path);
   }
 
-  /* ensure plan.jsonl exists */
-  char plan_dir[TIX_MAX_PATH_LEN];
-  n = snprintf(plan_dir, sizeof(plan_dir), "%s/ralph", repo_root);
-  if (n < 0 || (sz)n >= sizeof(plan_dir)) { return TIX_ERR_OVERFLOW; }
-  tix_config_ensure_dir(plan_dir);
-
+  /* ensure plan.jsonl exists at configured location */
   char plan_path[TIX_MAX_PATH_LEN];
-  n = snprintf(plan_path, sizeof(plan_path), "%s/ralph/plan.jsonl", repo_root);
+  n = snprintf(plan_path, sizeof(plan_path),
+               "%s/%s", repo_root, cfg.plan_file);
   if (n < 0 || (sz)n >= sizeof(plan_path)) { return TIX_ERR_OVERFLOW; }
+
+  /* ensure parent directory exists (e.g. .tix/ or ralph/) */
+  char plan_dir[TIX_MAX_PATH_LEN];
+  snprintf(plan_dir, sizeof(plan_dir), "%s", plan_path);
+  char *last_slash = strrchr(plan_dir, '/');
+  if (last_slash != NULL) {
+    *last_slash = '\0';
+    tix_config_ensure_dir(plan_dir);
+  }
+
   if (stat(plan_path, &st) != 0) {
     FILE *fp = fopen(plan_path, "w");
     if (fp != NULL) {

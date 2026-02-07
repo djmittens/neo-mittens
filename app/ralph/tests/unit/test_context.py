@@ -3,6 +3,7 @@
 import pytest
 from ralph.context import (
     Metrics,
+    LoopDetector,
     IterationKillInfo,
     ToolSummaries,
     CompactedContext,
@@ -328,3 +329,55 @@ class TestCompactedContext:
         assert "file1.py" in prompt
         assert "file2.py" in prompt
         assert "add validation" in prompt
+
+
+class TestLoopDetector:
+    """Tests for LoopDetector class."""
+
+    def test_no_loop_on_first_output(self):
+        """First output should never trigger loop detection."""
+        ld = LoopDetector(threshold=3)
+        assert ld.check_output("BUILD|p=['t1']|d=[]|i=[]|s=BUILD") is False
+
+    def test_no_loop_on_different_outputs(self):
+        """Different outputs should not trigger loop detection."""
+        ld = LoopDetector(threshold=3)
+        assert ld.check_output("BUILD|p=['t1']|d=[]|i=[]|s=VERIFY") is False
+        assert ld.check_output("BUILD|p=[]|d=['t1']|i=[]|s=VERIFY") is False
+        assert ld.check_output("VERIFY|p=[]|d=['t1']|i=[]|s=BUILD") is False
+
+    def test_loop_detected_on_threshold(self):
+        """Identical outputs at threshold count should trigger loop."""
+        ld = LoopDetector(threshold=3)
+        output = "BUILD|p=['t1']|d=[]|i=[]|s=BUILD"
+        assert ld.check_output(output) is False  # 1st
+        assert ld.check_output(output) is False  # 2nd
+        assert ld.check_output(output) is True   # 3rd = threshold
+
+    def test_loop_resets_on_different_output(self):
+        """A different output resets the consecutive counter."""
+        ld = LoopDetector(threshold=3)
+        output_a = "BUILD|p=['t1']|d=[]|i=[]|s=BUILD"
+        output_b = "BUILD|p=[]|d=['t1']|i=[]|s=VERIFY"
+        assert ld.check_output(output_a) is False  # 1st
+        assert ld.check_output(output_a) is False  # 2nd
+        assert ld.check_output(output_b) is False  # different -> reset
+        assert ld.check_output(output_a) is False  # 1st again
+        assert ld.check_output(output_a) is False  # 2nd again
+        assert ld.check_output(output_a) is True   # 3rd -> triggered
+
+    def test_reset_clears_state(self):
+        """reset() should clear all tracking state."""
+        ld = LoopDetector(threshold=3)
+        output = "BUILD|p=['t1']|d=[]|i=[]|s=BUILD"
+        ld.check_output(output)
+        ld.check_output(output)
+        ld.reset()
+        assert ld.consecutive_identical == 0
+        assert ld.last_hash == ""
+        assert ld.output_hashes == []
+
+    def test_threshold_of_one(self):
+        """Threshold of 1 should trigger on first output."""
+        ld = LoopDetector(threshold=1)
+        assert ld.check_output("anything") is True

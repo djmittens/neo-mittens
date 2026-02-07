@@ -23,6 +23,7 @@ static void print_usage(void) {
     "  search <query>        Search tickets by keywords\n"
     "  validate              Validate history integrity\n"
     "  batch <file|json>     Execute batch operations\n"
+    "  compact               Compact plan.jsonl (rebuild from git history)\n"
     "\n"
     "environment:\n"
     "  TIX_LOG=<level>       Set log level (error|warn|info|debug|trace)\n"
@@ -81,6 +82,8 @@ int main(int argc, char **argv) {
     err = tix_cmd_validate(&ctx, remaining_argc, remaining_argv);
   } else if (strcmp(cmd, "batch") == 0) {
     err = tix_cmd_batch(&ctx, remaining_argc, remaining_argv);
+  } else if (strcmp(cmd, "compact") == 0) {
+    err = tix_cmd_compact(&ctx, remaining_argc, remaining_argv);
   } else {
     fprintf(stderr, "error: unknown command: %s\n", cmd);
     print_usage();

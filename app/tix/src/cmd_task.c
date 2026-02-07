@@ -8,6 +8,33 @@
 #include <string.h>
 #include <time.h>
 
+/* check if any other ticket depends on the given ID */
+static int has_dependents(tix_db_t *db, const char *id) {
+  const char *sql =
+    "SELECT COUNT(*) FROM ticket_deps WHERE dep_id=?";
+  sqlite3_stmt *stmt = NULL;
+  int rc = sqlite3_prepare_v2(db->handle, sql, -1, &stmt, NULL);
+  if (rc != SQLITE_OK) { return 0; }
+  sqlite3_bind_text(stmt, 1, id, -1, SQLITE_STATIC);
+  int count = 0;
+  if (sqlite3_step(stmt) == SQLITE_ROW) {
+    count = sqlite3_column_int(stmt, 0);
+  }
+  sqlite3_finalize(stmt);
+  return count > 0;
+}
+
+/* Check if ticket belongs to current branch.
+   Returns 1 if OK (ticket has no branch or matches current), 0 if mismatch. */
+static int check_branch_scope(const tix_ticket_t *ticket) {
+  if (ticket->branch[0] == '\0') { return 1; }
+  char current[TIX_MAX_BRANCH_LEN];
+  if (tix_git_current_branch(current, sizeof(current)) != TIX_OK) {
+    return 1;
+  }
+  return strcmp(ticket->branch, current) == 0;
+}
+
 static tix_err_t task_add(tix_ctx_t *ctx, int argc, char **argv) {
   if (argc < 1) {
     fprintf(stderr, "usage: tix task add '<json>'\n");
@@ -31,36 +58,115 @@ static tix_err_t task_add(tix_ctx_t *ctx, int argc, char **argv) {
   err = tix_ticket_gen_id(TIX_TICKET_TASK, ticket.id, sizeof(ticket.id));
   if (err != TIX_OK) { return err; }
 
+  /* name is required for tasks */
   const char *name = tix_json_get_str(&obj, "name");
-  if (name != NULL) { tix_ticket_set_name(&ticket, name); }
+  if (name == NULL || name[0] == '\0') {
+    fprintf(stderr, "error: task requires a non-empty 'name' field\n");
+    return TIX_ERR_VALIDATION;
+  }
+  tix_ticket_set_name(&ticket, name);
 
   const char *spec = tix_json_get_str(&obj, "spec");
   if (spec != NULL) { tix_ticket_set_spec(&ticket, spec); }
 
   const char *notes = tix_json_get_str(&obj, "notes");
-  if (notes != NULL) { snprintf(ticket.notes, TIX_MAX_DESC_LEN, "%s", notes); }
+  if (notes != NULL) {
+    snprintf(ticket.notes, TIX_MAX_DESC_LEN, "%s", notes);
+  }
 
+  /* acceptance criteria - warn if missing */
   const char *accept = tix_json_get_str(&obj, "accept");
-  if (accept != NULL) { snprintf(ticket.accept, TIX_MAX_DESC_LEN, "%s", accept); }
+  if (accept != NULL && accept[0] != '\0') {
+    snprintf(ticket.accept, TIX_MAX_DESC_LEN, "%s", accept);
+  } else {
+    TIX_WARN("task %s has no acceptance criteria", ticket.id);
+  }
 
+  /* validate priority string */
   const char *priority = tix_json_get_str(&obj, "priority");
-  ticket.priority = tix_priority_from_str(priority);
+  if (priority != NULL && priority[0] != '\0') {
+    tix_priority_e p = tix_priority_from_str(priority);
+    if (p == TIX_PRIORITY_NONE && strcmp(priority, "none") != 0) {
+      fprintf(stderr, "error: invalid priority '%s' "
+              "(must be high, medium, low, or none)\n", priority);
+      return TIX_ERR_VALIDATION;
+    }
+    ticket.priority = p;
+  }
 
+  /* validate parent reference */
   const char *parent = tix_json_get_str(&obj, "parent");
-  if (parent != NULL) { snprintf(ticket.parent, TIX_MAX_ID_LEN, "%s", parent); }
+  if (parent != NULL && parent[0] != '\0') {
+    if (!tix_is_valid_ticket_id(parent)) {
+      fprintf(stderr, "error: invalid parent ID format '%s'\n", parent);
+      return TIX_ERR_VALIDATION;
+    }
+    if (!tix_db_ticket_exists(&ctx->db, parent)) {
+      fprintf(stderr, "error: parent task %s does not exist\n", parent);
+      return TIX_ERR_NOT_FOUND;
+    }
+    snprintf(ticket.parent, TIX_MAX_ID_LEN, "%s", parent);
+  }
 
+  /* validate created_from reference */
   const char *cf = tix_json_get_str(&obj, "created_from");
-  if (cf != NULL) { snprintf(ticket.created_from, TIX_MAX_ID_LEN, "%s", cf); }
+  if (cf != NULL && cf[0] != '\0') {
+    if (!tix_is_valid_ticket_id(cf)) {
+      fprintf(stderr, "error: invalid created_from ID format '%s'\n", cf);
+      return TIX_ERR_VALIDATION;
+    }
+    if (!tix_db_ticket_exists(&ctx->db, cf)) {
+      fprintf(stderr, "error: created_from issue %s does not exist\n", cf);
+      return TIX_ERR_NOT_FOUND;
+    }
+    snprintf(ticket.created_from, TIX_MAX_ID_LEN, "%s", cf);
+  }
 
-  /* deps */
+  /* validate supersedes reference */
+  const char *ss = tix_json_get_str(&obj, "supersedes");
+  if (ss != NULL && ss[0] != '\0') {
+    if (!tix_is_valid_ticket_id(ss)) {
+      fprintf(stderr, "error: invalid supersedes ID format '%s'\n", ss);
+      return TIX_ERR_VALIDATION;
+    }
+    if (!tix_db_ticket_exists(&ctx->db, ss)) {
+      fprintf(stderr, "error: supersedes task %s does not exist\n", ss);
+      return TIX_ERR_NOT_FOUND;
+    }
+    snprintf(ticket.supersedes, TIX_MAX_ID_LEN, "%s", ss);
+  }
+
+  /* deps - validate each exists, is a task, and is not a duplicate */
   for (u32 i = 0; i < obj.field_count; i++) {
     if (strcmp(obj.fields[i].key, "deps") != 0) { continue; }
     if (obj.fields[i].type != TIX_JSON_ARRAY) { continue; }
     for (u32 j = 0; j < obj.fields[i].arr_count; j++) {
-      tix_ticket_add_dep(&ticket, obj.fields[i].arr_vals[j]);
+      const char *dep_id = obj.fields[i].arr_vals[j];
+      if (!tix_is_valid_ticket_id(dep_id)) {
+        fprintf(stderr, "error: invalid dependency ID format '%s'\n",
+                dep_id);
+        return TIX_ERR_VALIDATION;
+      }
+      if (tix_has_duplicate_dep(&ticket, dep_id)) {
+        fprintf(stderr, "error: duplicate dependency '%s'\n", dep_id);
+        return TIX_ERR_DUPLICATE;
+      }
+      tix_ticket_t dep_ticket;
+      if (tix_db_get_ticket(&ctx->db, dep_id, &dep_ticket) != TIX_OK) {
+        fprintf(stderr, "error: dependency %s does not exist\n", dep_id);
+        return TIX_ERR_NOT_FOUND;
+      }
+      if (dep_ticket.type != TIX_TICKET_TASK) {
+        fprintf(stderr, "error: dependency %s is not a task\n", dep_id);
+        return TIX_ERR_VALIDATION;
+      }
+      tix_ticket_add_dep(&ticket, dep_id);
     }
     break;
   }
+
+  /* stamp current branch on creation */
+  tix_git_current_branch(ticket.branch, sizeof(ticket.branch));
 
   /* write to plan.jsonl and db */
   err = tix_plan_append_ticket(ctx->plan_path, &ticket);
@@ -103,6 +209,25 @@ static tix_err_t task_done(tix_ctx_t *ctx, int argc, char **argv) {
     return err;
   }
 
+  /* validate: must be a task */
+  if (ticket.type != TIX_TICKET_TASK) {
+    fprintf(stderr, "error: %s is not a task\n", id);
+    return TIX_ERR_STATE;
+  }
+
+  /* validate: must be pending to mark done */
+  if (ticket.status != TIX_STATUS_PENDING) {
+    fprintf(stderr, "error: task %s is already %s, cannot mark done\n",
+            id, tix_status_str(ticket.status));
+    return TIX_ERR_STATE;
+  }
+
+  if (!check_branch_scope(&ticket)) {
+    fprintf(stderr, "error: task %s belongs to branch '%s', "
+            "not current branch\n", id, ticket.branch);
+    return TIX_ERR_INVALID_ARG;
+  }
+
   ticket.status = TIX_STATUS_DONE;
   ticket.updated_at = (i64)time(NULL);
   tix_git_rev_parse_head(ticket.done_at, sizeof(ticket.done_at));
@@ -111,12 +236,8 @@ static tix_err_t task_done(tix_ctx_t *ctx, int argc, char **argv) {
   err = tix_db_upsert_ticket(&ctx->db, &ticket);
   if (err != TIX_OK) { return err; }
 
-  err = tix_plan_rewrite(ctx->plan_path, &ctx->db);
+  err = tix_plan_append_ticket(ctx->plan_path, &ticket);
   if (err != TIX_OK) { return err; }
-
-  char msg[TIX_MAX_NAME_LEN + 32];
-  snprintf(msg, sizeof(msg), "tix: task done %s", id);
-  tix_git_commit(msg, ctx->plan_path);
 
   printf("{\"id\":\"%s\",\"status\":\"done\",\"done_at\":\"%s\"}\n",
          id, ticket.done_at);
@@ -147,6 +268,25 @@ static tix_err_t task_accept(tix_ctx_t *ctx, int argc, char **argv) {
     return err;
   }
 
+  /* validate: must be a task */
+  if (ticket.type != TIX_TICKET_TASK) {
+    fprintf(stderr, "error: %s is not a task\n", id);
+    return TIX_ERR_STATE;
+  }
+
+  /* validate: must be done to accept */
+  if (ticket.status != TIX_STATUS_DONE) {
+    fprintf(stderr, "error: task %s is %s, must be done to accept\n",
+            id, tix_status_str(ticket.status));
+    return TIX_ERR_STATE;
+  }
+
+  if (!check_branch_scope(&ticket)) {
+    fprintf(stderr, "error: task %s belongs to branch '%s', "
+            "not current branch\n", id, ticket.branch);
+    return TIX_ERR_INVALID_ARG;
+  }
+
   /* create tombstone */
   tix_tombstone_t ts;
   memset(&ts, 0, sizeof(ts));
@@ -162,7 +302,7 @@ static tix_err_t task_accept(tix_ctx_t *ctx, int argc, char **argv) {
   err = tix_db_delete_ticket(&ctx->db, id);
   if (err != TIX_OK) { return err; }
 
-  err = tix_plan_rewrite(ctx->plan_path, &ctx->db);
+  err = tix_plan_append_tombstone(ctx->plan_path, &ts);
   if (err != TIX_OK) { return err; }
 
   printf("{\"id\":\"%s\",\"status\":\"accepted\"}\n", id);
@@ -183,6 +323,31 @@ static tix_err_t task_reject(tix_ctx_t *ctx, int argc, char **argv) {
   if (err != TIX_OK) {
     fprintf(stderr, "error: task %s not found\n", id);
     return err;
+  }
+
+  /* validate: must be a task */
+  if (ticket.type != TIX_TICKET_TASK) {
+    fprintf(stderr, "error: %s is not a task\n", id);
+    return TIX_ERR_STATE;
+  }
+
+  /* validate: must be done to reject */
+  if (ticket.status != TIX_STATUS_DONE) {
+    fprintf(stderr, "error: task %s is %s, must be done to reject\n",
+            id, tix_status_str(ticket.status));
+    return TIX_ERR_STATE;
+  }
+
+  /* validate: reason must not be empty */
+  if (reason[0] == '\0') {
+    fprintf(stderr, "error: reject reason must not be empty\n");
+    return TIX_ERR_VALIDATION;
+  }
+
+  if (!check_branch_scope(&ticket)) {
+    fprintf(stderr, "error: task %s belongs to branch '%s', "
+            "not current branch\n", id, ticket.branch);
+    return TIX_ERR_INVALID_ARG;
   }
 
   /* create reject tombstone */
@@ -206,7 +371,10 @@ static tix_err_t task_reject(tix_ctx_t *ctx, int argc, char **argv) {
   err = tix_db_upsert_ticket(&ctx->db, &ticket);
   if (err != TIX_OK) { return err; }
 
-  err = tix_plan_rewrite(ctx->plan_path, &ctx->db);
+  err = tix_plan_append_tombstone(ctx->plan_path, &ts);
+  if (err != TIX_OK) { return err; }
+
+  err = tix_plan_append_ticket(ctx->plan_path, &ticket);
   if (err != TIX_OK) { return err; }
 
   printf("{\"id\":\"%s\",\"status\":\"rejected\"}\n", id);
@@ -220,13 +388,35 @@ static tix_err_t task_delete(tix_ctx_t *ctx, int argc, char **argv) {
   }
 
   const char *id = argv[0];
-  tix_err_t err = tix_db_delete_ticket(&ctx->db, id);
+
+  /* validate: check that the task exists first */
+  tix_ticket_t ticket;
+  tix_err_t err = tix_db_get_ticket(&ctx->db, id, &ticket);
   if (err != TIX_OK) {
     fprintf(stderr, "error: task %s not found\n", id);
     return err;
   }
 
-  err = tix_plan_rewrite(ctx->plan_path, &ctx->db);
+  if (!check_branch_scope(&ticket)) {
+    fprintf(stderr, "error: task %s belongs to branch '%s', "
+            "not current branch\n", id, ticket.branch);
+    return TIX_ERR_INVALID_ARG;
+  }
+
+  /* prevent deleting a task that other tasks depend on */
+  if (has_dependents(&ctx->db, id)) {
+    fprintf(stderr,
+            "error: cannot delete %s, other tasks depend on it\n", id);
+    return TIX_ERR_DEPENDENCY;
+  }
+
+  err = tix_db_delete_ticket(&ctx->db, id);
+  if (err != TIX_OK) {
+    fprintf(stderr, "error: failed to delete task %s\n", id);
+    return err;
+  }
+
+  err = tix_plan_append_delete(ctx->plan_path, id);
   if (err != TIX_OK) { return err; }
 
   printf("{\"id\":\"%s\",\"status\":\"deleted\"}\n", id);
@@ -235,12 +425,21 @@ static tix_err_t task_delete(tix_ctx_t *ctx, int argc, char **argv) {
 
 static tix_err_t task_prioritize(tix_ctx_t *ctx, int argc, char **argv) {
   if (argc < 2) {
-    fprintf(stderr, "usage: tix task prioritize <id> <high|medium|low>\n");
+    fprintf(stderr,
+            "usage: tix task prioritize <id> <high|medium|low>\n");
     return TIX_ERR_INVALID_ARG;
   }
 
   const char *id = argv[0];
-  tix_priority_e prio = tix_priority_from_str(argv[1]);
+  const char *prio_str = argv[1];
+
+  /* validate priority string */
+  tix_priority_e prio = tix_priority_from_str(prio_str);
+  if (prio == TIX_PRIORITY_NONE && strcmp(prio_str, "none") != 0) {
+    fprintf(stderr, "error: invalid priority '%s' "
+            "(must be high, medium, low, or none)\n", prio_str);
+    return TIX_ERR_VALIDATION;
+  }
 
   tix_ticket_t ticket;
   tix_err_t err = tix_db_get_ticket(&ctx->db, id, &ticket);
@@ -255,16 +454,19 @@ static tix_err_t task_prioritize(tix_ctx_t *ctx, int argc, char **argv) {
   err = tix_db_upsert_ticket(&ctx->db, &ticket);
   if (err != TIX_OK) { return err; }
 
-  err = tix_plan_rewrite(ctx->plan_path, &ctx->db);
+  err = tix_plan_append_ticket(ctx->plan_path, &ticket);
   if (err != TIX_OK) { return err; }
 
-  printf("{\"id\":\"%s\",\"priority\":\"%s\"}\n", id, tix_priority_str(prio));
+  printf("{\"id\":\"%s\",\"priority\":\"%s\"}\n",
+         id, tix_priority_str(prio));
   return TIX_OK;
 }
 
 tix_err_t tix_cmd_task(tix_ctx_t *ctx, int argc, char **argv) {
   if (argc < 1) {
-    fprintf(stderr, "usage: tix task <add|done|accept|reject|delete|prioritize>\n");
+    fprintf(stderr,
+            "usage: tix task "
+            "<add|done|accept|reject|delete|prioritize>\n");
     return TIX_ERR_INVALID_ARG;
   }
 
@@ -272,12 +474,24 @@ tix_err_t tix_cmd_task(tix_ctx_t *ctx, int argc, char **argv) {
   if (err != TIX_OK) { return err; }
 
   const char *sub = argv[0];
-  if (strcmp(sub, "add") == 0)        { return task_add(ctx, argc - 1, argv + 1); }
-  if (strcmp(sub, "done") == 0)       { return task_done(ctx, argc - 1, argv + 1); }
-  if (strcmp(sub, "accept") == 0)     { return task_accept(ctx, argc - 1, argv + 1); }
-  if (strcmp(sub, "reject") == 0)     { return task_reject(ctx, argc - 1, argv + 1); }
-  if (strcmp(sub, "delete") == 0)     { return task_delete(ctx, argc - 1, argv + 1); }
-  if (strcmp(sub, "prioritize") == 0) { return task_prioritize(ctx, argc - 1, argv + 1); }
+  if (strcmp(sub, "add") == 0) {
+    return task_add(ctx, argc - 1, argv + 1);
+  }
+  if (strcmp(sub, "done") == 0) {
+    return task_done(ctx, argc - 1, argv + 1);
+  }
+  if (strcmp(sub, "accept") == 0) {
+    return task_accept(ctx, argc - 1, argv + 1);
+  }
+  if (strcmp(sub, "reject") == 0) {
+    return task_reject(ctx, argc - 1, argv + 1);
+  }
+  if (strcmp(sub, "delete") == 0) {
+    return task_delete(ctx, argc - 1, argv + 1);
+  }
+  if (strcmp(sub, "prioritize") == 0) {
+    return task_prioritize(ctx, argc - 1, argv + 1);
+  }
 
   fprintf(stderr, "error: unknown task subcommand: %s\n", sub);
   return TIX_ERR_INVALID_ARG;

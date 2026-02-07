@@ -67,6 +67,7 @@ set(TIX_SOURCES
   src/cmd_search.c
   src/cmd_validate.c
   src/cmd_batch.c
+  src/cmd_compact.c
   src/cmd.c
 )
 

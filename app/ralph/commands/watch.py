@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Optional
 
 from ralph.state import load_state
+from ralph.tix import Tix
 from ralph.tui.fallback import FallbackDashboard
 from ralph.utils import Colors
 
@@ -41,7 +42,7 @@ def _count_running_processes_in_cwd() -> int:
         )
         if result.returncode != 0 or not result.stdout.strip():
             return 0
-        
+
         count = 0
         pids = result.stdout.strip().split("\n")
         for pid in pids:
@@ -59,9 +60,6 @@ def _count_running_processes_in_cwd() -> int:
 def cmd_watch(config: dict) -> int:
     """Live progress dashboard.
 
-    Monitors the ralph plan file and displays a real-time dashboard
-    showing current stage, task progress, and metrics.
-
     Args:
         config: Ralph configuration dict with plan_file, repo_root, etc.
 
@@ -73,7 +71,16 @@ def cmd_watch(config: dict) -> int:
         print(f"{Colors.RED}No plan file found. Run 'ralph init' first.{Colors.NC}")
         return 1
 
-    dashboard = FallbackDashboard(config)
+    repo_root = config.get("repo_root", Path.cwd())
+    tix: Optional[Tix] = None
+    try:
+        tix = Tix(repo_root)
+        if not tix.is_available():
+            tix = None
+    except Exception:
+        tix = None
+
+    dashboard = FallbackDashboard(config, tix=tix)
     dashboard.branch = _get_current_branch()
 
     last_mtime: Optional[float] = None

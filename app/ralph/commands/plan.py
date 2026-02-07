@@ -6,37 +6,31 @@ Uses context injection to pre-populate prompts with spec content.
 Features:
 - Project rules (AGENTS.md) integration
 - Auto-commit plan.jsonl after PLAN_COMPLETE
-- Auto-prioritize tasks after planning
 - Metrics tracking (cost/tokens/time)
 - Git push after commit
 
-Note: Plan mode works by letting OpenCode run `ralph task add` commands.
-The tasks are added directly to plan.jsonl by those commands, not parsed
-from OpenCode's JSON output.
+Agent outputs structured JSON via [RALPH_OUTPUT] markers.
+Harness reconciles via tix — agent never calls task commands directly.
 """
 
-import re
+import json
+import select
 import subprocess
+import sys
 import time
 from pathlib import Path
-from typing import Optional, Tuple, List
+from typing import Optional, Tuple
 
 from ..config import GlobalConfig
 from ..context import Metrics
-from ..git import (
-    get_current_branch,
-    has_uncommitted_plan,
-    push_with_retry,
-)
-from ..models import Task
+from ..git import get_current_branch, has_uncommitted_plan, push_with_retry
 from ..opencode import spawn_opencode, extract_metrics
 from ..prompts import (
-    load_and_inject,
-    build_plan_context,
-    build_prompt_with_rules,
-    find_project_rules,
+    load_and_inject, build_plan_context, build_prompt_with_rules, find_project_rules,
 )
-from ..state import load_state, save_state, RalphState
+from ..reconcile import reconcile_plan, ReconcileResult
+from ..state import load_state, save_state
+from ..tix import Tix, TixError
 from ..utils import Colors
 
 
@@ -73,9 +67,6 @@ def _build_plan_prompt(
 def _run_opencode(config: GlobalConfig, prompt: str, cwd: Path) -> Tuple[Optional[str], Metrics]:
     """Spawn OpenCode and stream output in real-time.
 
-    OpenCode will run `ralph2 task add` commands that modify plan.jsonl directly.
-    We stream output to show progress, and capture it for metrics extraction.
-
     Args:
         config: Ralph configuration.
         prompt: Prompt to send to OpenCode.
@@ -84,10 +75,6 @@ def _run_opencode(config: GlobalConfig, prompt: str, cwd: Path) -> Tuple[Optiona
     Returns:
         Tuple of (output string or None on failure, metrics).
     """
-    import json
-    import select
-    import sys
-    
     metrics = Metrics()
     start_time = time.time()
     output_lines = []
@@ -145,7 +132,6 @@ def _run_opencode(config: GlobalConfig, prompt: str, cwd: Path) -> Tuple[Optiona
         except Exception:
             pass
         
-        elapsed = time.time() - start_time
         metrics.total_iterations = 1
         
         return output, metrics
@@ -164,86 +150,36 @@ def _run_opencode(config: GlobalConfig, prompt: str, cwd: Path) -> Tuple[Optiona
 
 
 def _display_event(event: dict) -> None:
-    """Display an OpenCode JSON event in a human-readable format.
-    
-    Args:
-        event: Parsed JSON event from OpenCode.
-    """
-    import sys
-    
+    """Display an OpenCode JSON event in a human-readable format."""
     event_type = event.get("type", "")
     
+    part = event.get("part", {})
     if event_type == "assistant":
-        # Assistant text output
         content = event.get("content", "")
         if content:
             print(content, end="", flush=True)
-    
     elif event_type == "text":
-        # Text chunk
-        part = event.get("part", {})
         text = part.get("text", "")
         if text:
             print(text, end="", flush=True)
-    
     elif event_type == "tool_use":
-        # Tool invocation
-        part = event.get("part", {})
         tool = part.get("tool", "unknown")
-        state = part.get("state", {})
-        title = state.get("title", "")
-        
-        if title:
-            print(f"\n{Colors.DIM}[{tool}] {title}{Colors.NC}", flush=True)
-        else:
-            print(f"\n{Colors.DIM}[{tool}]{Colors.NC}", flush=True)
-    
-    elif event_type == "tool_result":
-        # Tool result - usually don't need to show
-        pass
-    
+        title = part.get("state", {}).get("title", "")
+        label = f"[{tool}] {title}" if title else f"[{tool}]"
+        print(f"\n{Colors.DIM}{label}{Colors.NC}", flush=True)
     elif event_type == "step_finish":
-        # Step completed with metrics
-        part = event.get("part", {})
         cost = part.get("cost", 0)
-        tokens = part.get("tokens", {})
-        input_tokens = tokens.get("input", 0)
-        output_tokens = tokens.get("output", 0)
-        cache = tokens.get("cache", {})
-        cache_read = cache.get("read", 0)
-        
-        print(f"\n{Colors.DIM}─ Cost: ${cost:.4f} | Tokens: {input_tokens + cache_read}in/{output_tokens}out{Colors.NC}", flush=True)
-    
+        tok = part.get("tokens", {})
+        inp = tok.get("input", 0) + tok.get("cache", {}).get("read", 0)
+        out = tok.get("output", 0)
+        print(f"\n{Colors.DIM}─ ${cost:.4f} | {inp}in/{out}out{Colors.NC}", flush=True)
     elif event_type == "error":
-        # Error message
-        message = event.get("message", event.get("error", "Unknown error"))
-        print(f"\n{Colors.RED}Error: {message}{Colors.NC}", flush=True)
-    
-    # Other event types are silently ignored
+        msg = event.get("message", event.get("error", "Unknown error"))
+        print(f"\n{Colors.RED}Error: {msg}{Colors.NC}", flush=True)
 
 
-def _check_plan_complete(output_str: str) -> Tuple[bool, int]:
-    """Check if output contains PLAN_COMPLETE signal.
-
-    Args:
-        output_str: Raw output from OpenCode.
-
-    Returns:
-        Tuple of (plan_complete, task_count from signal).
-    """
-    # Check for PLAN_COMPLETE signal
-    plan_complete_match = re.search(
-        r'\[RALPH\] PLAN_COMPLETE:?\s*(?:Added\s+)?(\d+)?\s*tasks?',
-        output_str
-    )
-    if plan_complete_match:
-        task_count = int(plan_complete_match.group(1)) if plan_complete_match.group(1) else 0
-        return True, task_count
-    return False, 0
-
-
-def _prioritize_tasks(tasks: List[Task]) -> dict:
-    """Auto-prioritize tasks based on dependencies and content.
+def _prioritize_tasks_tix(tix: Tix, tasks: list[dict]) -> dict:
+    """Auto-prioritize tasks via tix based on dependencies and content.
 
     Priority rules:
     - Tasks with no deps and "setup"/"init"/"create" in name: high
@@ -252,43 +188,45 @@ def _prioritize_tasks(tasks: List[Task]) -> dict:
     - Default: medium
 
     Args:
-        tasks: List of tasks to prioritize.
+        tix: Tix harness instance.
+        tasks: List of task dicts from tix.query_tasks().
 
     Returns:
         Dict with prioritization stats.
     """
     stats = {"prioritized": 0, "high": 0, "medium": 0, "low": 0}
-    
-    # Count how many tasks depend on each task
-    dep_count = {}
+
+    dep_count: dict[str, int] = {}
     for task in tasks:
-        for dep in (task.deps or []):
+        for dep in task.get("deps", []):
             dep_count[dep] = dep_count.get(dep, 0) + 1
-    
+
     for task in tasks:
-        if task.priority:
-            # Already has priority
-            stats[task.priority] = stats.get(task.priority, 0) + 1
+        if task.get("priority"):
+            stats[task["priority"]] = stats.get(task["priority"], 0) + 1
             continue
-        
-        name_lower = task.name.lower()
-        deps = task.deps or []
-        
-        # High priority: foundational tasks
+
+        name_lower = task.get("name", "").lower()
+        deps = task.get("deps", [])
+        tid = task.get("id", "")
+
         if not deps and any(kw in name_lower for kw in ["setup", "init", "create", "add module", "extract"]):
-            task.priority = "high"
-        # High priority: tasks that others depend on
-        elif dep_count.get(task.id, 0) >= 2:
-            task.priority = "high"
-        # Low priority: tasks with many dependencies
+            priority = "high"
+        elif dep_count.get(tid, 0) >= 2:
+            priority = "high"
         elif len(deps) >= 3:
-            task.priority = "low"
+            priority = "low"
         else:
-            task.priority = "medium"
-        
-        stats[task.priority] += 1
+            priority = "medium"
+
+        try:
+            tix.task_prioritize(tid, priority)
+        except TixError:
+            pass
+
+        stats[priority] += 1
         stats["prioritized"] += 1
-    
+
     return stats
 
 
@@ -345,7 +283,7 @@ def _print_plan_header(
 
 
 def _print_plan_report(
-    tasks: List[Task],
+    tasks: list[dict],
     metrics: Metrics,
     priority_stats: dict,
     committed: bool,
@@ -356,41 +294,44 @@ def _print_plan_report(
     print(f"{Colors.GREEN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━{Colors.NC}")
     print(f"{Colors.GREEN}PLAN COMPLETE{Colors.NC}")
     print()
-    
+
     # Task summary
     print(f"Tasks:    {len(tasks)} total")
     if priority_stats["prioritized"] > 0:
         print(f"Priority: {priority_stats['high']} high, {priority_stats['medium']} medium, {priority_stats['low']} low")
-    
+
     # Metrics
     if metrics.total_cost > 0:
         print(f"Cost:     ${metrics.total_cost:.4f}")
     if metrics.tokens_used > 0:
         print(f"Tokens:   {metrics.tokens_used:,}")
-    
+
     # Git status
     if committed:
         print(f"Commit:   {Colors.GREEN}Yes{Colors.NC}")
     if pushed:
         print(f"Push:     {Colors.GREEN}Yes{Colors.NC}")
-    
+
     print(f"{Colors.GREEN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━{Colors.NC}")
-    
+
     # Show task list
     if tasks:
         print()
         print(f"{Colors.YELLOW}PENDING TASKS ({len(tasks)}){Colors.NC}")
         print()
         for i, task in enumerate(tasks, 1):
-            priority = task.priority or "medium"
+            priority = task.get("priority", "medium")
+            tid = task.get("id", "?")
+            name = task.get("name", "untitled")
+            deps = task.get("deps", [])
             priority_color = {
                 "high": Colors.RED,
                 "medium": Colors.YELLOW,
                 "low": Colors.DIM,
             }.get(priority, "")
-            print(f"  {i}. {task.name} [{task.id}] {priority_color}({priority}){Colors.NC}")
-            if task.deps:
-                print(f"     {Colors.CYAN}Deps:{Colors.NC} {', '.join(task.deps)}")
+            print(f"  {i}. {name} [{tid}] {priority_color}({priority}){Colors.NC}")
+            if deps:
+                print(f"     {Colors.CYAN}Deps:{Colors.NC} {', '.join(deps)}")
 
 
 def cmd_plan(config: GlobalConfig, spec_file: str, args) -> int:
@@ -399,8 +340,8 @@ def cmd_plan(config: GlobalConfig, spec_file: str, args) -> int:
     This command:
     1. Loads the spec file
     2. Builds a prompt with the spec content injected
-    3. Runs OpenCode which executes `ralph task add` commands
-    4. Reloads state to get the added tasks
+    3. Runs OpenCode which outputs [RALPH_OUTPUT] JSON
+    4. Reconciles agent output — creates tasks via tix
     5. Auto-prioritizes and commits
 
     Args:
@@ -414,108 +355,131 @@ def cmd_plan(config: GlobalConfig, spec_file: str, args) -> int:
     cwd = Path.cwd()
     ralph_dir = cwd / "ralph"
     plan_file = ralph_dir / "plan.jsonl"
-    
-    # Check ralph is initialized
+
     if not ralph_dir.exists():
         print(f"{Colors.RED}Ralph not initialized. Run 'ralph init' first.{Colors.NC}")
         return 1
-    
-    # Load initial state (to get task count before planning)
-    initial_state = load_state(plan_file)
-    initial_task_count = len(initial_state.tasks)
-    
+
+    # Initialize tix
+    tix = Tix(cwd)
+
     # Resolve spec file path
-    spec_path = Path(spec_file)
-    if not spec_path.exists():
-        # Try ralph/specs/ directory
-        spec_path = ralph_dir / "specs" / spec_file
-    if not spec_path.exists():
+    spec_path = _resolve_spec_path(spec_file, ralph_dir)
+    if spec_path is None:
         print(f"{Colors.RED}Spec file not found: {spec_file}{Colors.NC}")
         return 1
-    
-    # Read spec content
-    try:
-        spec_content = spec_path.read_text()
-        spec_name = spec_path.name
-    except (FileNotFoundError, IOError) as e:
-        print(f"{Colors.RED}Error reading spec file: {e}{Colors.NC}")
+
+    spec_content, spec_name = _read_spec(spec_path)
+    if spec_content is None:
         return 1
-    
-    # Load project rules
+
+    # Load project rules and branch info
     project_rules = find_project_rules(cwd)
-    rules_source = None
-    if project_rules:
-        for candidate in ["AGENTS.md", "CLAUDE.md"]:
-            if (cwd / candidate).exists():
-                rules_source = candidate
-                break
-    
-    # Get branch info
+    rules_source = _find_rules_source(cwd, project_rules)
     branch = get_current_branch(cwd)
-    
-    # Print header
+
     _print_plan_header(spec_name, branch, rules_source, config)
-    
-    # Build prompt
+
     prompt_content = _build_plan_prompt(spec_name, spec_content, project_rules)
     if prompt_content is None:
         return 1
-    
+
     print(f"\n{Colors.CYAN}Running plan generation...{Colors.NC}\n")
-    
-    # Run OpenCode - it will execute `ralph task add` commands
+
     output_str, metrics = _run_opencode(config, prompt_content, cwd)
     if output_str is None:
         return 1
-    
-    # Check for completion signal
-    plan_complete, signal_task_count = _check_plan_complete(output_str)
-    
-    # Reload state to get tasks added by OpenCode's `ralph task add` commands
-    state = load_state(plan_file)
-    
-    # Count new tasks
-    new_task_count = len(state.tasks) - initial_task_count
-    
-    # Get tasks for this spec
-    spec_tasks = [t for t in state.tasks if t.spec == spec_name]
-    
-    if new_task_count == 0 and not plan_complete:
-        print(f"{Colors.YELLOW}No tasks were added. OpenCode may have failed or the spec may already be implemented.{Colors.NC}")
-        # Show last 30 lines of output for debugging
-        output_lines = output_str.strip().split('\n')
-        if len(output_lines) > 30:
-            print(f"\n{Colors.DIM}... (showing last 30 lines of output){Colors.NC}")
-            for line in output_lines[-30:]:
-                print(f"  {line}")
-        else:
-            for line in output_lines:
-                print(f"  {line}")
+
+    return _finalize_plan(
+        tix, output_str, metrics, spec_name, plan_file, branch, cwd
+    )
+
+
+def _resolve_spec_path(spec_file: str, ralph_dir: Path) -> Optional[Path]:
+    """Resolve spec file path, checking cwd and ralph/specs/."""
+    spec_path = Path(spec_file)
+    if spec_path.exists():
+        return spec_path
+    spec_path = ralph_dir / "specs" / spec_file
+    if spec_path.exists():
+        return spec_path
+    return None
+
+
+def _read_spec(spec_path: Path) -> Tuple[Optional[str], str]:
+    """Read spec file content and name."""
+    try:
+        return spec_path.read_text(), spec_path.name
+    except (FileNotFoundError, IOError) as e:
+        print(f"{Colors.RED}Error reading spec file: {e}{Colors.NC}")
+        return None, ""
+
+
+def _find_rules_source(cwd: Path, project_rules: Optional[str]) -> Optional[str]:
+    """Find which rules file is being used."""
+    if not project_rules:
+        return None
+    for candidate in ["AGENTS.md", "CLAUDE.md"]:
+        if (cwd / candidate).exists():
+            return candidate
+    return None
+
+
+def _finalize_plan(
+    tix: Tix,
+    output_str: str,
+    metrics: Metrics,
+    spec_name: str,
+    plan_file: Path,
+    branch: str,
+    cwd: Path,
+) -> int:
+    """Reconcile agent output, prioritize, commit, and report."""
+    # Reconcile — parse [RALPH_OUTPUT] and create tasks via tix
+    recon = reconcile_plan(tix, output_str, spec_name)
+
+    if not recon.tasks_added:
+        _show_debug_output(output_str, recon)
         return 1
-    
-    # Set spec on state
+
+    print(f"{Colors.GREEN}Added {len(recon.tasks_added)} tasks via tix{Colors.NC}")
+
+    # Get tasks back from tix for prioritization and reporting
+    spec_tasks = tix.query_tasks()
+
+    # Auto-prioritize
+    priority_stats = _prioritize_tasks_tix(tix, spec_tasks)
+
+    # Update orchestration state (spec/stage)
+    state = load_state(plan_file)
     state.spec = spec_name
     state.stage = "BUILD"
-    
-    # Auto-prioritize tasks
-    priority_stats = _prioritize_tasks(spec_tasks)
-    
-    # Save state with updated priorities
     save_state(state, plan_file)
-    
-    # Commit plan
+
+    # Commit and push
     committed = _commit_plan(plan_file, spec_name, len(spec_tasks), cwd)
     if committed:
         print(f"{Colors.GREEN}Committed plan with {len(spec_tasks)} tasks{Colors.NC}")
-    
-    # Push to remote
+
     pushed = False
     if committed:
         pushed = push_with_retry(branch, retries=2, plan_file=plan_file, cwd=cwd)
         if pushed:
             print(f"{Colors.GREEN}Pushed to origin/{branch}{Colors.NC}")
-    
-    # Print report
+
     _print_plan_report(spec_tasks, metrics, priority_stats, committed, pushed)
-    
     return 0
+
+
+def _show_debug_output(output_str: str, recon: ReconcileResult) -> None:
+    """Show debug info when no tasks were added."""
+    print(f"{Colors.YELLOW}No tasks were added.{Colors.NC}")
+    if recon.errors:
+        for err in recon.errors:
+            print(f"  {Colors.RED}{err}{Colors.NC}")
+    output_lines = output_str.strip().split("\n")
+    tail = output_lines[-30:] if len(output_lines) > 30 else output_lines
+    if len(output_lines) > 30:
+        print(f"\n{Colors.DIM}... (showing last 30 lines){Colors.NC}")
+    for line in tail:
+        print(f"  {line}")

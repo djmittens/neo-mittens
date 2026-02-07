@@ -22,6 +22,12 @@ static tix_err_t note_add(tix_ctx_t *ctx, int argc, char **argv) {
                                      sizeof(ticket.id));
   if (err != TIX_OK) { return err; }
 
+  /* validate: note text must not be empty */
+  if (argv[0][0] == '\0') {
+    fprintf(stderr, "error: note requires non-empty text\n");
+    return TIX_ERR_VALIDATION;
+  }
+
   tix_ticket_set_name(&ticket, argv[0]);
 
   err = tix_plan_append_ticket(ctx->plan_path, &ticket);
@@ -65,7 +71,7 @@ static tix_err_t note_done(tix_ctx_t *ctx, int argc, char **argv) {
   tix_err_t err = tix_db_delete_ticket(&ctx->db, argv[0]);
   if (err != TIX_OK) { return err; }
 
-  err = tix_plan_rewrite(ctx->plan_path, &ctx->db);
+  err = tix_plan_append_delete(ctx->plan_path, argv[0]);
   if (err != TIX_OK) { return err; }
 
   printf("{\"id\":\"%s\",\"status\":\"archived\"}\n", argv[0]);

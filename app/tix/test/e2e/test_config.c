@@ -29,7 +29,7 @@ static void test_config_defaults(TIX_TEST_ARGS()) {
   tix_config_defaults(&cfg);
 
   ASSERT_STR_EQ(cfg.main_branch, "main");
-  ASSERT_STR_EQ(cfg.plan_file, "ralph/plan.jsonl");
+  ASSERT_STR_EQ(cfg.plan_file, ".tix/plan.jsonl");
   ASSERT_EQ(cfg.color, 1);
   ASSERT_EQ(cfg.auto_rebuild, 1);
 

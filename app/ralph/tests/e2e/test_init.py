@@ -75,11 +75,11 @@ def test_init_creates_prompts(tmp_path: Path):
 
     plan_prompt = ralph_dir / "PROMPT_plan.md"
     content = plan_prompt.read_text()
-    assert "PLAN Stage" in content or "ralph task add" in content
+    assert "RALPH_OUTPUT" in content or "PLAN" in content
 
     build_prompt = ralph_dir / "PROMPT_build.md"
     content = build_prompt.read_text()
-    assert "BUILD Stage" in content or "ralph query" in content
+    assert "BUILD Stage" in content or "RALPH_OUTPUT" in content
 
     verify_prompt = ralph_dir / "PROMPT_verify.md"
     content = verify_prompt.read_text()

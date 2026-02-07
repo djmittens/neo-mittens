@@ -11,7 +11,7 @@ void tix_config_defaults(tix_config_t *cfg) {
   snprintf(cfg->main_branch, sizeof(cfg->main_branch), "main");
   cfg->color = 1;
   cfg->auto_rebuild = 1;
-  snprintf(cfg->plan_file, sizeof(cfg->plan_file), "ralph/plan.jsonl");
+  snprintf(cfg->plan_file, sizeof(cfg->plan_file), ".tix/plan.jsonl");
 }
 
 static void trim_trailing(char *s) {

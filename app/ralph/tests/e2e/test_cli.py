@@ -51,8 +51,6 @@ def test_subcommand_parsing():
     subcommands = [
         "init",
         "config",
-        "query",
-        "validate",
         "compact",
     ]
 
@@ -65,17 +63,9 @@ def test_subcommand_parsing():
         )
 
 
-def test_status_not_initialized(tmp_path: Path):
-    """Test that status returns 1 when ralph is not initialized."""
-    result = run_ralph("status", cwd=tmp_path)
-    # status returns 1 when not initialized, which is expected behavior
-    assert result.returncode == 1
-    assert "not initialized" in result.stdout.lower() or "init" in result.stdout.lower()
-
-
 def test_subcommand_help():
     """Test that subcommands accept --help flag."""
-    subcommands = ["plan", "construct", "query", "task", "issue"]
+    subcommands = ["plan", "construct", "task", "issue"]
 
     for cmd in subcommands:
         result = run_ralph(cmd, "--help")
@@ -112,4 +102,3 @@ def test_issue_without_action():
 
     assert result.returncode == 1
     assert "usage" in result.stdout.lower() or "issue" in result.stdout.lower()
-# Timeouts added

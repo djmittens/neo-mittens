@@ -2,8 +2,11 @@
 
 Split from test_construct_flow.py to keep files under 500 lines.
 Run with: pytest ralph/tests/e2e/test_construct_mock.py -v --timeout=60
+
+Ticket data is provided via MockTix for state machine tests.
 """
 
+import json
 import os
 import subprocess
 import sys
@@ -14,7 +17,7 @@ import pytest
 
 from ralph.config import GlobalConfig
 from ralph.context import Metrics
-from ralph.models import Task, RalphPlanConfig
+from ralph.models import RalphPlanConfig
 from ralph.stages.base import (
     ConstructStateMachine,
     Stage,
@@ -24,6 +27,41 @@ from ralph.stages.base import (
 from ralph.state import RalphState, load_state, save_state
 
 APP_DIR = Path(__file__).parent.parent.parent.parent
+
+
+class _MockTix:
+    """Controllable mock Tix for construct mock tests."""
+
+    def __init__(
+        self,
+        tasks: list | None = None,
+        done: list | None = None,
+        issues: list | None = None,
+    ):
+        self._tasks = list(tasks or [])
+        self._done = list(done or [])
+        self._issues = list(issues or [])
+
+    def query_tasks(self) -> list[dict]:
+        """Return pending tasks."""
+        return self._tasks
+
+    def query_done_tasks(self) -> list[dict]:
+        """Return done tasks."""
+        return self._done
+
+    def query_issues(self) -> list[dict]:
+        """Return open issues."""
+        return self._issues
+
+    def task_reject(self, task_id: str, reason: str) -> dict:
+        """Record a task rejection."""
+        return {"id": task_id, "status": "p"}
+
+    def issue_done_ids(self, ids: list[str]) -> dict:
+        """Record issue resolution."""
+        self._issues = [i for i in self._issues if i.get("id") not in ids]
+        return {"count": len(ids)}
 
 
 def run_ralph(*args: str, cwd: Path) -> subprocess.CompletedProcess:
@@ -43,25 +81,23 @@ def run_ralph(*args: str, cwd: Path) -> subprocess.CompletedProcess:
 def init_ralph_with_git(tmp_path: Path) -> Path:
     """Initialize ralph structure and git repository."""
     run_ralph("init", cwd=tmp_path)
-    subprocess.run(["git", "init"], cwd=tmp_path, capture_output=True, check=True)
+    subprocess.run(
+        ["git", "init"], cwd=tmp_path, capture_output=True, check=True
+    )
     subprocess.run(
         ["git", "config", "user.email", "test@test.com"],
-        cwd=tmp_path,
-        capture_output=True,
-        check=True,
+        cwd=tmp_path, capture_output=True, check=True,
     )
     subprocess.run(
         ["git", "config", "user.name", "Test"],
-        cwd=tmp_path,
-        capture_output=True,
-        check=True,
+        cwd=tmp_path, capture_output=True, check=True,
     )
-    subprocess.run(["git", "add", "."], cwd=tmp_path, capture_output=True, check=True)
+    subprocess.run(
+        ["git", "add", "."], cwd=tmp_path, capture_output=True, check=True
+    )
     subprocess.run(
         ["git", "commit", "-m", "init"],
-        cwd=tmp_path,
-        capture_output=True,
-        check=True,
+        cwd=tmp_path, capture_output=True, check=True,
     )
     return tmp_path / "ralph" / "plan.jsonl"
 
@@ -69,27 +105,34 @@ def init_ralph_with_git(tmp_path: Path) -> Path:
 def create_test_state(
     plan_path: Path,
     spec: str = "test-spec.md",
-    tasks: list[Task] | None = None,
     stage: Stage = Stage.INVESTIGATE,
-    issues: list | None = None,
 ) -> RalphState:
-    """Create a test state with given parameters."""
-    if tasks is None:
-        tasks = []
-    if issues is None:
-        issues = []
-
+    """Create an orchestration-only test state."""
     state = RalphState(
-        tasks=tasks,
-        issues=issues,
-        tombstones={"accepted": [], "rejected": []},
         config=RalphPlanConfig(),
         spec=spec,
-        current_task_id=tasks[0].id if tasks else None,
         stage=stage.name,
     )
     save_state(state, plan_path)
     return state
+
+
+def _write_plan_with_tickets(
+    plan_path: Path,
+    stage: str = "BUILD",
+    spec: str = "test-spec.md",
+    task_lines: list[dict] | None = None,
+) -> None:
+    """Write plan.jsonl with orchestration + ticket lines."""
+    state = RalphState(
+        config=RalphPlanConfig(),
+        spec=spec,
+        stage=stage,
+    )
+    save_state(state, plan_path)
+    with open(plan_path, "a") as f:
+        for t in (task_lines or []):
+            f.write(json.dumps(t) + "\n")
 
 
 class TestConstructWithMockOpencode:
@@ -98,19 +141,16 @@ class TestConstructWithMockOpencode:
     def test_construct_with_mock_opencode_success(self, tmp_path: Path):
         """Test construct flow with mocked opencode returning success."""
         plan_path = init_ralph_with_git(tmp_path)
+        create_test_state(plan_path, stage=Stage.BUILD)
 
-        pending_task = Task(
-            id="t-test01",
-            name="Test task",
-            spec="test-spec.md",
-            notes="Test notes",
-            accept="echo ok",
-            status="p",
-        )
-        create_test_state(
+        # Write a ticket line so plan.jsonl has task data for tix
+        _write_plan_with_tickets(
             plan_path,
-            spec="test-spec.md",
-            tasks=[pending_task],
+            stage="BUILD",
+            task_lines=[{
+                "t": "task", "id": "t-test01", "name": "Test task",
+                "spec": "test-spec.md", "s": "p",
+            }],
         )
 
         mock_popen = MagicMock()
@@ -121,7 +161,9 @@ class TestConstructWithMockOpencode:
         )
         mock_popen.wait.return_value = 0
 
-        with patch("ralph.opencode.subprocess.Popen", return_value=mock_popen):
+        with patch(
+            "ralph.opencode.subprocess.Popen", return_value=mock_popen
+        ):
             from ralph.opencode import spawn_opencode
 
             proc = spawn_opencode("test prompt", tmp_path, 60000)
@@ -132,20 +174,7 @@ class TestConstructWithMockOpencode:
     def test_construct_with_mock_opencode_failure(self, tmp_path: Path):
         """Test construct flow with mocked opencode returning failure."""
         plan_path = init_ralph_with_git(tmp_path)
-
-        pending_task = Task(
-            id="t-test01",
-            name="Test task",
-            spec="test-spec.md",
-            notes="Test notes",
-            accept="echo ok",
-            status="p",
-        )
-        create_test_state(
-            plan_path,
-            spec="test-spec.md",
-            tasks=[pending_task],
-        )
+        create_test_state(plan_path, stage=Stage.BUILD)
 
         mock_popen = MagicMock()
         mock_popen.returncode = 1
@@ -155,7 +184,9 @@ class TestConstructWithMockOpencode:
         )
         mock_popen.wait.return_value = 1
 
-        with patch("ralph.opencode.subprocess.Popen", return_value=mock_popen):
+        with patch(
+            "ralph.opencode.subprocess.Popen", return_value=mock_popen
+        ):
             from ralph.opencode import spawn_opencode
 
             proc = spawn_opencode("test prompt", tmp_path, 60000)
@@ -164,22 +195,12 @@ class TestConstructWithMockOpencode:
             assert proc.returncode == 1
 
     def test_state_machine_with_mock_opencode(self, tmp_path: Path):
-        """Test state machine stages work with mocked opencode integration."""
+        """Test state machine stages work with mocked opencode."""
         plan_path = init_ralph_with_git(tmp_path)
+        create_test_state(plan_path, stage=Stage.BUILD)
 
-        pending_task = Task(
-            id="t-test01",
-            name="Test task",
-            spec="test-spec.md",
-            notes="Test notes",
-            accept="echo ok",
-            status="p",
-        )
-        create_test_state(
-            plan_path,
-            spec="test-spec.md",
-            tasks=[pending_task],
-            stage=Stage.BUILD,
+        mock_tix = _MockTix(
+            tasks=[{"id": "t-test01", "name": "Test task"}],
         )
 
         mock_popen = MagicMock()
@@ -197,13 +218,9 @@ class TestConstructWithMockOpencode:
             stages_executed.append(stage.name)
             return StageResult(stage=stage, outcome=StageOutcome.SUCCESS)
 
-        def load_state_fn() -> RalphState:
-            return load_state(plan_path)
-
-        def save_state_fn(st: RalphState) -> None:
-            save_state(st, plan_path)
-
-        with patch("ralph.opencode.subprocess.Popen", return_value=mock_popen):
+        with patch(
+            "ralph.opencode.subprocess.Popen", return_value=mock_popen
+        ):
             config = GlobalConfig.load()
             metrics = Metrics()
 
@@ -213,8 +230,9 @@ class TestConstructWithMockOpencode:
                 stage_timeout_ms=60000,
                 context_limit=100000,
                 run_stage_fn=mock_run_stage,
-                load_state_fn=load_state_fn,
-                save_state_fn=save_state_fn,
+                load_state_fn=lambda: load_state(plan_path),
+                save_state_fn=lambda st: save_state(st, plan_path),
+                tix=mock_tix,
             )
 
             should_continue, spec_complete = sm.run_iteration(1)
@@ -226,11 +244,16 @@ class TestConstructWithMockOpencode:
         """Test that mocked opencode JSON output is correctly parsed."""
         from ralph.opencode import parse_json_stream, extract_metrics
 
-        mock_output = """{"type": "step_start", "step": 1}
-{"type": "step_finish", "part": {"cost": 0.05, "tokens": {"input": 1000, "output": 500, "cache": {"read": 200}}}}
-{"type": "step_finish", "part": {"cost": 0.03, "tokens": {"input": 800, "output": 300, "cache": {"read": 100}}}}
-{"type": "run_complete", "status": "success"}
-"""
+        mock_output = (
+            '{"type": "step_start", "step": 1}\n'
+            '{"type": "step_finish", "part": {"cost": 0.05, '
+            '"tokens": {"input": 1000, "output": 500, '
+            '"cache": {"read": 200}}}}\n'
+            '{"type": "step_finish", "part": {"cost": 0.03, '
+            '"tokens": {"input": 800, "output": 300, '
+            '"cache": {"read": 100}}}}\n'
+            '{"type": "run_complete", "status": "success"}\n'
+        )
 
         parsed_events = list(parse_json_stream(mock_output))
 

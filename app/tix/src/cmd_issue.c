@@ -23,6 +23,12 @@ static tix_err_t issue_add(tix_ctx_t *ctx, int argc, char **argv) {
                                      sizeof(ticket.id));
   if (err != TIX_OK) { return err; }
 
+  /* validate: description must not be empty */
+  if (argv[0][0] == '\0') {
+    fprintf(stderr, "error: issue requires a non-empty description\n");
+    return TIX_ERR_VALIDATION;
+  }
+
   tix_ticket_set_name(&ticket, argv[0]);
 
   err = tix_plan_append_ticket(ctx->plan_path, &ticket);
@@ -59,7 +65,7 @@ static tix_err_t issue_done(tix_ctx_t *ctx, int argc, char **argv) {
   tix_err_t err = tix_db_delete_ticket(&ctx->db, id);
   if (err != TIX_OK) { return err; }
 
-  err = tix_plan_rewrite(ctx->plan_path, &ctx->db);
+  err = tix_plan_append_delete(ctx->plan_path, id);
   if (err != TIX_OK) { return err; }
 
   printf("{\"id\":\"%s\",\"status\":\"resolved\"}\n", id);
@@ -77,10 +83,8 @@ static tix_err_t issue_done_all(tix_ctx_t *ctx) {
 
   for (u32 i = 0; i < count; i++) {
     tix_db_delete_ticket(&ctx->db, tickets[i].id);
+    tix_plan_append_delete(ctx->plan_path, tickets[i].id);
   }
-
-  err = tix_plan_rewrite(ctx->plan_path, &ctx->db);
-  if (err != TIX_OK) { return err; }
 
   printf("{\"resolved\":%u}\n", count);
   return TIX_OK;
@@ -95,11 +99,11 @@ static tix_err_t issue_done_ids(tix_ctx_t *ctx, int argc, char **argv) {
   u32 resolved = 0;
   for (int i = 0; i < argc; i++) {
     tix_err_t err = tix_db_delete_ticket(&ctx->db, argv[i]);
-    if (err == TIX_OK) { resolved++; }
+    if (err == TIX_OK) {
+      tix_plan_append_delete(ctx->plan_path, argv[i]);
+      resolved++;
+    }
   }
-
-  tix_err_t err = tix_plan_rewrite(ctx->plan_path, &ctx->db);
-  if (err != TIX_OK) { return err; }
 
   printf("{\"resolved\":%u}\n", resolved);
   return TIX_OK;

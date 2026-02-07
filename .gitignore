@@ -10,7 +10,7 @@ ralph/.runtime
 .coverage
 
 # tix
-.tix/
+.tix/cache.db
 app/tix/build/
 app/tix/build-asan/
 app/tix/build-tsan/

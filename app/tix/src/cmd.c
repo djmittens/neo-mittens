@@ -32,11 +32,24 @@ tix_err_t tix_ctx_init(tix_ctx_t *ctx) {
                "%s/%s", ctx->repo_root, ctx->config.plan_file);
   if (n < 0 || (sz)n >= sizeof(ctx->plan_path)) { return TIX_ERR_OVERFLOW; }
 
+  struct stat st;
+
+  /* fallback: if configured plan file doesn't exist, try ralph/plan.jsonl */
+  if (stat(ctx->plan_path, &st) != 0) {
+    char legacy_path[TIX_MAX_PATH_LEN];
+    n = snprintf(legacy_path, sizeof(legacy_path),
+                 "%s/ralph/plan.jsonl", ctx->repo_root);
+    if (n >= 0 && (sz)n < sizeof(legacy_path) &&
+        stat(legacy_path, &st) == 0) {
+      snprintf(ctx->plan_path, sizeof(ctx->plan_path), "%s", legacy_path);
+      TIX_INFO("using legacy plan file: %s", ctx->plan_path);
+    }
+  }
+
   char db_path[TIX_MAX_PATH_LEN];
   n = snprintf(db_path, sizeof(db_path), "%s/cache.db", ctx->tix_dir);
   if (n < 0 || (sz)n >= sizeof(db_path)) { return TIX_ERR_OVERFLOW; }
 
-  struct stat st;
   if (stat(ctx->tix_dir, &st) != 0) {
     fprintf(stderr, "error: .tix/ not found. Run 'tix init' first.\n");
     return TIX_ERR_NOT_FOUND;
@@ -109,46 +122,101 @@ tix_err_t tix_plan_append_tombstone(const char *plan_path,
   return TIX_OK;
 }
 
-tix_err_t tix_plan_rewrite(const char *plan_path, tix_db_t *db) {
+/* Check if a JSONL line type is owned by tix (vs external orchestrator) */
+static int is_tix_owned_type(const char *line) {
+  /* Quick check: find "t":" pattern and extract type value.
+     tix owns: task, issue, note, accept, reject.
+     Everything else (spec, stage, config) is preserved as-is. */
+  const char *p = line;
+  while (*p != '\0') {
+    if (*p == '"' && *(p + 1) == 't' && *(p + 2) == '"') {
+      /* found "t" key, skip to value */
+      p += 3;
+      while (*p == ' ' || *p == ':') { p++; }
+      if (*p != '"') { return 0; }
+      p++; /* skip opening quote */
+      if (strncmp(p, "task\"", 5) == 0) { return 1; }
+      if (strncmp(p, "issue\"", 6) == 0) { return 1; }
+      if (strncmp(p, "note\"", 5) == 0) { return 1; }
+      if (strncmp(p, "accept\"", 7) == 0) { return 1; }
+      if (strncmp(p, "reject\"", 7) == 0) { return 1; }
+      if (strncmp(p, "delete\"", 7) == 0) { return 1; }
+      return 0;
+    }
+    p++;
+  }
+  return 0;
+}
+
+/* Max bytes for preserved (non-tix) lines from plan.jsonl */
+#define TIX_PRESERVED_BUF_LEN (TIX_MAX_LINE_LEN * 16)
+
+static sz collect_preserved_lines(const char *plan_path,
+                                  char *buf, sz buf_len) {
+  FILE *fp = fopen(plan_path, "r");
+  if (fp == NULL) { return 0; }
+
+  sz used = 0;
+  char line[TIX_MAX_LINE_LEN];
+  while (fgets(line, (int)sizeof(line), fp) != NULL) {
+    if (line[0] == '\0' || line[0] == '\n') { continue; }
+    if (is_tix_owned_type(line)) { continue; }
+
+    /* preserve this line */
+    sz line_len = strlen(line);
+    if (used + line_len < buf_len) {
+      memcpy(buf + used, line, line_len);
+      used += line_len;
+    }
+  }
+  buf[used] = '\0';
+  fclose(fp);
+  return used;
+}
+
+tix_err_t tix_plan_append_delete(const char *plan_path, const char *id) {
+  if (plan_path == NULL || id == NULL) { return TIX_ERR_INVALID_ARG; }
+
+  FILE *fp = fopen(plan_path, "a");
+  if (fp == NULL) { return TIX_ERR_IO; }
+
+  fprintf(fp, "{\"t\":\"delete\",\"id\":\"%s\"}\n", id);
+  fclose(fp);
+  return TIX_OK;
+}
+
+tix_err_t tix_plan_compact(const char *plan_path, tix_db_t *db) {
   if (plan_path == NULL || db == NULL) { return TIX_ERR_INVALID_ARG; }
+
+  /* first pass: collect non-tix lines to preserve */
+  char preserved[TIX_PRESERVED_BUF_LEN];
+  sz preserved_len = collect_preserved_lines(plan_path,
+                                             preserved, sizeof(preserved));
 
   FILE *fp = fopen(plan_path, "w");
   if (fp == NULL) { return TIX_ERR_IO; }
 
-  /* write all tickets */
-  tix_ticket_t tickets[TIX_MAX_BATCH];
-  u32 count = 0;
-
-  tix_ticket_type_e types[] = {
-    TIX_TICKET_TASK, TIX_TICKET_ISSUE, TIX_TICKET_NOTE
-  };
-  tix_status_e statuses[] = {
-    TIX_STATUS_PENDING, TIX_STATUS_DONE, TIX_STATUS_ACCEPTED
-  };
-
-  for (int ti = 0; ti < 3; ti++) {
-    for (int si = 0; si < 3; si++) {
-      count = 0;
-      tix_db_list_tickets(db, types[ti], statuses[si],
-                          tickets, &count, TIX_MAX_BATCH);
-      for (u32 i = 0; i < count; i++) {
-        char buf[TIX_MAX_LINE_LEN];
-        sz len = tix_json_write_ticket(&tickets[i], buf, sizeof(buf));
-        if (len > 0) { fprintf(fp, "%s\n", buf); }
-      }
-    }
+  /* write preserved orchestration records first */
+  if (preserved_len > 0) {
+    fwrite(preserved, 1, preserved_len, fp);
   }
 
-  /* write tombstones */
-  tix_tombstone_t tombstones[TIX_MAX_BATCH];
-  for (int accept = 0; accept <= 1; accept++) {
-    count = 0;
-    tix_db_list_tombstones(db, accept, tombstones, &count, TIX_MAX_BATCH);
-    for (u32 i = 0; i < count; i++) {
+  /* write all live tickets sorted by ID */
+  const char *sql =
+    "SELECT id FROM tickets ORDER BY id ASC";
+  sqlite3_stmt *stmt = NULL;
+  int rc = sqlite3_prepare_v2(db->handle, sql, -1, &stmt, NULL);
+  if (rc == SQLITE_OK) {
+    while (sqlite3_step(stmt) == SQLITE_ROW) {
+      const char *id = (const char *)sqlite3_column_text(stmt, 0);
+      if (id == NULL) { continue; }
+      tix_ticket_t ticket;
+      if (tix_db_get_ticket(db, id, &ticket) != TIX_OK) { continue; }
       char buf[TIX_MAX_LINE_LEN];
-      sz len = tix_json_write_tombstone(&tombstones[i], buf, sizeof(buf));
+      sz len = tix_json_write_ticket(&ticket, buf, sizeof(buf));
       if (len > 0) { fprintf(fp, "%s\n", buf); }
     }
+    sqlite3_finalize(stmt);
   }
 
   fclose(fp);

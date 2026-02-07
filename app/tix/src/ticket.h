@@ -64,3 +64,7 @@ void tix_ticket_init(tix_ticket_t *t);
 tix_err_t tix_ticket_set_name(tix_ticket_t *t, const char *name);
 tix_err_t tix_ticket_set_spec(tix_ticket_t *t, const char *spec);
 tix_err_t tix_ticket_add_dep(tix_ticket_t *t, const char *dep_id);
+
+/* validation helpers (shared by cmd_task, batch, validate) */
+int tix_is_valid_ticket_id(const char *id);
+int tix_has_duplicate_dep(const tix_ticket_t *t, const char *dep_id);

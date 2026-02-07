@@ -104,7 +104,15 @@ Tombstone:
 {"t": "issue", "id": "i-7g8h", "spec": "coverage.md", "desc": "..."}
 {"t": "accept", "id": "t-1a2b", "done_at": "abc123", "reason": ""}
 {"t": "reject", "id": "t-3c4d", "done_at": "def456", "reason": "..."}
+{"t": "delete", "id": "t-1a2b"}
 ```
+
+The file is **append-only** during normal operations. Mutations (status changes,
+priority updates, deletions) append new lines rather than editing existing ones.
+Duplicate IDs are resolved by last-write-wins during cache rebuild.
+
+`tix compact` rewrites the file with only live tickets, sorted by ID, for clean
+git diffs. See section 16 for details.
 
 ---
 
@@ -267,6 +275,7 @@ Format: `{prefix}-{hex8}` where hex8 = lower 32 bits of (microsecond timestamp X
 ```toml
 [repo]
 main_branch = "main"
+plan_file = ".tix/plan.jsonl"    # default; set to "ralph/plan.jsonl" for legacy repos
 
 [display]
 color = true
@@ -355,16 +364,26 @@ tix_err_t tix_git_rev_parse_head(char *out, sz out_len);
 tix_err_t tix_git_current_branch(char *out, sz out_len);
 tix_err_t tix_git_is_clean(int *is_clean);
 tix_err_t tix_git_commit(const char *message, const char *file);
+tix_err_t tix_git_add(const char *file);
 tix_err_t tix_git_log_file(const char *file, tix_git_log_entry_t *entries, u32 *count, u32 max);
-tix_err_t tix_git_diff_stat(char *out, sz out_len);
 tix_err_t tix_git_toplevel(char *out, sz out_len);
 ```
 
+### Commit Policy
+tix **never auto-commits**. All mutations (add, done, accept, reject, delete, prioritize)
+write to `plan.jsonl` and update the SQLite cache, but leave the file uncommitted.
+The caller (orchestrator, user, CI) decides when to `git add` + `git commit`.
+
+`tix_git_commit()` and `tix_git_add()` are available in the API for callers that want
+to commit programmatically, but no tix command invokes them.
+
+`tix task done` reads the current HEAD hash via `git rev-parse --short HEAD` to
+record `done_at`, but does not create a commit.
+
 ### Branch Tracking
 - Each ticket can be associated with a branch
-- `tix task done` records current branch + HEAD commit
+- `tix task done` records current branch + HEAD commit hash
 - `tix status` shows tickets grouped by branch
-- Branch lifecycle events (create, merge, delete) are tracked
 
 ---
 
@@ -398,6 +417,7 @@ tix_err_t tix_git_toplevel(char *out, sz out_len);
 | `tix search` | `<query>` | LLM-friendly keyword search |
 | `tix validate` | | History integrity validation |
 | `tix batch` | `<file>` | Execute batch operations from file |
+| `tix compact` | | Rebuild from git history, rewrite plan.jsonl with only live tickets |
 
 ### JSON Output Format (for LLM consumption)
 ```json
@@ -662,15 +682,79 @@ tix_err_t tix_toml_parse(const char *path, tix_toml_entry_t *entries,
 ## 16. plan.jsonl Compatibility
 
 tix reads/writes the same `plan.jsonl` format as Ralph for backwards compatibility.
-The file lives at `ralph/plan.jsonl` (same location).
 tix just uses SQLite as a read cache, not as primary storage.
 Primary storage remains the JSONL file committed to git.
 
+### Append-Only Model
+
+All mutations append new lines to `plan.jsonl` rather than rewriting the file:
+
+| Operation | What gets appended |
+|---|---|
+| `task add` | New ticket line |
+| `task done` | Updated ticket line (status=d, done_at set) |
+| `task accept` | Tombstone line (accept) |
+| `task reject` | Tombstone line (reject) + updated ticket line (status=p) |
+| `task delete` | Delete marker: `{"t":"delete","id":"..."}` |
+| `task prioritize` | Updated ticket line (priority changed) |
+| `issue done` | Delete marker |
+| `note done` | Delete marker |
+
+Between compactions the file may contain duplicate entries for the same ticket ID.
+The SQLite cache rebuild handles this via last-write-wins (later lines override
+earlier ones for the same ID). Delete markers and accept tombstones remove the
+ticket from the cache during replay.
+
+This design makes git merges of concurrent branches safe: appends from different
+branches touching different tickets produce changes on different lines, so git
+auto-merges cleanly.
+
+### Compaction
+
+`tix compact` rebuilds the complete picture and rewrites `plan.jsonl`:
+
+1. Walks full git history of `plan.jsonl` (all commits that touched it)
+2. Replays every historical version into SQLite, oldest first
+3. Replays the current working tree version on top
+4. Rewrites `plan.jsonl` with only live tickets, sorted by ID
+5. Tombstones, delete markers, and stale duplicate entries are dropped
+
+The result is a minimal file containing only actionable work. Nothing is lost -
+`git log -p -- plan.jsonl` preserves the full audit trail.
+
+Compaction is triggered by the orchestrator (not by tix automatically), typically:
+- Before merging a feature branch to main
+- At the end of an agent session
+- When the file grows large with stale entries
+
+### Commit Policy
+
+tix never auto-commits. All mutations write to `plan.jsonl` and update the SQLite
+cache, but leave the file uncommitted. The caller decides when to commit.
+
+### Default Location
+
+The default plan file location is `.tix/plan.jsonl`. For repos with an existing
+`ralph/plan.jsonl`, tix falls back to that location automatically.
+
+| `.tix/plan.jsonl` | `ralph/plan.jsonl` | Result |
+|---|---|---|
+| exists | exists | Uses `.tix/plan.jsonl` |
+| exists | missing | Uses `.tix/plan.jsonl` |
+| missing | exists | Falls back to `ralph/plan.jsonl` |
+| missing | missing | Uses `.tix/plan.jsonl` (created on first write) |
+
+The location can be overridden via `plan_file` in `config.toml` (under `[repo]`).
+On `tix init`, if `ralph/plan.jsonl` exists, the config is set to point there
+for legacy compatibility.
+
 ### Migration Path
-1. tix reads existing `ralph/plan.jsonl`
-2. tix commands write back to `ralph/plan.jsonl` (same format)
+1. tix detects existing `ralph/plan.jsonl` and uses it transparently
+2. tix commands write back in the same JSONL format
 3. Ralph Python code still works alongside tix during transition
 4. Once tix is complete, Ralph ticket commands are deprecated
+5. To migrate: copy `ralph/plan.jsonl` to `.tix/plan.jsonl` and remove
+   `plan_file` override from config (or set it to `.tix/plan.jsonl`)
 
 ---
 

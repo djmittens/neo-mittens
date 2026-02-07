@@ -2,308 +2,191 @@
 
 These prompts are written to ralph/PROMPT_*.md files during initialization.
 Contains VERIFY, INVESTIGATE, and DECOMPOSE stage prompts.
+
+All prompts use [RALPH_OUTPUT] structured output format. The agent never
+calls task/issue CLI commands directly — the harness reconciles via tix.
 """
 
 DEFAULT_PROMPT_VERIFY = """# VERIFY Stage
 
-All tasks are done. Verify they meet their acceptance criteria.
+Verify that done tasks meet their acceptance criteria.
 
-## Step 1: Get State
+## Done Tasks to Verify
 
-Run `ralph query` to get:
-- `spec`: the current spec name (e.g., "construct-mode.md")
-- `tasks.done`: list of done tasks with their acceptance criteria
+```json
+{{DONE_TASKS_JSON}}
+```
 
-## Step 2: Verify Each Done Task
+Total: {{DONE_COUNT}} tasks
 
-For EACH done task, spawn a subagent to verify:
+## Spec: {{SPEC_FILE}}
+
+## Instructions
+
+1. **For each done task**, spawn a subagent (Task tool) to verify its acceptance criteria. Run all verifications in parallel.
+
+2. Each subagent should:
+   - Search the codebase for the implementation
+   - Run any tests/commands in the acceptance criteria
+   - Return whether the task passes or fails, with evidence
+
+3. **Check spec acceptance criteria** in `ralph/specs/{{SPEC_FILE}}`:
+   - For checked criteria (`- [x]`): verify they still hold
+   - For unchecked criteria (`- [ ]`): identify what's missing
+
+4. For unchecked criteria not covered by existing tasks, include them in `new_tasks`.
+
+## Output
+
+When done, output your result between markers EXACTLY like this:
 
 ```
-Task: "Verify task '{task.name}' meets its acceptance criteria: {task.accept}
-
-1. Search codebase for the implementation
-2. Check if acceptance criteria is satisfied
-3. Run any tests mentioned in criteria
-
-Return JSON:
+[RALPH_OUTPUT]
 {
-  \\"task_id\\": \\"{task.id}\\",
-  \\"passed\\": true | false,
-  \\"evidence\\": \\"<what you found>\\",
-  \\"reason\\": \\"<why it failed>\\"  // only if passed=false
-}"
+  "results": [
+    {"task_id": "t-xxx", "passed": true},
+    {"task_id": "t-yyy", "passed": false, "reason": "test X fails with error Y"}
+  ],
+  "spec_complete": false,
+  "new_tasks": [
+    {"name": "Fix failing criterion", "notes": "Detailed: file paths, approach, min 50 chars", "accept": "measurable command + expected result"}
+  ]
+}
+[/RALPH_OUTPUT]
 ```
 
-**Run all verifications in parallel.**
+- `results`: one entry per done task — `passed: true` to accept, `passed: false` to reject
+- `reason`: required when `passed: false` — specific reason for rejection
+- `spec_complete`: true only if ALL spec criteria are satisfied and no new work needed
+- `new_tasks`: tasks for uncovered spec criteria (notes must have file paths, accept must be measurable)
 
-## Step 3: Apply Results
-
-### For each task:
-
-**If passed** -> `ralph task accept <task-id>`
-
-**If failed** -> Choose one:
-
-1. **Implementation bug** (can be fixed):
-   `ralph task reject <task-id> "<reason>"`
-
-2. **Architectural blocker** (cannot be done):
-   `ralph issue add "Task <task-id> blocked: <why>"`
-   `ralph task delete <task-id>`
-   
-Signs of architectural blocker:
-- "Cannot do X mid-execution"
-- Same rejection reason recurring
-- Requires changes outside this spec
-
-## Step 4: Verify Spec Acceptance Criteria
-
-Read the spec\\'s **Acceptance Criteria section only** (not entire spec):
-`ralph/specs/<spec-name>` - scroll to "## Acceptance Criteria"
-
-### 4a: Verify checked criteria still pass
-
-For each **checked** criterion (`- [x]`), spawn a subagent to verify it still holds:
-
-```
-Task: "Verify spec criterion still passes: \\'<criterion text>\\'
-
-1. Search codebase for the implementation
-2. Run any tests or commands that validate this criterion
-3. Check that the criterion is still satisfied
-
-Return JSON:
-{
-  \\"criterion\\": \\"<criterion text>\\",
-  \\"passed\\": true | false,
-  \\"evidence\\": \\"<what you found>\\",
-  \\"reason\\": \\"<why it failed>\\"  // only if passed=false
-}"
-```
-
-**Run all verifications in parallel.**
-
-If any checked criterion fails:
-- Uncheck it in the spec (`- [x]` -> `- [ ]`)
-- Create a task to fix the regression:
-  ```
-  ralph task add '{"name": "Fix regression: <criterion>", "notes": "<DETAILED: what broke, file paths, approach>", "accept": "<measurable verification>"}'
-  ```
-
-### 4b: Check for uncovered criteria
-
-For any **unchecked** criteria (`- [ ]`) not covered by existing tasks:
-```
-ralph task add '{"name": "...", "notes": "<DETAILED: file paths + approach>", "accept": "..."}'
-```
-
-## Step 5: Final Decision
-
-If all tasks accepted and no new tasks created:
-```
-[RALPH] SPEC_COMPLETE
-```
-
-Otherwise:
-```
-[RALPH] SPEC_INCOMPLETE: <summary>
-```
-
-## EXIT after completing
+**You MUST output the [RALPH_OUTPUT] block as your final action before exiting.**
 """
 
 DEFAULT_PROMPT_INVESTIGATE = """# INVESTIGATE Stage
 
-Issues were discovered during build or verification. Research and resolve ALL of them in parallel.
+Issues were discovered. Research them and produce actionable tasks.
 
-## Step 1: Get All Issues
+## Issues to Investigate
 
-Run `ralph query issues` to see all pending issues.
+```json
+{{ISSUES_JSON}}
+```
 
-## Step 2: Parallel Investigation with Structured Output
+Total: {{ISSUE_COUNT}} issues
 
-Use the Task tool to investigate ALL issues in parallel. Each subagent MUST return structured findings:
+## Spec: {{SPEC_FILE}}
+
+## Instructions
+
+1. **Launch one subagent per issue** (Task tool) — investigate all in parallel.
+
+2. Each subagent should:
+   - Read relevant code to understand the problem
+   - Determine root cause
+   - Decide: needs a fix task, trivial fix, or out of scope
+
+3. For issues needing fix tasks, include detailed task definitions in output.
+
+4. **Do NOT make code changes** — only research and produce tasks.
+
+## Handling Auto-Generated Issues
+
+- "REPEATED REJECTION" issues: same task failed 3+ times. Find the root cause, create a HIGH priority blocking task.
+- "COMMON FAILURE PATTERN" issues: multiple tasks fail the same way. Create a single HIGH priority prerequisite task.
+
+## Output
+
+When done, output your result between markers EXACTLY like this:
 
 ```
-Task: "Investigate this issue: <issue description>
-Issue ID: <id>
-Issue priority: <priority or 'medium'>
-
-Analyze the codebase and return a JSON object:
+[RALPH_OUTPUT]
 {
-  \\"issue_id\\": \\"<id>\\",
-  \\"root_cause\\": \\"<specific file:line reference>\\",
-  \\"resolution\\": \\"task\\" | \\"trivial\\" | \\"out_of_scope\\",
-  \\"task\\": {
-    \\"name\\": \\"<specific fix>\\",
-    \\"notes\\": \\"Root cause: <file:line>. Fix: <approach>. Imports: <needed>. Risk: <side effects>.\\",
-    \\"accept\\": \\"<measurable command + expected result>\\",
-    \\"priority\\": \\"<from issue>\\",
-    \\"research\\": {\\"files_analyzed\\": [\\"path:lines\\"], \\"root_cause_location\\": \\"file:line\\"}
-  }
-}"
+  "tasks": [
+    {
+      "name": "Fix memory leak in connection pool",
+      "notes": "In src/pool.c lines 45-80: conn_acquire() allocates but error path at line 67 skips free. Add free(conn) before return NULL.",
+      "accept": "make test-asan passes with no leaks in pool_test",
+      "priority": "high",
+      "created_from": "i-xxxx"
+    }
+  ],
+  "out_of_scope": ["i-yyyy"],
+  "summary": "Found 2 actionable issues, 1 out of scope"
+}
+[/RALPH_OUTPUT]
 ```
 
-## Step 3: Create Tasks with Full Context
+- `tasks`: one entry per issue that needs a fix task
+  - `notes` MUST include specific file paths and approach (min 50 chars)
+  - `accept` MUST be measurable (command + expected result)
+  - `priority`: inherit from the originating issue
+  - `created_from`: the issue ID that spawned this task
+- `out_of_scope`: issue IDs that don't need action
 
-After subagents complete, create tasks preserving research:
-
-```
-ralph task add '{"name": "Fix: <desc>", "notes": "Root cause: <file:line>. Fix: <approach>. Pattern: <similar code>. Risk: <effects>.", "accept": "<measurable>", "created_from": "<issue-id>", "priority": "<from issue>", "research": {"files_analyzed": ["path:lines"], "root_cause_location": "file:line"}}'
-```
-
-### Task Notes Template for Issues
-
-```
-Root cause: <file:line - specific problem>. 
-Current behavior: <what happens>. Expected: <what should happen>. 
-Fix approach: <how to fix>. Similar pattern: <existing code ref>. 
-Imports needed: <any>. Risk: <side effects>.
-```
-
-## Step 4: Clear Issues
-
-```
-ralph issue done-all
-```
-
-## Step 5: Report
-
-```
-[RALPH] === INVESTIGATE COMPLETE ===
-[RALPH] Processed: N issues
-[RALPH] Tasks created: X (with full context)
-```
-
-## Handling Auto-Generated Pattern Issues
-
-**REPEATED REJECTION issues:** Same task failed 3+ times
-- Create HIGH PRIORITY blocking task addressing root cause
-- Notes MUST include: which task fails, rejection pattern, how new task unblocks it
-
-**COMMON FAILURE PATTERN issues:** Multiple tasks fail same way
-- Create single HIGH PRIORITY task fixing root cause
-- Notes MUST include: error pattern, affected tasks, fix approach
-
-## Validation
-
-Tasks from issues are validated. REJECTED if:
-- Notes < 50 chars or missing root cause location
-- Acceptance criteria is vague
-- Missing file:line references
-
-## Rules
-
-- Launch ALL investigations in parallel
-- Preserve research in notes with file:line references
-- Measurable acceptance for every task
-- Use `created_from` to link to source issue
-- EXIT after all issues resolved
+**You MUST output the [RALPH_OUTPUT] block as your final action before exiting.**
 """
 
 DEFAULT_PROMPT_DECOMPOSE = """# DECOMPOSE Stage
 
-A task was killed because it was too large (exceeded context or timeout limits).
-You must break it down into smaller subtasks.
+A task was killed (exceeded context or timeout). Break it into smaller subtasks.
 
-## Step 1: Get the Failed Task
+## Failed Task
 
-Run `ralph query` to see the task that needs decomposition.
-The `next.task` field shows:
-- `name`: The task that failed
-- `notes`: Original implementation guidance
-- `kill_reason`: Why it was killed ("timeout" or "context_limit")
-- `kill_log`: Path to the log from the failed iteration
-
-## Step 2: Review the Failed Iteration Log
-
-**CRITICAL**: Log may be HUGE. NEVER read entire file:
-
-```bash
-wc -l <kill_log_path>
-head -50 <kill_log_path>
-tail -100 <kill_log_path>
-```
-
-Determine: what was completed, what caused context explosion, partial progress.
-
-## Step 3: Research the Breakdown
-
-Use subagent to analyze:
-
-```
-Task: "Analyze how to decompose: [task name]
-Original notes: [task notes]
-
-Return JSON:
-{
-  \\"remaining_work\\": [
-    {\\"subtask\\": \\"<specific piece>\\", \\"files\\": [{\\"path\\": \\"file.py\\", \\"lines\\": \\"100-150\\"}], \\"effort\\": \\"small|medium\\"}
-  ],
-  \\"context_risks\\": \\"<what caused explosion>\\",
-  \\"mitigation\\": \\"<how subtasks avoid it>\\"
-}"
-```
-
-## Step 4: Create Subtasks with Full Context
-
-Each subtask MUST include:
-
-1. **Source locations**: Exact file paths with line numbers
-2. **What to do**: Specific bounded action
-3. **How to do it**: Implementation approach
-4. **Context from parent**: What was learned
-5. **Risk mitigation**: How to avoid re-kill
-
-**Template:**
-```
-ralph task add '{"name": "Specific subtask", "notes": "Source: <file> lines <N-M>. <Action>. Imports: <list>. Context from parent: <findings>. Risk mitigation: <avoid context explosion by...>", "accept": "<measurable>", "parent": "<task-id>"}'
-```
-
-**Example:**
 ```json
+{{TASK_JSON}}
+```
+
+- **Name**: {{TASK_NAME}}
+- **Kill reason**: {{KILL_REASON}}
+- **Kill log**: {{KILL_LOG_PATH}}
+
+## Instructions
+
+1. **Review the kill log** (if available). The log may be HUGE — use head/tail only:
+   ```bash
+   head -50 <kill_log_path>    # What started
+   tail -100 <kill_log_path>   # Where it stopped
+   ```
+
+2. **Use a subagent** to analyze what the task requires and how to break it down.
+
+3. **Create 2-5 subtasks** that:
+   - Can each be completed in ONE iteration (< 100k tokens)
+   - Have clear, specific scope
+   - Together accomplish the original task
+   - Use `deps` for ordering if needed
+
+## Output
+
+When done, output your result between markers EXACTLY like this:
+
+```
+[RALPH_OUTPUT]
 {
-  "name": "Create fallback.py with DashboardState dataclass",
-  "notes": "Source: powerplant/ralph lines 4022-4045 (DashboardState only). Create ralph/tui/fallback.py with just dataclass. Imports: dataclass, field, Optional, deque. Risk mitigation: Don't extract full class yet - just dataclass.",
-  "accept": "python3 -c 'from ralph.tui.fallback import DashboardState' exits 0",
-  "parent": "t-original"
+  "subtasks": [
+    {
+      "name": "Extract parser into separate module",
+      "notes": "Move parse_expr() and parse_stmt() from src/main.c lines 200-400 to src/parser.c. Update includes.",
+      "accept": "make build succeeds and make test passes",
+      "deps": []
+    },
+    {
+      "name": "Add error recovery to parser",
+      "notes": "In src/parser.c parse_expr(): add synchronization points after syntax errors. Pattern: skip tokens until ';' or '}'.",
+      "accept": "echo 'bad syntax;' | ./build/lang exits 1 without crash",
+      "deps": []
+    }
+  ]
 }
+[/RALPH_OUTPUT]
 ```
 
-## Step 5: Delete Original Task
+- Each subtask `notes` MUST include specific file paths and approach (min 50 chars)
+- Each subtask `accept` MUST be measurable
+- Do NOT try to implement anything — just create the breakdown
 
-```
-ralph task delete <original-task-id>
-```
-
-## Step 6: Report
-
-```
-[RALPH] === DECOMPOSE COMPLETE ===
-[RALPH] Original: <task name>
-[RALPH] Kill reason: <timeout|context_limit>
-[RALPH] Context risk: <what caused explosion>
-[RALPH] Mitigation: <how subtasks avoid it>
-[RALPH] Split into: N subtasks
-```
-
-## Validation
-
-Subtasks are validated. REJECTED if:
-- Notes < 50 chars or missing source line numbers
-- Modification tasks without specific locations
-- Acceptance criteria is vague
-
-## Rules
-
-1. ALWAYS review kill log first (head/tail only!)
-2. Each subtask < 100k tokens - completable in ONE iteration
-3. Preserve context from parent task notes
-4. Include line numbers for every subtask
-5. Measurable acceptance criteria
-6. Include risk mitigation for each subtask
-7. Maximum decomposition depth: 3 levels
-8. DO NOT implement - just create task breakdown
+**You MUST output the [RALPH_OUTPUT] block as your final action before exiting.**
 """
 
 EXAMPLE_SPEC = """# Example Specification

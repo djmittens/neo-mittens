@@ -32,9 +32,15 @@ tix_err_t tix_cmd_search(tix_ctx_t *ctx, int argc, char **argv);
 tix_err_t tix_cmd_validate(tix_ctx_t *ctx, int argc, char **argv);
 tix_err_t tix_cmd_batch(tix_ctx_t *ctx, int argc, char **argv);
 
-/* plan.jsonl I/O */
+/* command handlers - compact */
+tix_err_t tix_cmd_compact(tix_ctx_t *ctx, int argc, char **argv);
+
+/* plan.jsonl I/O (append-only) */
 tix_err_t tix_plan_append_ticket(const char *plan_path,
                                  const tix_ticket_t *ticket);
 tix_err_t tix_plan_append_tombstone(const char *plan_path,
                                     const tix_tombstone_t *ts);
-tix_err_t tix_plan_rewrite(const char *plan_path, tix_db_t *db);
+tix_err_t tix_plan_append_delete(const char *plan_path, const char *id);
+
+/* plan.jsonl compaction (called by tix compact) */
+tix_err_t tix_plan_compact(const char *plan_path, tix_db_t *db);

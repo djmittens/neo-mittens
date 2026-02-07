@@ -5,33 +5,28 @@ Parser creation refactored into helper functions for maintainability.
 """
 
 import argparse
+import json
 import os
 import sys
 
 # Add the parent directory to the Python path to resolve ralph imports
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
-import sys
 from pathlib import Path
 from typing import Optional, Sequence
 
 # Local imports
 from .commands.init import cmd_init
 from .commands.construct import cmd_construct
-from .commands.task import cmd_task
-from .commands.validate import cmd_validate
 from .commands.compact import cmd_compact
-from .commands.status import cmd_status
 from .commands.config_cmd import cmd_config
 from .commands.watch import cmd_watch
 from .commands.stream import cmd_stream
 from .commands.plan import cmd_plan
-from .commands.query import cmd_query
-from .commands.issue import cmd_issue
-from .commands.log import cmd_log
 from .commands.set_spec import cmd_set_spec
 from .commands.subagent import cmd_subagent, cmd_subagent_schema
 from .config import get_global_config, GlobalConfig, load_available_profiles, apply_profile
+from .tix import Tix, TixError
 from .utils import Colors
 
 
@@ -188,8 +183,9 @@ def _handle_init(args) -> int:
 
 
 def _handle_status(args) -> int:
-    config = _build_config(get_global_config())
-    return cmd_status(config)
+    tix = Tix(Path.cwd())
+    print(tix.status())
+    return 0
 
 
 def _handle_config(args) -> int:
@@ -220,30 +216,123 @@ def _handle_construct(args) -> int:
 
 
 def _handle_query(args) -> int:
-    config = _build_config(get_global_config())
-    return cmd_query(config, args.subquery, args.done)
+    """Delegate query to tix CLI."""
+    tix = Tix(Path.cwd())
+    subquery = getattr(args, "subquery", None)
+    done_only = getattr(args, "done", False)
+
+    if subquery == "tasks":
+        data = tix.query_tasks()
+    elif subquery == "issues":
+        data = tix.query_issues()
+    else:
+        data = tix.query_full()
+
+    if done_only and isinstance(data, list):
+        data = [t for t in data if t.get("status") == "done"]
+
+    print(json.dumps(data, indent=2))
+    return 0
 
 
 def _handle_task(args) -> int:
+    """Delegate task operations to tix CLI."""
     if not args.action:
         print(
             "Usage: ralph task [add|done|accept|reject|delete|prioritize] <description>"
         )
         return 1
-    config = _build_config(get_global_config(), include_ralph_dir=False)
-    return cmd_task(config, args.action, args.description, args.extra)
+
+    tix = Tix(Path.cwd())
+    action = args.action
+    desc = args.description
+    extra = args.extra
+
+    try:
+        if action == "add":
+            if not desc:
+                print("Error: task description required", file=sys.stderr)
+                return 1
+            result = tix.task_add({"name": desc})
+        elif action == "done":
+            result = tix.task_done(desc)
+        elif action == "accept":
+            result = tix.task_accept(desc)
+        elif action == "reject":
+            if not desc:
+                print("Error: task ID required", file=sys.stderr)
+                return 1
+            result = tix.task_reject(desc, extra or "rejected")
+        elif action == "delete":
+            if not desc:
+                print("Error: task ID required", file=sys.stderr)
+                return 1
+            result = tix.task_delete(desc)
+        elif action == "prioritize":
+            if not desc or not extra:
+                print("Error: task ID and priority required", file=sys.stderr)
+                return 1
+            result = tix.task_prioritize(desc, extra)
+        else:
+            print(f"Unknown task action: {action}", file=sys.stderr)
+            return 1
+
+        print(json.dumps(result, indent=2))
+        return 0
+    except TixError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        return 1
 
 
 def _handle_issue(args) -> int:
+    """Delegate issue operations to tix CLI."""
     if not args.action:
         print("Usage: ralph issue [add|done|done-all|done-ids] <description>")
         return 1
-    config = _build_config(get_global_config(), include_ralph_dir=False)
-    return cmd_issue(config, args.action, args.description)
+
+    tix = Tix(Path.cwd())
+    action = args.action
+    desc = args.description
+
+    try:
+        if action == "add":
+            if not desc:
+                print("Error: issue description required", file=sys.stderr)
+                return 1
+            result = tix.issue_add(desc)
+        elif action == "done":
+            result = tix.issue_done()
+        elif action == "done-all":
+            result = tix.issue_done_all()
+        elif action == "done-ids":
+            if not desc:
+                print("Error: issue IDs required", file=sys.stderr)
+                return 1
+            result = tix.issue_done_ids(desc.split(","))
+        else:
+            print(f"Unknown issue action: {action}", file=sys.stderr)
+            return 1
+
+        print(json.dumps(result, indent=2))
+        return 0
+    except TixError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        return 1
 
 
 def _handle_validate(args) -> int:
-    return cmd_validate(get_global_config(), args)
+    """Delegate validate to tix CLI."""
+    tix = Tix(Path.cwd())
+    try:
+        result = tix.validate()
+        if result.raw:
+            print(result.raw)
+        else:
+            print(json.dumps(result.data, indent=2))
+        return 0
+    except TixError as e:
+        print(f"Validation failed: {e}", file=sys.stderr)
+        return 1
 
 
 def _handle_compact(args) -> int:
@@ -252,12 +341,25 @@ def _handle_compact(args) -> int:
 
 
 def _handle_log(args) -> int:
-    config = _build_config(get_global_config())
-    show_all = getattr(args, "all", False)
-    spec_filter = getattr(args, "spec", None)
-    branch_filter = getattr(args, "branch", None)
-    since = getattr(args, "since", None)
-    return cmd_log(config, show_all, spec_filter, branch_filter, since)
+    """Delegate log to tix CLI."""
+    tix = Tix(Path.cwd())
+    cmd_args = ["log"]
+    if getattr(args, "all", False):
+        cmd_args.append("--all")
+    if getattr(args, "spec", None):
+        cmd_args.extend(["--spec", args.spec])
+    if getattr(args, "branch", None):
+        cmd_args.extend(["--branch", args.branch])
+    if getattr(args, "since", None):
+        cmd_args.extend(["--since", args.since])
+    try:
+        result = tix._run(*cmd_args, parse_json=False)
+        if result.raw:
+            print(result.raw)
+        return 0
+    except TixError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        return 1
 
 
 def _handle_set_spec(args) -> int:
@@ -431,4 +533,3 @@ def _create_parser() -> argparse.ArgumentParser:
 
 if __name__ == "__main__":
     sys.exit(main())
-# Parser refactored

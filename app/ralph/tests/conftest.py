@@ -1,14 +1,11 @@
 import os
-import shutil
 import pytest
-import uuid
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
 from ralph.config import GlobalConfig
-from ralph.models import Task, Issue, RalphPlanConfig
+from ralph.models import RalphPlanConfig
 from ralph.state import RalphState
-from ralph.opencode import spawn_opencode
 
 
 @pytest.fixture
@@ -32,33 +29,15 @@ def tmp_ralph_dir(tmp_path):
 
 @pytest.fixture
 def mock_state():
-    """Return a RalphState with sample tasks and issues for testing."""
-    tasks = [
-        Task(
-            id=f"t-{uuid.uuid4().hex[:8]}",
-            name=f"Test Task {i}",
-            spec="test_spec.md",
-            notes=f"Test notes for task {i}",
-            accept=f"Verification criteria for task {i}",
-            priority="medium",
-        )
-        for i in range(3)
-    ]
+    """Return a RalphState with orchestration fields for testing.
 
-    issues = [
-        Issue(
-            id=f"i-{uuid.uuid4().hex[:8]}",
-            spec="test_spec.md",
-            desc=f"Test issue {i}",
-        )
-        for i in range(2)
-    ]
-
+    Ticket data (tasks, issues, tombstones) is now owned by tix,
+    so this fixture only sets orchestration state.
+    """
     return RalphState(
-        tasks=tasks,
-        issues=issues,
-        tombstones={"accepted": [], "rejected": []},
         config=RalphPlanConfig(),
+        spec="test_spec.md",
+        stage="INVESTIGATE",
     )
 
 

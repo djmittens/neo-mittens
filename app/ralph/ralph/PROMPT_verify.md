@@ -2,91 +2,74 @@
 
 Verify that done tasks meet their acceptance criteria.
 
-## Step 1: Get State
+## Done Tasks to Verify
 
-Run `ralph query` to get:
-- `spec`: the current spec name
-- `tasks.done`: list of done tasks with their acceptance criteria
-
-## Step 2: Run Shared Tests ONCE (if needed)
-
-If ANY task's acceptance criteria mentions `make test`, `make build`, or running the test suite:
-
-```bash
-mkdir -p build/logs
-make build > build/logs/build.log 2>&1 && make test > build/logs/test.log 2>&1
-echo "Exit code: $?"
+```json
+{{DONE_TASKS_JSON}}
 ```
 
-**Run this ONCE.** Only check exit code - do NOT read the log files unless tests fail.
+Total: {{DONE_COUNT}} tasks
 
-**If tests fail**: Read the LAST 50 lines of `build/logs/test.log` to diagnose. Do NOT read the entire log.
+## Spec: {{SPEC_FILE}}
 
-### Timeout/Hang Failures - ESCALATE, DON'T RETRY
+## Instructions
 
-If tests **timeout or hang** (no clear error, just stops):
+1. **For each done task**, spawn a subagent (Task tool) to verify its acceptance criteria. Run all verifications in parallel.
 
-1. **Do NOT guess at fixes** - async bugs require execution traces
-2. **Capture with rr** (if available):
-   ```bash
-   timeout 120 rr record --chaos build/test_<name> 2>&1 || true
-   ```
-3. **Create issue and skip**:
-   ```
-   ralph task reject <task-id> "Test hangs - needs human debugging. rr recording captured."
-   ```
+2. Each subagent should:
+   - Search the codebase for the implementation
+   - Run any tests/commands in the acceptance criteria
+   - Return whether the task passes or fails, with evidence
 
-Signs to escalate immediately: timeout with no error, intermittent failures, TSAN races.
+3. **Check spec acceptance criteria** in `ralph/specs/{{SPEC_FILE}}`:
+   - For checked criteria (`- [x]`): verify they still hold
+   - For unchecked criteria (`- [ ]`): identify what's missing
 
-## Step 3: Verify Each Done Task
+4. For unchecked criteria not covered by existing tasks, include them in `new_tasks`.
 
-For each done task, check its `accept` criteria:
+5. **Report cross-cutting issues** in `issues`: problems that affect multiple tasks or indicate a missing prerequisite. Examples:
+   - A shared dependency is broken causing several tasks to fail the same way
+   - A prerequisite setup step is missing from the environment
+   - A spec assumption is incorrect and needs clarification
 
-**Simple criteria** (grep, file exists, specific command): Run directly, no subagent needed.
+## Rejection Quality
 
-**Complex criteria** (requires code analysis): Spawn a subagent:
+When a task fails, the `reason` MUST be diagnostic — not just what failed, but why:
+- Include specific **file paths and line numbers** where the problem is
+- Include the **actual error output** (first meaningful lines)
+- State the **root cause** if apparent (e.g., "function signature changed but callers not updated")
+
+Bad: `"test_pool fails"`
+Good: `"src/pool.c:67 — error path skips free(conn). test-asan output: 'LeakSanitizer: detected memory leak of 64 bytes'"`
+
+## Output
+
+When done, output your result between markers EXACTLY like this:
+
 ```
-Task: "Verify task '{task.name}' meets: {task.accept}
-1. Find the implementation
-2. Check acceptance criteria
-Return JSON: {\"task_id\": \"...\", \"passed\": true|false, \"evidence\": \"...\", \"reason\": \"...\"}"
-```
-
-**Test-dependent criteria**: Use the shared test result from Step 2. Do NOT re-run tests.
-
-## Step 4: Apply Results
-
-**Passed** -> `ralph task accept <task-id>`
-
-**Failed** -> Choose one:
-- Implementation bug: `ralph task reject <task-id> "<reason>"`
-- Architectural blocker: `ralph issue add "..."` then `ralph task delete <task-id>`
-
-Signs of architectural blocker:
-- Same rejection reason recurring
-- Requires changes outside this spec's scope
-
-## Step 5: Check Spec Acceptance Criteria (Unchecked Only)
-
-Read the spec's **Acceptance Criteria section only**: `ralph/specs/<spec-name>`
-
-**SKIP checked criteria** (`- [x]`) - these were verified when checked. Do NOT re-verify them.
-
-**For unchecked criteria** (`- [ ]`):
-- If covered by a pending/done task: skip (will be verified when task completes)
-- If NOT covered by any task: create a task for it:
-  ```
-  ralph task add '{"name": "...", "notes": "<file paths + approach>", "accept": "..."}'
-  ```
-
-## Step 6: Final Decision
-
-All tasks accepted, no new tasks needed:
-```
-[RALPH] SPEC_COMPLETE
+[RALPH_OUTPUT]
+{
+  "results": [
+    {"task_id": "t-xxx", "passed": true},
+    {"task_id": "t-yyy", "passed": false, "reason": "src/pool.c:67 — error path skips free(conn). test-asan fails with: LeakSanitizer detected 64 byte leak"}
+  ],
+  "issues": [
+    {"desc": "libfoo.so missing from test env — causes 3 tasks to fail with 'shared library not found'. Need a setup task to install it.", "priority": "high"}
+  ],
+  "spec_complete": false,
+  "new_tasks": [
+    {"name": "Fix failing criterion", "notes": "Detailed: file paths, approach, min 50 chars", "accept": "measurable command + expected result"}
+  ]
+}
+[/RALPH_OUTPUT]
 ```
 
-Otherwise:
-```
-[RALPH] SPEC_INCOMPLETE: <summary>
-```
+- `results`: one entry per done task — `passed: true` to accept, `passed: false` to reject
+- `reason`: required when `passed: false` — diagnostic with file paths, error output, and root cause
+- `issues`: cross-cutting problems not tied to a single task (missing prerequisites, broken shared deps, spec issues)
+  - `desc` MUST be specific — include file paths, error messages, and what needs to happen
+  - `priority`: "high" for blocking issues, "medium" for non-blocking
+- `spec_complete`: true only if ALL spec criteria are satisfied and no new work needed
+- `new_tasks`: tasks for uncovered spec criteria (notes must have file paths, accept must be measurable)
+
+**You MUST output the [RALPH_OUTPUT] block as your final action before exiting.**

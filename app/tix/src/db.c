@@ -1,6 +1,7 @@
 #include "db.h"
 #include "git.h"
 #include "json.h"
+#include "validate.h"
 #include "log.h"
 
 #include <stdio.h>
@@ -262,6 +263,11 @@ tix_err_t tix_db_get_ticket(tix_db_t *db, const char *id, tix_ticket_t *out) {
   return TIX_OK;
 }
 
+int tix_db_ticket_exists(tix_db_t *db, const char *id) {
+  tix_ticket_t tmp;
+  return tix_db_get_ticket(db, id, &tmp) == TIX_OK;
+}
+
 tix_err_t tix_db_list_tickets(tix_db_t *db, tix_ticket_type_e type,
                               tix_status_e status,
                               tix_ticket_t *out, u32 *count, u32 max) {
@@ -510,6 +516,9 @@ tix_err_t tix_db_rebuild_from_jsonl(tix_db_t *db, const char *jsonl_path) {
       const char *cf = tix_json_get_str(&obj, "created_from");
       if (cf != NULL) { snprintf(ticket.created_from, TIX_MAX_ID_LEN, "%s", cf); }
 
+      const char *ss = tix_json_get_str(&obj, "supersedes");
+      if (ss != NULL) { snprintf(ticket.supersedes, TIX_MAX_ID_LEN, "%s", ss); }
+
       const char *kr = tix_json_get_str(&obj, "kill_reason");
       if (kr != NULL) { snprintf(ticket.kill_reason, TIX_MAX_KEYWORD_LEN, "%s", kr); }
 
@@ -546,6 +555,17 @@ tix_err_t tix_db_rebuild_from_jsonl(tix_db_t *db, const char *jsonl_path) {
       if (name != NULL) { snprintf(ts.name, TIX_MAX_NAME_LEN, "%s", name); }
 
       tix_db_upsert_tombstone(db, &ts);
+
+      /* accept removes the ticket; reject is handled by a subsequent
+         updated ticket line that resets status to pending */
+      if (ts.is_accept && ts.id[0] != '\0') {
+        tix_db_delete_ticket(db, ts.id);
+      }
+    } else if (strcmp(t_val, "delete") == 0) {
+      const char *id = tix_json_get_str(&obj, "id");
+      if (id != NULL) {
+        tix_db_delete_ticket(db, id);
+      }
     }
   }
 
@@ -559,5 +579,18 @@ tix_err_t tix_db_rebuild_from_jsonl(tix_db_t *db, const char *jsonl_path) {
   }
 
   TIX_INFO("rebuilt cache from %s", jsonl_path);
+
+  /* run validation after rebuild to surface data issues from JSONL */
+  tix_validation_result_t vresult;
+  tix_err_t verr = tix_validate_history(db, jsonl_path, &vresult);
+  if (verr == TIX_OK) {
+    for (u32 vi = 0; vi < vresult.error_count; vi++) {
+      TIX_WARN("rebuild validation: %s", vresult.errors[vi]);
+    }
+    for (u32 vi = 0; vi < vresult.warning_count; vi++) {
+      TIX_DEBUG("rebuild validation: %s", vresult.warnings[vi]);
+    }
+  }
+
   return TIX_OK;
 }

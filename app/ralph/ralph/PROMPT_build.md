@@ -1,158 +1,55 @@
 # BUILD Stage
 
-Implement the next pending task.
+Implement the assigned task.
 
-## Step 1: Get Task
+## Your Task
 
-Run `ralph query` to get current state. The `next.task` field shows:
-- `name`: what to do
-- `notes`: implementation hints (if provided)
-- `accept`: how to verify it works (if provided)
-- `reject`: why it was rejected (if this is a retry)
-
-## Step 2: Check if Rejected Task
-
-If `reject` field is present, this task was previously attempted and rejected by VERIFY:
-
-1. **Read the rejection reason** - understand why it failed
-2. **The code is already there** - don't start from scratch
-3. **Fix the specific gap** - the rejection reason tells you what's wrong
-
-Do NOT re-explore the whole codebase. Focus on fixing what's broken.
-
-## Step 3: Understand Context
-
-1. Read the spec file: `ralph/specs/<spec>`
-2. Review `notes` for implementation hints
-3. **Use subagents for research** - see below
-
-## CRITICAL: Use Subagents for Codebase Research
-
-Your context window is LIMITED. Do NOT read many files yourself - you will run out of context and be killed.
-
-**For any research task, use the Task tool to spawn subagents:**
-
-```
-Task: "Find how X is implemented in the codebase. Search for Y, read relevant files, and report back:
-1. Which files contain X
-2. How it currently works
-3. What would need to change for Z"
+```json
+{{TASK_JSON}}
 ```
 
-**When to use subagents:**
-- Understanding how a feature currently works
-- Finding all usages of a function/type
-- Exploring unfamiliar parts of the codebase
-- Any task requiring reading more than 2-3 files
+- **Name**: {{TASK_NAME}}
+- **Notes**: {{TASK_NOTES}}
+- **Acceptance criteria**: {{TASK_ACCEPT}}
+- **Rejected reason** (if retry): {{TASK_REJECT}}
 
-**When NOT to use subagents:**
-- You already know exactly which file to edit
-- Making a small, targeted change
-- Running tests or build commands
+## Instructions
 
-Each subagent gets a fresh context window. Use them liberally for exploration.
+1. If this is a **retry** (reject field is set): the code is already there. Read the rejection reason, fix the specific gap. Do NOT re-explore the whole codebase.
 
-## Step 4: Implement
+2. **Use subagents for research** (Task tool). Your context window is limited. Never read more than 2-3 files yourself. Spawn subagents for any exploration.
 
-Build the feature/fix. Rules:
-- Complete implementations only, no stubs
-- No code comments unless explicitly requested
+3. **Implement** the task completely. No stubs, no placeholder code.
 
-## Step 5: Check Acceptance Criteria
+4. **Verify** the acceptance criteria before finishing. Run any tests specified.
 
-Before marking done, verify the task's acceptance criteria:
-1. Check **only** the `accept` criteria for this task
-2. Run any tests specified in the criteria
-3. Do NOT re-read the full spec - that's VERIFY stage's job
+5. **Report any issues** you discover (even if unrelated to this task) in the output below.
 
-**When running tests, redirect output to logs:**
-```bash
-mkdir -p build/logs
-make build > build/logs/build.log 2>&1 && make test > build/logs/test.log 2>&1
-echo "Exit code: $?"
-```
+## Spec Ambiguities
 
-**Only check exit code.** Do NOT read log files unless tests fail.
-If tests fail, read LAST 50 lines of `build/logs/test.log` to diagnose.
+Do NOT make design decisions yourself. If the spec is ambiguous or conflicts with technical constraints, report it as a blocked verdict with the ambiguity as the reason.
 
-### Timeout/Hang Failures - ESCALATE, DON'T RETRY
+## Output
 
-If tests **timeout or hang** (no clear error, just stops):
-
-1. **Do NOT guess at fixes** - async bugs require execution traces
-2. **Capture with rr** (if available):
-   ```bash
-   timeout 120 rr record --chaos build/test_<name> 2>&1 || true
-   ```
-3. **Create issue and move on**:
-   ```
-   ralph issue add "Test <name> hangs. rr recording captured. Needs human debugging."
-   ```
-
-Signs to escalate: timeout with no error, intermittent failures, TSAN races.
-
-If acceptance criteria pass, mark done. VERIFY stage will do the thorough spec check later.
-
-## Step 6: Complete
+When done, output your result between markers EXACTLY like this:
 
 ```
-ralph task done
+[RALPH_OUTPUT]
+{"verdict": "done", "summary": "what was implemented", "issues": []}
+[/RALPH_OUTPUT]
 ```
 
-This marks the task done and auto-commits.
-
-## Discovering Issues - IMPORTANT
-
-You MUST record any problems you notice, even if unrelated to the current task:
-```
-ralph issue add "description of issue"
-```
-
-**Always add an issue when you see:**
-- Test warnings (TSAN, ASAN, valgrind warnings)
-- Compiler warnings
-- Code that "works but has problems" (memory leaks, thread leaks, etc.)
-- TODOs or FIXMEs you encounter
-- Potential bugs you notice while reading code
-- Missing test coverage you observe
-
-**Do NOT ignore problems** just because your current task passes. If you see something wrong, record it.
-
-Issues are investigated later in the INVESTIGATE stage.
-
-## Spec Ambiguities - CRITICAL
-
-**Do NOT make design decisions yourself.** If the spec is ambiguous or conflicts with technical constraints:
-
-1. **Log an issue** with the ambiguity:
-   ```
-   ralph issue add "Spec ambiguity: <what the spec says> vs <technical reality>. Options: (1) ... (2) ..."
-   ```
-
-2. **Skip the task** or implement a minimal stub that makes the conflict visible
-
-3. **Do NOT "interpret" the spec** - your interpretation may be wrong
-
-**Examples of spec ambiguities:**
-- Spec requires X but the architecture doesn't support X
-- Spec is vague about behavior in edge case Y
-- Two parts of the spec contradict each other
-- Spec assumes a capability that doesn't exist
-
-**Wrong:** "The pragmatic interpretation is..." then implementing your guess
-**Right:** `ralph issue add "Spec says X but Y prevents this. Need clarification."`
-
-Design decisions belong to the user, not the agent.
-
-## Progress Reporting
+If you cannot complete the task:
 
 ```
-[RALPH] === START: <task name> ===
+[RALPH_OUTPUT]
+{"verdict": "blocked", "reason": "why it cannot be done", "issues": []}
+[/RALPH_OUTPUT]
 ```
 
-```
-[RALPH] === DONE: <task name> ===
-[RALPH] RESULT: <summary>
+The `issues` array is for problems you discovered during implementation (optional):
+```json
+{"issues": [{"desc": "Memory leak in foo.c:123"}, {"desc": "Test flaky: bar_test"}]}
 ```
 
-## EXIT after marking task done
+**You MUST output the [RALPH_OUTPUT] block as your final action before exiting.**

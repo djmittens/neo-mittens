@@ -19,6 +19,9 @@ tix_err_t tix_db_upsert_ticket(tix_db_t *db, const tix_ticket_t *ticket);
 tix_err_t tix_db_delete_ticket(tix_db_t *db, const char *id);
 tix_err_t tix_db_get_ticket(tix_db_t *db, const char *id, tix_ticket_t *out);
 
+/* check if a ticket with the given ID exists in the cache */
+int tix_db_ticket_exists(tix_db_t *db, const char *id);
+
 tix_err_t tix_db_list_tickets(tix_db_t *db, tix_ticket_type_e type,
                               tix_status_e status,
                               tix_ticket_t *out, u32 *count, u32 max);

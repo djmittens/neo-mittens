@@ -29,13 +29,13 @@ static int setup_env(char *tmpdir, size_t tmpdir_len,
   snprintf(cmd, sizeof(cmd),
            "cd \"%s\" && git init -q && git config user.email test@test && "
            "git config user.name test && "
-           "mkdir -p ralph .tix && "
-           "touch ralph/plan.jsonl && "
+           "mkdir -p .tix && "
+           "touch .tix/plan.jsonl && "
            "git add -A && git commit -q -m init", tmpdir);
   if (system(cmd) != 0) { return -1; }
 
   snprintf(db_path, db_path_len, "%s/.tix/cache.db", tmpdir);
-  snprintf(plan_path, plan_path_len, "%s/ralph/plan.jsonl", tmpdir);
+  snprintf(plan_path, plan_path_len, "%s/.tix/plan.jsonl", tmpdir);
   return 0;
 }
 

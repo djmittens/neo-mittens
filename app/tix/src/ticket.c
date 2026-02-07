@@ -94,3 +94,25 @@ tix_err_t tix_ticket_add_dep(tix_ticket_t *t, const char *dep_id) {
   t->dep_count++;
   return TIX_OK;
 }
+
+int tix_is_valid_ticket_id(const char *id) {
+  if (id == NULL || strlen(id) < 3) { return 0; }
+  if (id[0] != 't' && id[0] != 'i' && id[0] != 'n') { return 0; }
+  if (id[1] != '-') { return 0; }
+  for (sz k = 2; id[k] != '\0'; k++) {
+    char c = id[k];
+    int is_hex = (c >= '0' && c <= '9') ||
+                 (c >= 'a' && c <= 'f') ||
+                 (c >= 'A' && c <= 'F');
+    if (!is_hex) { return 0; }
+  }
+  return 1;
+}
+
+int tix_has_duplicate_dep(const tix_ticket_t *t, const char *dep_id) {
+  if (t == NULL || dep_id == NULL) { return 0; }
+  for (u32 i = 0; i < t->dep_count; i++) {
+    if (strcmp(t->deps[i], dep_id) == 0) { return 1; }
+  }
+  return 0;
+}

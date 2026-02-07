@@ -5,7 +5,7 @@ Construct mode - main autonomous development loop.
 Features:
 - Project rules (AGENTS.md) integration
 - Context injection for stage prompts
-- Circuit breaker (consecutive failures)
+- Circuit breaker (batch failures handled by state machine in stages/base.py)
 - Max cost limit
 - Git sync/push each iteration
 - Full metrics tracking
@@ -28,16 +28,24 @@ from ..git import (
     push_with_retry,
     sync_with_remote,
 )
-from ..opencode import spawn_opencode, extract_metrics, stream_and_collect
+from ..opencode import spawn_opencode, stream_and_collect
 from ..prompts import (
     find_project_rules,
     build_prompt_with_rules,
     load_and_inject,
-    build_build_context,
-    build_verify_context,
-    build_investigate_context,
-    build_decompose_context,
+    build_build_context_tix,
+    build_verify_context_tix,
+    build_investigate_context_tix,
+    build_decompose_context_tix,
 )
+from ..reconcile import (
+    reconcile_build,
+    reconcile_verify,
+    reconcile_investigate,
+    reconcile_decompose,
+    ReconcileResult,
+)
+from ..tix import Tix, TixError
 from ..stages.base import (
     ConstructStateMachine,
     Stage,
@@ -79,83 +87,118 @@ def _check_opencode_available() -> Tuple[bool, str]:
         return False, f"Error checking opencode: {e}"
 
 
-def _validate_state(state: RalphState) -> Tuple[bool, list[str]]:
-    """Validate state for dangling dependencies and other issues.
-    
-    Returns:
-        Tuple of (is_valid, list of error messages).
-    """
-    errors = []
-    
-    # Check for dangling dependencies
-    all_task_ids = {t.id for t in state.tasks}
-    for task in state.tasks:
-        for dep in (task.deps or []):
-            if dep not in all_task_ids:
-                errors.append(f"Task {task.id} has dangling dep: {dep}")
-    
-    return len(errors) == 0, errors
-
-
-def _build_stage_prompt(
+def _build_stage_prompt_tix(
     stage: Stage,
+    tix: Tix,
     state: RalphState,
     ralph_dir: Path,
     project_rules: Optional[str] = None,
-) -> Optional[str]:
-    """Build a prompt for a stage with context injection.
-    
-    Args:
-        stage: The stage to build prompt for.
-        state: Current Ralph state.
-        ralph_dir: Path to ralph directory.
-        project_rules: Optional project rules content.
+) -> Tuple[Optional[str], Optional[dict]]:
+    """Build a prompt for a stage using tix for ticket data.
     
     Returns:
-        The prompt content with injected context, or None if not available.
+        Tuple of (prompt_string, context_metadata) where context_metadata
+        contains stage-specific info needed for reconciliation (e.g. task_id).
+        Returns (None, None) if stage cannot be built.
     """
     stage_name = stage.name.lower()
-    
-    # Build context based on stage
     spec_name = state.spec or ""
+    meta: dict = {}
+    
     if stage == Stage.BUILD:
-        task = state.pending[0] if state.pending else None
-        if not task:
-            return None
-        context = build_build_context(task)
+        tasks = tix.query_tasks()
+        if not tasks:
+            return None, None
+        task = tasks[0]
+        context = build_build_context_tix(task, spec_name)
+        meta["task_id"] = task.get("id", "")
     elif stage == Stage.VERIFY:
-        context = build_verify_context(state.done, spec_name)
+        full = tix.query_full()
+        done = full.get("tasks", {}).get("done", [])
+        if not done:
+            return None, None
+        context = build_verify_context_tix(done, spec_name)
     elif stage == Stage.INVESTIGATE:
-        context = build_investigate_context(state.issues, spec_name)
+        issues = tix.query_issues()
+        if not issues:
+            return None, None
+        # Filter to batch items if batching is active
+        batch_ids = list(state.batch_items) if state.batch_items else None
+        if batch_ids:
+            issues = [i for i in issues if i.get("id") in batch_ids]
+            meta["batch_issue_ids"] = batch_ids
+        else:
+            meta["batch_issue_ids"] = [i.get("id", "") for i in issues]
+        context = build_investigate_context_tix(issues, spec_name)
     elif stage == Stage.DECOMPOSE:
-        # Find the task that needs decomposition
-        task = next((t for t in state.tasks if t.status == "killed"), None)
+        # Find killed task from state's decompose_target
+        target_id = state.decompose_target
+        if not target_id:
+            return None, None
+        full = tix.query_full()
+        all_tasks = (
+            full.get("tasks", {}).get("pending", [])
+            + full.get("tasks", {}).get("done", [])
+        )
+        task = next((t for t in all_tasks if t.get("id") == target_id), None)
         if not task:
-            return None
-        context = build_decompose_context(task)
+            return None, None
+        context = build_decompose_context_tix(task, spec_name)
+        meta["task_id"] = target_id
     else:
-        return None
+        return None, None
     
     try:
         prompt = load_and_inject(stage_name, context, ralph_dir)
-        
-        # Prepend project rules if available
         if project_rules:
             prompt = build_prompt_with_rules(prompt, project_rules)
-        
-        return prompt
+        return prompt, meta
     except FileNotFoundError:
-        return None
+        return None, None
 
 
-def _should_skip_stage(stage: Stage, state: RalphState) -> bool:
-    """Check if stage should be skipped based on state."""
-    if stage == Stage.INVESTIGATE:
-        return not state.issues
+def _reconcile_stage(
+    stage: Stage,
+    tix: Tix,
+    agent_output: str,
+    meta: dict,
+) -> ReconcileResult:
+    """Reconcile agent output for a stage via tix.
+    
+    Args:
+        stage: Which stage just completed.
+        tix: Tix harness instance.
+        agent_output: Full stdout from the agent.
+        meta: Context metadata from prompt building (e.g. task_id).
+    
+    Returns:
+        ReconcileResult summarizing what was done.
+    """
     if stage == Stage.BUILD:
-        return not state.pending
+        return reconcile_build(tix, agent_output, meta.get("task_id", ""))
+    elif stage == Stage.VERIFY:
+        return reconcile_verify(tix, agent_output)
+    elif stage == Stage.INVESTIGATE:
+        return reconcile_investigate(
+            tix, agent_output, meta.get("batch_issue_ids")
+        )
+    elif stage == Stage.DECOMPOSE:
+        return reconcile_decompose(
+            tix, agent_output, meta.get("task_id", "")
+        )
+    else:
+        return ReconcileResult(ok=False, errors=[f"Unknown stage: {stage}"])
+
+
+def _should_skip_stage_tix(stage: Stage, tix: Tix) -> bool:
+    """Check if stage should be skipped based on tix state."""
+    if stage == Stage.INVESTIGATE:
+        return not tix.query_issues()
+    if stage == Stage.BUILD:
+        return not tix.query_tasks()
     if stage == Stage.VERIFY:
-        return not state.done
+        full = tix.query_full()
+        return not full.get("tasks", {}).get("done", [])
     return False
 
 
@@ -211,60 +254,73 @@ def _run_stage(
     state: RalphState,
     metrics: Metrics,
     stage_timeout_ms: int,
-    context_limit: int,
     repo_root: Path,
     ralph_dir: Path,
-    project_rules: Optional[str] = None,
-    print_output: bool = True,
+    project_rules: Optional[str],
+    print_output: bool,
+    tix: Tix,
+    start_time: float,
 ) -> StageResult:
-    """Run a single stage by spawning opencode with context injection."""
-    start_time = time.time()
-
-    if _should_skip_stage(stage, state):
+    """Run a stage using tix for ticket data and reconcile after."""
+    if _should_skip_stage_tix(stage, tix):
         return _make_result(stage, StageOutcome.SKIP)
 
-    prompt = _build_stage_prompt(stage, state, ralph_dir, project_rules)
-    if not prompt:
+    prompt, meta = _build_stage_prompt_tix(
+        stage, tix, state, ralph_dir, project_rules
+    )
+    if not prompt or meta is None:
         return _make_result(
-            stage, StageOutcome.SKIP, error=f"No prompt available for stage {stage.name}"
+            stage, StageOutcome.SKIP,
+            error=f"No prompt for {stage.name}",
         )
 
     try:
         return_code, stdout_output, timed_out, cost, tokens = _execute_opencode(
-            config, prompt, repo_root, stage_timeout_ms, print_output=print_output
+            config, prompt, repo_root, stage_timeout_ms,
+            print_output=print_output,
         )
     except Exception as e:
         return _make_result(
-            stage, StageOutcome.FAILURE, time.time() - start_time, error=str(e)
+            stage, StageOutcome.FAILURE,
+            time.time() - start_time, error=str(e),
         )
 
-    # Update metrics
     metrics.total_cost += cost
-    metrics.total_tokens_in += tokens  # Simplified - ideally split in/out
+    metrics.total_tokens_in += tokens
 
     if timed_out:
         metrics.kills_timeout += 1
         return _make_result(
-            stage,
-            StageOutcome.FAILURE,
+            stage, StageOutcome.FAILURE,
             time.time() - start_time,
             error="Stage timed out",
             kill_reason="timeout",
-            cost=cost,
-            tokens_used=tokens,
+            cost=cost, tokens_used=tokens,
         )
 
+    # Reconcile agent output through tix
+    reconcile_result = _reconcile_stage(stage, tix, stdout_output, meta)
     duration = time.time() - start_time
-    if return_code == 0:
-        return _make_result(stage, StageOutcome.SUCCESS, duration, cost=cost, tokens_used=tokens)
+
+    # Log reconciliation summary
+    print(f"  Reconcile: {reconcile_result.summary}")
+    if reconcile_result.errors:
+        for err in reconcile_result.errors:
+            print(f"  Error: {err}", file=sys.stderr)
+
+    if return_code == 0 and reconcile_result.ok:
+        return _make_result(
+            stage, StageOutcome.SUCCESS, duration,
+            cost=cost, tokens_used=tokens,
+        )
+
+    error_msg = f"Stage exited {return_code}"
+    if not reconcile_result.ok:
+        error_msg += f"; reconcile: {reconcile_result.summary}"
+
     return _make_result(
-        stage,
-        StageOutcome.FAILURE,
-        duration,
-        return_code,
-        error=f"Stage exited with code {return_code}",
-        cost=cost,
-        tokens_used=tokens,
+        stage, StageOutcome.FAILURE, duration, return_code,
+        error=error_msg, cost=cost, tokens_used=tokens,
     )
 
 
@@ -320,17 +376,27 @@ def _print_construct_header(
     max_failures: int,
     stage_timeout_ms: int,
     context_limit: int,
+    tix: Optional[Tix] = None,
 ) -> None:
     """Print the construct mode header with full configuration."""
-    # Calculate context thresholds
     warn_pct = getattr(config, "context_warn_pct", 70)
     compact_pct = getattr(config, "context_compact_pct", 85)
     kill_pct = getattr(config, "context_kill_pct", 95)
-    
+
     soft_limit = int(context_limit * warn_pct / 100)
     compact_limit = int(context_limit * compact_pct / 100)
     hard_limit = int(context_limit * kill_pct / 100)
-    
+
+    # Get ticket counts from tix
+    pending_count = 0
+    issue_count = 0
+    if tix:
+        try:
+            pending_count = len(tix.query_tasks())
+            issue_count = len(tix.query_issues())
+        except Exception:
+            pass
+
     print(f"{Colors.BLUE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━{Colors.NC}")
     print(f"Mode:   {Colors.GREEN}construct{Colors.NC} (state machine)")
     print(f"Spec:   {Colors.CYAN}{state.spec}{Colors.NC}")
@@ -347,8 +413,8 @@ def _print_construct_header(
     print(f"Max failures:   {max_failures} (circuit breaker)")
     print(f"Timeout:        {stage_timeout_ms}ms per stage")
     print(f"Context:        {context_limit:,} tokens (warn: {soft_limit:,}, compact: {compact_limit:,}, kill: {hard_limit:,})")
-    print(f"Pending tasks:  {len(state.pending)}")
-    print(f"Open issues:    {len(state.issues)}")
+    print(f"Pending tasks:  {pending_count}")
+    print(f"Open issues:    {issue_count}")
     print(f"{Colors.BLUE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━{Colors.NC}")
 
 
@@ -356,8 +422,11 @@ def _create_stage_wrapper(
     repo_root: Path,
     ralph_dir: Path,
     project_rules: Optional[str] = None,
+    tix_instance: Optional[Tix] = None,
 ) -> Callable:
     """Create a stage wrapper function for the state machine."""
+    if tix_instance is None:
+        raise RuntimeError("Tix is required for construct mode")
 
     def run_stage_wrapper(
         cfg: GlobalConfig,
@@ -369,8 +438,9 @@ def _create_stage_wrapper(
     ) -> StageResult:
         print(f"\n{Colors.CYAN}[{stage.name}]{Colors.NC}")
         return _run_stage(
-            cfg, stage, st, met, timeout_ms, ctx_limit, 
-            repo_root, ralph_dir, project_rules
+            cfg, stage, st, met, timeout_ms,
+            repo_root, ralph_dir, project_rules,
+            True, tix_instance, time.time(),
         )
 
     return run_stage_wrapper
@@ -412,6 +482,7 @@ def _print_final_report(
     exit_reason: str,
     iterations: int,
     state: RalphState,
+    tix: Optional[Tix] = None,
 ) -> None:
     """Print final construct session report."""
     print()
@@ -429,18 +500,25 @@ def _print_final_report(
         print(f"{Colors.YELLOW}MAX ITERATIONS REACHED{Colors.NC}")
     else:
         print(f"{Colors.BLUE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━{Colors.NC}")
-    
+
     print(f"Total cost:     ${metrics.total_cost:.4f}")
     print(f"Iterations:     {iterations}")
     print(f"Tokens used:    {metrics.tokens_used:,}")
-    
-    if state.pending:
-        print(f"Pending tasks:  {len(state.pending)}")
-    if state.done:
-        print(f"Done tasks:     {len(state.done)}")
-    if state.issues:
-        print(f"Open issues:    {len(state.issues)}")
-    
+
+    if tix:
+        try:
+            pending = tix.query_tasks()
+            done = tix.query_done_tasks()
+            issues = tix.query_issues()
+            if pending:
+                print(f"Pending tasks:  {len(pending)}")
+            if done:
+                print(f"Done tasks:     {len(done)}")
+            if issues:
+                print(f"Open issues:    {len(issues)}")
+        except Exception:
+            pass
+
     print(f"{Colors.BLUE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━{Colors.NC}")
 
 
@@ -497,16 +575,6 @@ def cmd_construct(
         print(f"{Colors.YELLOW}No spec configured - run 'ralph plan <spec.md>' first{Colors.NC}")
         return 1
     
-    # Pre-flight check: validate state
-    valid, validation_errors = _validate_state(state)
-    if not valid:
-        print(f"{Colors.RED}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━{Colors.NC}")
-        print(f"{Colors.RED}VALIDATION ERRORS - Cannot start construct{Colors.NC}")
-        for err in validation_errors:
-            print(f"  {Colors.RED}✗{Colors.NC} {err}")
-        print(f"{Colors.RED}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━{Colors.NC}")
-        return 1
-    
     # Load global config
     global_config = GlobalConfig.load()
     max_iterations = iterations if iterations > 0 else global_config.max_iterations
@@ -525,11 +593,22 @@ def cmd_construct(
                 rules_source = candidate
                 break
 
+    # Initialize tix harness (required)
+    try:
+        tix_instance = Tix(repo_root)
+        if not tix_instance.is_available():
+            print(f"{Colors.RED}Tix not available. Install tix first.{Colors.NC}")
+            return 1
+        print(f"Tix:    {Colors.GREEN}available{Colors.NC} ({tix_instance.bin})")
+    except Exception as e:
+        print(f"{Colors.RED}Tix init failed: {e}{Colors.NC}")
+        return 1
+
     # Print header
     _print_construct_header(
         state, branch, rules_source, global_config,
         max_iterations, max_cost, max_failures,
-        stage_timeout_ms, context_limit
+        stage_timeout_ms, context_limit, tix_instance,
     )
 
     # Initialize metrics with start time
@@ -547,14 +626,16 @@ def cmd_construct(
         metrics=metrics,
         stage_timeout_ms=stage_timeout_ms,
         context_limit=context_limit,
-        run_stage_fn=_create_stage_wrapper(repo_root, ralph_dir, project_rules),
+        run_stage_fn=_create_stage_wrapper(
+            repo_root, ralph_dir, project_rules, tix_instance
+        ),
         load_state_fn=lambda: load_state(plan_file),
         save_state_fn=lambda st: save_state(st, plan_file),
+        tix=tix_instance,
         loop_detector=loop_detector,
     )
 
     # Run construct loop
-    consecutive_failures = 0
     iteration = 0
     exit_reason = "unknown"
     
@@ -568,11 +649,6 @@ def cmd_construct(
             # Check cost limit
             if max_cost > 0 and metrics.total_cost >= max_cost:
                 exit_reason = "cost_limit"
-                break
-            
-            # Check circuit breaker
-            if consecutive_failures >= max_failures:
-                exit_reason = "circuit_breaker"
                 break
             
             iteration += 1
@@ -635,8 +711,7 @@ def cmd_construct(
             if not push_with_retry(branch, retries=2, plan_file=plan_file, cwd=cwd):
                 print(f"{Colors.YELLOW}Push failed - continuing without push{Colors.NC}")
             
-            # Reset failure counter on success
-            consecutive_failures = 0
+
     
     except KeyboardInterrupt:
         print(f"\n{Colors.YELLOW}Interrupted by user{Colors.NC}")
@@ -647,7 +722,7 @@ def cmd_construct(
         state = load_state(plan_file)
         
         # Print final report
-        _print_final_report(metrics, exit_reason, iteration, state)
+        _print_final_report(metrics, exit_reason, iteration, state, tix_instance)
         
         # Emit session summary
         log_dir = Path(global_config.log_dir)

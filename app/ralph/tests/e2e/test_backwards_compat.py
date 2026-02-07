@@ -1,4 +1,11 @@
-"""E2E tests for backwards compatibility with existing Ralph data."""
+"""E2E tests for backwards compatibility with existing Ralph data.
+
+Since state.py is now orchestration-only (ticket data owned by tix),
+these tests verify that:
+1. load_state reads spec, stage, config records correctly
+2. Ticket records are ignored (not loaded into RalphState)
+3. Prompts, config, and other subsystems still work
+"""
 
 import json
 import os
@@ -24,7 +31,7 @@ class TestReadsExistingPlanJsonl:
     """Tests for loading existing plan.jsonl files."""
 
     def test_reads_existing_plan_jsonl(self, tmp_path):
-        """Test that the new state module can read existing plan.jsonl from ralph/ directory."""
+        """Test that load_state reads orchestration fields from plan.jsonl."""
         from ralph.state import load_state
 
         repo_root = get_repo_root()
@@ -35,10 +42,10 @@ class TestReadsExistingPlanJsonl:
         state = load_state(plan_file)
 
         assert state is not None
-        assert hasattr(state, "tasks")
-        assert hasattr(state, "issues")
-        assert hasattr(state, "tombstones")
+        assert hasattr(state, "stage")
+        assert hasattr(state, "spec")
         assert hasattr(state, "config")
+        assert hasattr(state, "batch_items")
 
     def test_reads_sample_plan_jsonl_copy(self, tmp_path):
         """Test loading a copied plan.jsonl into tmp directory."""
@@ -55,14 +62,11 @@ class TestReadsExistingPlanJsonl:
         state = load_state(tmp_plan)
 
         assert state is not None
-        assert isinstance(state.tasks, list)
-        assert isinstance(state.issues, list)
-        assert isinstance(state.tombstones, dict)
-        assert "accepted" in state.tombstones
-        assert "rejected" in state.tombstones
+        assert isinstance(state.stage, str)
+        assert isinstance(state.batch_items, list)
 
-    def test_parses_task_fields_correctly(self, tmp_path):
-        """Test that tasks from plan.jsonl have expected fields parsed."""
+    def test_parses_orchestration_fields(self, tmp_path):
+        """Test that orchestration fields are parsed from plan.jsonl."""
         from ralph.state import load_state
 
         repo_root = get_repo_root()
@@ -72,15 +76,12 @@ class TestReadsExistingPlanJsonl:
 
         state = load_state(plan_file)
 
-        if state.tasks:
-            task = state.tasks[0]
-            assert hasattr(task, "id")
-            assert hasattr(task, "name")
-            assert hasattr(task, "spec")
-            assert hasattr(task, "status")
+        # Stage should be a valid stage string
+        valid_stages = {"PLAN", "INVESTIGATE", "BUILD", "VERIFY", "DECOMPOSE", "COMPLETE"}
+        assert state.stage in valid_stages
 
-    def test_parses_tombstones_correctly(self, tmp_path):
-        """Test that tombstones are parsed correctly."""
+    def test_does_not_have_ticket_fields(self, tmp_path):
+        """Test that RalphState no longer has ticket attributes."""
         from ralph.state import load_state
 
         repo_root = get_repo_root()
@@ -90,11 +91,11 @@ class TestReadsExistingPlanJsonl:
 
         state = load_state(plan_file)
 
-        all_tombstones = state.tombstones["accepted"] + state.tombstones["rejected"]
-        if all_tombstones:
-            tombstone = all_tombstones[0]
-            assert hasattr(tombstone, "id")
-            assert hasattr(tombstone, "name")
+        # These fields are now owned by tix
+        assert not hasattr(state, "tasks")
+        assert not hasattr(state, "issues")
+        assert not hasattr(state, "tombstones")
+        assert not hasattr(state, "current_task_id")
 
     def test_synthetic_plan_jsonl(self, tmp_path):
         """Test loading a synthetic plan.jsonl with known content."""
@@ -103,6 +104,8 @@ class TestReadsExistingPlanJsonl:
         plan_content = [
             {"t": "config", "timeout_ms": 300000, "max_iterations": 10},
             {"t": "spec", "spec": "test-spec.md"},
+            {"t": "stage", "stage": "BUILD"},
+            # Ticket records should be ignored
             {
                 "t": "task",
                 "id": "t-abc123",
@@ -117,15 +120,18 @@ class TestReadsExistingPlanJsonl:
         ]
 
         plan_file = tmp_path / "plan.jsonl"
-        plan_file.write_text("\n".join(json.dumps(line) for line in plan_content))
+        plan_file.write_text(
+            "\n".join(json.dumps(line) for line in plan_content)
+        )
 
         state = load_state(plan_file)
 
         assert state.spec == "test-spec.md"
-        assert len(state.tasks) == 1
-        assert state.tasks[0].id == "t-abc123"
-        assert state.tasks[0].name == "Test task"
-        assert state.tasks[0].priority == "high"
+        assert state.stage == "BUILD"
+        assert state.config is not None
+        assert state.config.timeout_ms == 300000
+        # No ticket data on state
+        assert not hasattr(state, "tasks")
 
 
 class TestLoadsExistingPrompts:
