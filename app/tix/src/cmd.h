@@ -32,7 +32,8 @@ tix_err_t tix_cmd_search(tix_ctx_t *ctx, int argc, char **argv);
 tix_err_t tix_cmd_validate(tix_ctx_t *ctx, int argc, char **argv);
 tix_err_t tix_cmd_batch(tix_ctx_t *ctx, int argc, char **argv);
 
-/* command handlers - compact */
+/* command handlers - sync and compact */
+tix_err_t tix_cmd_sync(tix_ctx_t *ctx, int argc, char **argv);
 tix_err_t tix_cmd_compact(tix_ctx_t *ctx, int argc, char **argv);
 
 /* plan.jsonl I/O (append-only) */

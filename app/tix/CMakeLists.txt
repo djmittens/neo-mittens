@@ -67,6 +67,7 @@ set(TIX_SOURCES
   src/cmd_search.c
   src/cmd_validate.c
   src/cmd_batch.c
+  src/cmd_sync.c
   src/cmd_compact.c
   src/cmd.c
 )
@@ -116,3 +117,4 @@ tix_add_test(test_validate        test/e2e/test_validate.c)
 tix_add_test(test_report          test/e2e/test_report.c)
 tix_add_test(test_json            test/e2e/test_json.c)
 tix_add_test(test_error_paths     test/e2e/test_error_paths.c)
+tix_add_test(test_sync            test/e2e/test_sync.c)

@@ -38,3 +38,41 @@ tix_err_t tix_db_get_meta(tix_db_t *db, const char *key,
 
 tix_err_t tix_db_is_stale(tix_db_t *db, int *is_stale);
 tix_err_t tix_db_rebuild_from_jsonl(tix_db_t *db, const char *jsonl_path);
+
+/* Replay JSONL content (in-memory string) into DB additively.
+   Handles task/issue/note lines, accept/reject tombstones, delete markers.
+   Uses upsert (last-write-wins) semantics - does NOT clear the DB first. */
+tix_err_t tix_db_replay_content(tix_db_t *db, const char *content);
+
+/* Replay a plan.jsonl file into DB additively (no nuke).
+   Same as replay_content but reads from a file path. */
+tix_err_t tix_db_replay_jsonl_file(tix_db_t *db, const char *jsonl_path);
+
+/* Clear all ticket data from the cache (tickets, deps, tombstones, keywords).
+   Used before a full history replay (e.g. tix sync). */
+tix_err_t tix_db_clear_tickets(tix_db_t *db);
+
+/* Reference resolution states */
+typedef enum {
+  TIX_REF_RESOLVED = 0,  /* target exists as live ticket */
+  TIX_REF_STALE    = 1,  /* target exists in tombstones (accepted/resolved) */
+  TIX_REF_BROKEN   = 2,  /* target not found anywhere */
+} tix_ref_state_e;
+
+/* Resolve a reference: check tickets table, then tombstones table */
+tix_ref_state_e tix_db_resolve_ref(tix_db_t *db, const char *id);
+
+/* Count orphan references across all tickets.
+   Returns counts of broken deps, parents, created_from, supersedes. */
+typedef struct {
+  u32 broken_deps;
+  u32 broken_parents;
+  u32 broken_created_from;
+  u32 broken_supersedes;
+  u32 stale_deps;
+  u32 stale_parents;
+  u32 stale_created_from;
+  u32 stale_supersedes;
+} tix_ref_counts_t;
+
+tix_err_t tix_db_count_refs(tix_db_t *db, tix_ref_counts_t *counts);

@@ -59,7 +59,7 @@ tix_err_t tix_validate_history(tix_db_t *db, const char *plan_path,
     sqlite3_finalize(stmt);
   }
 
-  /* 2. dep references must exist (orphan dependencies) */
+  /* 2. dep references - three-state: resolved, stale, broken */
   const char *sql_deps =
     "SELECT d.ticket_id, d.dep_id FROM ticket_deps d "
     "LEFT JOIN tickets t ON d.dep_id = t.id "
@@ -70,8 +70,16 @@ tix_err_t tix_validate_history(tix_db_t *db, const char *plan_path,
       const char *tid = (const char *)sqlite3_column_text(stmt, 0);
       const char *did = (const char *)sqlite3_column_text(stmt, 1);
       if (tid != NULL && did != NULL) {
-        add_error(result, "task %s depends on %s which does not exist",
-                  tid, did);
+        tix_ref_state_e state = tix_db_resolve_ref(db, did);
+        if (state == TIX_REF_BROKEN) {
+          add_error(result,
+                    "task %s dep %s: broken (not found, run tix sync)",
+                    tid, did);
+        } else {
+          add_warning(result,
+                      "task %s dep %s: stale (accepted/resolved)",
+                      tid, did);
+        }
       }
     }
     sqlite3_finalize(stmt);
@@ -94,7 +102,7 @@ tix_err_t tix_validate_history(tix_db_t *db, const char *plan_path,
     sqlite3_finalize(stmt);
   }
 
-  /* 4. parent references must exist */
+  /* 4. parent references - three-state */
   const char *sql_parent =
     "SELECT t.id, t.parent FROM tickets t "
     "WHERE t.parent IS NOT NULL AND t.parent != '' "
@@ -105,16 +113,23 @@ tix_err_t tix_validate_history(tix_db_t *db, const char *plan_path,
       const char *tid = (const char *)sqlite3_column_text(stmt, 0);
       const char *pid = (const char *)sqlite3_column_text(stmt, 1);
       if (tid != NULL && pid != NULL) {
-        add_error(result,
-                  "task %s has parent %s which does not exist", tid, pid);
+        tix_ref_state_e state = tix_db_resolve_ref(db, pid);
+        if (state == TIX_REF_BROKEN) {
+          add_error(result,
+                    "task %s parent %s: broken (not found)", tid, pid);
+        } else {
+          add_warning(result,
+                      "task %s parent %s: stale (accepted/resolved)",
+                      tid, pid);
+        }
       }
     }
     sqlite3_finalize(stmt);
   }
 
-  /* 5. created_from references must exist */
+  /* 5. created_from references - three-state with denormalized awareness */
   const char *sql_cf =
-    "SELECT t.id, t.created_from FROM tickets t "
+    "SELECT t.id, t.created_from, t.created_from_name FROM tickets t "
     "WHERE t.created_from IS NOT NULL AND t.created_from != '' "
     "AND NOT EXISTS (SELECT 1 FROM tickets c WHERE c.id = t.created_from)";
   rc = sqlite3_prepare_v2(db->handle, sql_cf, -1, &stmt, NULL);
@@ -122,18 +137,32 @@ tix_err_t tix_validate_history(tix_db_t *db, const char *plan_path,
     while (sqlite3_step(stmt) == SQLITE_ROW) {
       const char *tid = (const char *)sqlite3_column_text(stmt, 0);
       const char *cid = (const char *)sqlite3_column_text(stmt, 1);
+      const char *cfn = (const char *)sqlite3_column_text(stmt, 2);
       if (tid != NULL && cid != NULL) {
-        add_error(result,
-                  "task %s has created_from %s which does not exist",
-                  tid, cid);
+        tix_ref_state_e state = tix_db_resolve_ref(db, cid);
+        if (state == TIX_REF_BROKEN) {
+          if (cfn != NULL && cfn[0] != '\0') {
+            add_warning(result,
+                        "task %s created_from %s: broken (denormalized name preserved)",
+                        tid, cid);
+          } else {
+            add_warning(result,
+                        "task %s created_from %s: broken (context lost, run tix sync)",
+                        tid, cid);
+          }
+        } else {
+          add_warning(result,
+                      "task %s created_from %s: stale (accepted/resolved)",
+                      tid, cid);
+        }
       }
     }
     sqlite3_finalize(stmt);
   }
 
-  /* 6. supersedes references must exist */
+  /* 6. supersedes references - three-state with denormalized awareness */
   const char *sql_ss =
-    "SELECT t.id, t.supersedes FROM tickets t "
+    "SELECT t.id, t.supersedes, t.supersedes_name FROM tickets t "
     "WHERE t.supersedes IS NOT NULL AND t.supersedes != '' "
     "AND NOT EXISTS (SELECT 1 FROM tickets s WHERE s.id = t.supersedes)";
   rc = sqlite3_prepare_v2(db->handle, sql_ss, -1, &stmt, NULL);
@@ -141,9 +170,24 @@ tix_err_t tix_validate_history(tix_db_t *db, const char *plan_path,
     while (sqlite3_step(stmt) == SQLITE_ROW) {
       const char *tid = (const char *)sqlite3_column_text(stmt, 0);
       const char *sid = (const char *)sqlite3_column_text(stmt, 1);
+      const char *ssn = (const char *)sqlite3_column_text(stmt, 2);
       if (tid != NULL && sid != NULL) {
-        add_error(result,
-                  "task %s supersedes %s which does not exist", tid, sid);
+        tix_ref_state_e state = tix_db_resolve_ref(db, sid);
+        if (state == TIX_REF_BROKEN) {
+          if (ssn != NULL && ssn[0] != '\0') {
+            add_warning(result,
+                        "task %s supersedes %s: broken (denormalized name preserved)",
+                        tid, sid);
+          } else {
+            add_warning(result,
+                        "task %s supersedes %s: broken (context lost, run tix sync)",
+                        tid, sid);
+          }
+        } else {
+          add_warning(result,
+                      "task %s supersedes %s: stale (accepted/resolved)",
+                      tid, sid);
+        }
       }
     }
     sqlite3_finalize(stmt);

@@ -295,6 +295,21 @@ sz tix_json_write_ticket(const void *vticket, char *buf, sz buf_len) {
   if (t->kill_reason[0] != '\0') {
     TIX_BUF_PRINTF(p, end, 0, ",\"kill_reason\":\"%s\"", t->kill_reason);
   }
+  if (t->created_from_name[0] != '\0') {
+    char esc_cfn[TIX_MAX_NAME_LEN * 2];
+    tix_json_escape(t->created_from_name, esc_cfn, sizeof(esc_cfn));
+    TIX_BUF_PRINTF(p, end, 0, ",\"created_from_name\":\"%s\"", esc_cfn);
+  }
+  if (t->supersedes_name[0] != '\0') {
+    char esc_ssn[TIX_MAX_NAME_LEN * 2];
+    tix_json_escape(t->supersedes_name, esc_ssn, sizeof(esc_ssn));
+    TIX_BUF_PRINTF(p, end, 0, ",\"supersedes_name\":\"%s\"", esc_ssn);
+  }
+  if (t->supersedes_reason[0] != '\0') {
+    char esc_ssr[TIX_MAX_KEYWORD_LEN * 2];
+    tix_json_escape(t->supersedes_reason, esc_ssr, sizeof(esc_ssr));
+    TIX_BUF_PRINTF(p, end, 0, ",\"supersedes_reason\":\"%s\"", esc_ssr);
+  }
   if (t->priority != TIX_PRIORITY_NONE) {
     TIX_BUF_PRINTF(p, end, 0, ",\"priority\":\"%s\"",
                    tix_priority_str(t->priority));

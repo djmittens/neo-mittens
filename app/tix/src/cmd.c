@@ -77,14 +77,32 @@ tix_err_t tix_ctx_close(tix_ctx_t *ctx) {
 tix_err_t tix_ctx_ensure_cache(tix_ctx_t *ctx) {
   if (ctx == NULL) { return TIX_ERR_INVALID_ARG; }
 
-  int stale = 0;
-  tix_err_t err = tix_db_is_stale(&ctx->db, &stale);
-  if (err != TIX_OK) { return err; }
+  /* check if plan.jsonl has changed since last replay (mtime-based) */
+  struct stat st;
+  if (stat(ctx->plan_path, &st) != 0) {
+    /* file doesn't exist yet - nothing to replay */
+    return TIX_OK;
+  }
 
-  if (stale) {
-    TIX_DEBUG("cache is stale, rebuilding from %s", ctx->plan_path);
-    err = tix_db_rebuild_from_jsonl(&ctx->db, ctx->plan_path);
+  char mtime_str[32];
+  snprintf(mtime_str, sizeof(mtime_str), "%ld", (long)st.st_mtime);
+
+  char cached_mtime[32];
+  tix_db_get_meta(&ctx->db, "plan_mtime", cached_mtime, sizeof(cached_mtime));
+
+  char size_str[32];
+  snprintf(size_str, sizeof(size_str), "%ld", (long)st.st_size);
+
+  char cached_size[32];
+  tix_db_get_meta(&ctx->db, "plan_size", cached_size, sizeof(cached_size));
+
+  if (strcmp(mtime_str, cached_mtime) != 0 ||
+      strcmp(size_str, cached_size) != 0) {
+    TIX_DEBUG("plan.jsonl changed, replaying from %s", ctx->plan_path);
+    tix_err_t err = tix_db_replay_jsonl_file(&ctx->db, ctx->plan_path);
     if (err != TIX_OK) { return err; }
+    tix_db_set_meta(&ctx->db, "plan_mtime", mtime_str);
+    tix_db_set_meta(&ctx->db, "plan_size", size_str);
   }
 
   return TIX_OK;

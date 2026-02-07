@@ -8,7 +8,7 @@
 /* Reject shell metacharacters to prevent command injection via popen.
  * Allow: alphanumeric, space, /, ., -, _, :, @, =, +, ~, comma
  * Reject: ", $, `, \, !, (, ), ;, |, &, >, <, ', newline, etc. */
-static int is_shell_safe(const char *s) {
+int tix_git_is_shell_safe(const char *s) {
   for (; *s != '\0'; s++) {
     unsigned char c = (unsigned char)*s;
     if (c < 0x20 && c != '\t') { return 0; }  /* control chars */
@@ -86,7 +86,7 @@ tix_err_t tix_git_is_clean(int *is_clean) {
 
 tix_err_t tix_git_add(const char *file) {
   if (file == NULL) { return TIX_ERR_INVALID_ARG; }
-  if (!is_shell_safe(file)) {
+  if (!tix_git_is_shell_safe(file)) {
     TIX_ERROR("git add: path contains unsafe characters: %s", file);
     return TIX_ERR_INVALID_ARG;
   }
@@ -112,7 +112,7 @@ tix_err_t tix_git_commit(const char *message, const char *file) {
     if (err != TIX_OK) { return err; }
   }
 
-  if (!is_shell_safe(message)) {
+  if (!tix_git_is_shell_safe(message)) {
     TIX_ERROR("git commit: message contains unsafe characters%s", "");
     return TIX_ERR_INVALID_ARG;
   }
@@ -148,7 +148,7 @@ tix_err_t tix_git_log_file(const char *file, tix_git_log_entry_t *entries,
     return TIX_ERR_INVALID_ARG;
   }
 
-  if (!is_shell_safe(file)) {
+  if (!tix_git_is_shell_safe(file)) {
     TIX_ERROR("git log: path contains unsafe characters: %s", file);
     return TIX_ERR_INVALID_ARG;
   }

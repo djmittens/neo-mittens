@@ -182,7 +182,9 @@ static void test_validate_orphan_created_from(TIX_TEST_ARGS()) {
   tix_validation_result_t result;
   tix_err_t err = tix_validate_history(&db, plan_path, &result);
   ASSERT_OK(err);
-  ASSERT_EQ(result.valid, 0);
+  /* orphan created_from is now a warning, not an error */
+  ASSERT_EQ(result.valid, 1);
+  ASSERT_GT(result.warning_count, 0);
 
   char buf[4096];
   tix_validate_print(&result, buf, sizeof(buf));
@@ -222,7 +224,9 @@ static void test_validate_orphan_supersedes(TIX_TEST_ARGS()) {
   tix_validation_result_t result;
   tix_err_t err = tix_validate_history(&db, plan_path, &result);
   ASSERT_OK(err);
-  ASSERT_EQ(result.valid, 0);
+  /* orphan supersedes is now a warning, not an error */
+  ASSERT_EQ(result.valid, 1);
+  ASSERT_GT(result.warning_count, 0);
 
   char buf[4096];
   tix_validate_print(&result, buf, sizeof(buf));

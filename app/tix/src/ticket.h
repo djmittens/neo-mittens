@@ -39,6 +39,10 @@ typedef struct {
   char deps[TIX_MAX_DEPS][TIX_MAX_ID_LEN];
   u32 dep_count;
   char kill_reason[TIX_MAX_KEYWORD_LEN];
+  /* denormalized reference context (populated at compact time) */
+  char created_from_name[TIX_MAX_NAME_LEN];
+  char supersedes_name[TIX_MAX_NAME_LEN];
+  char supersedes_reason[TIX_MAX_KEYWORD_LEN];
   i64 created_at;
   i64 updated_at;
 } tix_ticket_t;

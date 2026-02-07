@@ -61,5 +61,24 @@ tix_err_t tix_cmd_status(tix_ctx_t *ctx, int argc, char **argv) {
     }
   }
 
+  /* show broken reference summary */
+  tix_ref_counts_t refs;
+  if (tix_db_count_refs(&ctx->db, &refs) == TIX_OK) {
+    u32 total_broken = refs.broken_deps + refs.broken_parents +
+                       refs.broken_created_from + refs.broken_supersedes;
+    u32 total_stale = refs.stale_deps + refs.stale_parents +
+                      refs.stale_created_from + refs.stale_supersedes;
+    if (total_broken > 0 || total_stale > 0) {
+      printf("\nReferences:\n");
+      if (total_broken > 0) {
+        printf("  %u broken (run tix sync to search history)\n",
+               total_broken);
+      }
+      if (total_stale > 0) {
+        printf("  %u stale (target accepted/resolved)\n", total_stale);
+      }
+    }
+  }
+
   return TIX_OK;
 }
