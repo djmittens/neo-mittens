@@ -14,6 +14,30 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" >/dev/null 2>&1 && pwd -P)"
 
+# Resolve the active zshrc path - respects ZDOTDIR if set, otherwise ~/.zshrc
+resolve_zshrc_path() {
+  # Check ZDOTDIR first (set in ~/.zshenv for XDG-style setups)
+  if [ -n "${ZDOTDIR:-}" ] && [ -d "$ZDOTDIR" ]; then
+    printf '%s' "$ZDOTDIR/.zshrc"
+    return 0
+  fi
+  
+  # Check common XDG locations even if ZDOTDIR isn't set in current env
+  # (it might be set in .zshenv which bash doesn't read)
+  for xdg_path in "$HOME/.config/zsh" "$HOME/.zsh"; do
+    if [ -f "$xdg_path/.zshrc" ]; then
+      printf '%s' "$xdg_path/.zshrc"
+      return 0
+    fi
+  done
+  
+  # Default to standard location
+  printf '%s' "$HOME/.zshrc"
+}
+
+# Cache the resolved zshrc path for the entire script
+ZSHRC_PATH="$(resolve_zshrc_path)"
+
 NVIM_DIR="$HOME/.config/nvim"
 NVIM_LUA_DIR="$NVIM_DIR/lua"
 
@@ -261,10 +285,10 @@ install_tmux_plugins_if_possible() {
 }
 
 disable_omz_auto_title() {
-  local zshrc_file="$HOME/.zshrc"
+  local zshrc_file="$ZSHRC_PATH"
   
   if [ ! -f "$zshrc_file" ]; then
-    echo "SKIP: ~/.zshrc not found, cannot disable ohmyzsh auto-title"
+    echo "SKIP: $zshrc_file not found, cannot disable ohmyzsh auto-title"
     return 0
   fi
 
@@ -293,7 +317,7 @@ disable_omz_auto_title() {
 }
 
 install_zsh_pane_title_block() {
-  local zshrc_file="$HOME/.zshrc"
+  local zshrc_file="$ZSHRC_PATH"
   local script_path="$SCRIPT_DIR/powerplant/set_tmux_pane_title.sh"
 
   ensure_dir "$(dirname -- "$zshrc_file")"
@@ -329,7 +353,7 @@ ${end}"
 }
 
 install_ssh_themed_alias() {
-  local zshrc_file="$HOME/.zshrc"
+  local zshrc_file="$ZSHRC_PATH"
   local ssh_themed="$SCRIPT_DIR/powerplant/ssh-themed"
 
   ensure_dir "$(dirname -- "$zshrc_file")"
@@ -374,13 +398,13 @@ append_require_if_missing "$NVIM_DIR/init.lua"
 
 # 4) Add powerplant to PATH via managed block
 install_path_block "$HOME/.profile" "$SCRIPT_DIR/powerplant"
-install_path_block "$HOME/.zshrc" "$SCRIPT_DIR/powerplant"
+install_path_block "$ZSHRC_PATH" "$SCRIPT_DIR/powerplant"
 
 # 4b) Add repo root and app/ to PYTHONPATH for ralph package imports
 install_pythonpath_block "$HOME/.profile" "$SCRIPT_DIR"
-install_pythonpath_block "$HOME/.zshrc" "$SCRIPT_DIR"
+install_pythonpath_block "$ZSHRC_PATH" "$SCRIPT_DIR"
 install_pythonpath_block "$HOME/.profile" "$SCRIPT_DIR/app"
-install_pythonpath_block "$HOME/.zshrc" "$SCRIPT_DIR/app"
+install_pythonpath_block "$ZSHRC_PATH" "$SCRIPT_DIR/app"
 
 # 5) Disable ohmyzsh auto-title to allow custom tmux pane titles
 disable_omz_auto_title
@@ -476,7 +500,7 @@ ${end}"
 }
 
 install_ralph_completion_zsh() {
-  local zshrc="$HOME/.zshrc"
+  local zshrc="$ZSHRC_PATH"
   local completion_file="$SCRIPT_DIR/powerplant/ralph-completion.zsh"
   
   if [ ! -f "$completion_file" ]; then
