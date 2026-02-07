@@ -5,13 +5,13 @@
 #include <stdio.h>
 #include <string.h>
 
-static tix_err_t report_progress(tix_ctx_t *ctx) {
-  tix_report_t report;
-  tix_err_t err = tix_report_generate(&ctx->db, &report);
+static tix_err_t report_summary(tix_ctx_t *ctx) {
+  tix_summary_report_t report;
+  tix_err_t err = tix_report_summary(&ctx->db, &report);
   if (err != TIX_OK) { return err; }
 
   char buf[TIX_MAX_LINE_LEN * 2];
-  err = tix_report_print(&report, buf, sizeof(buf));
+  err = tix_report_summary_print(&report, buf, sizeof(buf));
   if (err != TIX_OK) { return err; }
 
   printf("%s", buf);
@@ -61,9 +61,9 @@ tix_err_t tix_cmd_report(tix_ctx_t *ctx, int argc, char **argv) {
   tix_err_t err = tix_ctx_ensure_cache(ctx);
   if (err != TIX_OK) { return err; }
 
-  /* no subcommand = progress report (backward compatible) */
+  /* no subcommand = executive summary */
   if (argc < 1) {
-    return report_progress(ctx);
+    return report_summary(ctx);
   }
 
   const char *sub = argv[0];
@@ -79,9 +79,9 @@ tix_err_t tix_cmd_report(tix_ctx_t *ctx, int argc, char **argv) {
 
   fprintf(stderr,
           "usage: tix report [velocity|actors|models]\n"
-          "  (no args)  Progress summary\n"
-          "  velocity   Throughput, cost, and cycle time metrics\n"
-          "  actors     Per-author breakdown\n"
-          "  models     Per-model breakdown\n");
+          "  (no args)  Executive summary (tasks, cost, top model/author)\n"
+          "  velocity   Detailed throughput, cost, and cycle time metrics\n"
+          "  actors     Per-author breakdown table\n"
+          "  models     Per-model breakdown table\n");
   return TIX_ERR_INVALID_ARG;
 }

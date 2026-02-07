@@ -479,15 +479,205 @@ static void test_models_with_data(TIX_TEST_ARGS()) {
   TIX_PASS();
 }
 
+/* ---- Summary report tests ---- */
+
+static void test_summary_empty(TIX_TEST_ARGS()) {
+  TIX_TEST();
+
+  char tmpdir[256], db_path[512];
+  if (setup(tmpdir, sizeof(tmpdir), db_path, sizeof(db_path)) != 0) {
+    TIX_FAIL_MSG("setup failed");
+    return;
+  }
+
+  tix_db_t db;
+  tix_db_open(&db, db_path);
+  tix_db_init_schema(&db);
+
+  tix_summary_report_t report;
+  tix_err_t err = tix_report_summary(&db, &report);
+  ASSERT_OK(err);
+  ASSERT_EQ(report.total_tasks, 0);
+  ASSERT_EQ(report.completed, 0);
+  ASSERT_TRUE(fabs(report.total_cost) < 0.0001);
+  ASSERT_EQ(report.top_model[0], '\0');
+  ASSERT_EQ(report.top_author[0], '\0');
+
+  char buf[8192];
+  err = tix_report_summary_print(&report, buf, sizeof(buf));
+  ASSERT_OK(err);
+  ASSERT_STR_CONTAINS(buf, "tix report");
+  ASSERT_STR_CONTAINS(buf, "Tasks: 0 total");
+
+  tix_db_close(&db);
+  teardown(tmpdir);
+  TIX_PASS();
+}
+
+static void test_summary_with_data(TIX_TEST_ARGS()) {
+  TIX_TEST();
+
+  char tmpdir[256], db_path[512];
+  if (setup(tmpdir, sizeof(tmpdir), db_path, sizeof(db_path)) != 0) {
+    TIX_FAIL_MSG("setup failed");
+    return;
+  }
+
+  tix_db_t db;
+  tix_db_open(&db, db_path);
+  tix_db_init_schema(&db);
+
+  /* 2 done tasks by Alice using model-a */
+  insert_done_task(&db, "t-sum001", "Alice", "model-a",
+                   0.50, 10000, 2000, 3, 1, 0, 1000, 1100);
+  insert_done_task(&db, "t-sum002", "Alice", "model-a",
+                   0.75, 15000, 3000, 5, 0, 1, 1000, 1200);
+
+  /* 1 done task by Bob using model-b */
+  insert_done_task(&db, "t-sum003", "Bob", "model-b",
+                   2.00, 50000, 10000, 8, 0, 0, 1000, 1300);
+
+  /* 2 pending tasks */
+  for (int i = 0; i < 2; i++) {
+    tix_ticket_t t;
+    tix_ticket_init(&t);
+    t.type = TIX_TICKET_TASK;
+    t.status = TIX_STATUS_PENDING;
+    char id[TIX_MAX_ID_LEN];
+    snprintf(id, sizeof(id), "t-sum00%d", i + 4);
+    snprintf(t.id, sizeof(t.id), "%s", id);
+    tix_ticket_set_name(&t, "pending task");
+    snprintf(t.author, sizeof(t.author), "Bob");
+    tix_db_upsert_ticket(&db, &t);
+  }
+
+  /* 1 open issue */
+  {
+    tix_ticket_t t;
+    tix_ticket_init(&t);
+    t.type = TIX_TICKET_ISSUE;
+    tix_ticket_gen_id(TIX_TICKET_ISSUE, t.id, sizeof(t.id));
+    tix_ticket_set_name(&t, "test issue");
+    tix_db_upsert_ticket(&db, &t);
+  }
+
+  tix_summary_report_t report;
+  tix_err_t err = tix_report_summary(&db, &report);
+  ASSERT_OK(err);
+
+  /* counts */
+  ASSERT_EQ(report.total_tasks, 5);
+  ASSERT_EQ(report.done_tasks, 3);
+  ASSERT_EQ(report.pending_tasks, 2);
+  ASSERT_EQ(report.total_issues, 1);
+
+  /* velocity */
+  ASSERT_EQ(report.completed, 3);
+  ASSERT_TRUE(fabs(report.total_cost - 3.25) < 0.01);
+  ASSERT_TRUE(fabs(report.avg_cost - (3.25 / 3.0)) < 0.01);
+  ASSERT_EQ(report.total_tokens_in, 75000);
+  ASSERT_EQ(report.total_tokens_out, 15000);
+  ASSERT_EQ(report.total_retries, 1);
+  ASSERT_EQ(report.total_kills, 1);
+
+  /* top model: model-b has cost 2.00, model-a has cost 1.25 */
+  ASSERT_STR_EQ(report.top_model, "model-b");
+  ASSERT_EQ(report.top_model_tasks, 1);
+  ASSERT_TRUE(fabs(report.top_model_cost - 2.00) < 0.01);
+
+  /* top author: Bob has 3 total (1 done + 2 pending), Alice has 2 total */
+  ASSERT_STR_EQ(report.top_author, "Bob");
+  ASSERT_EQ(report.top_author_total, 3);
+  ASSERT_EQ(report.top_author_done, 1);
+
+  /* print output */
+  char buf[8192];
+  err = tix_report_summary_print(&report, buf, sizeof(buf));
+  ASSERT_OK(err);
+  ASSERT_STR_CONTAINS(buf, "tix report");
+  ASSERT_STR_CONTAINS(buf, "Tasks: 5 total");
+  ASSERT_STR_CONTAINS(buf, "done (60%)");
+  ASSERT_STR_CONTAINS(buf, "2 pending");
+  ASSERT_STR_CONTAINS(buf, "Issues: 1 open");
+  ASSERT_STR_CONTAINS(buf, "Cost:");
+  ASSERT_STR_CONTAINS(buf, "Tokens:");
+  ASSERT_STR_CONTAINS(buf, "Retries: 1");
+  ASSERT_STR_CONTAINS(buf, "Kills: 1");
+  ASSERT_STR_CONTAINS(buf, "Top model:");
+  ASSERT_STR_CONTAINS(buf, "model-b");
+  ASSERT_STR_CONTAINS(buf, "Top author:");
+  ASSERT_STR_CONTAINS(buf, "Bob");
+
+  tix_db_close(&db);
+  teardown(tmpdir);
+  TIX_PASS();
+}
+
+static void test_summary_no_telemetry(TIX_TEST_ARGS()) {
+  TIX_TEST();
+
+  char tmpdir[256], db_path[512];
+  if (setup(tmpdir, sizeof(tmpdir), db_path, sizeof(db_path)) != 0) {
+    TIX_FAIL_MSG("setup failed");
+    return;
+  }
+
+  tix_db_t db;
+  tix_db_open(&db, db_path);
+  tix_db_init_schema(&db);
+
+  /* done tasks with NO telemetry (no cost, no tokens, no model) */
+  for (int i = 0; i < 3; i++) {
+    tix_ticket_t t;
+    tix_ticket_init(&t);
+    t.type = TIX_TICKET_TASK;
+    t.status = TIX_STATUS_DONE;
+    char id[TIX_MAX_ID_LEN];
+    snprintf(id, sizeof(id), "t-nt%04d", i + 1);
+    snprintf(t.id, sizeof(t.id), "%s", id);
+    tix_ticket_set_name(&t, "no telemetry task");
+    tix_db_upsert_ticket(&db, &t);
+  }
+
+  tix_summary_report_t report;
+  tix_err_t err = tix_report_summary(&db, &report);
+  ASSERT_OK(err);
+
+  ASSERT_EQ(report.total_tasks, 3);
+  ASSERT_EQ(report.done_tasks, 3);
+  ASSERT_EQ(report.completed, 3);
+  /* no cost or tokens */
+  ASSERT_TRUE(fabs(report.total_cost) < 0.0001);
+  ASSERT_EQ(report.total_tokens_in, 0);
+  ASSERT_EQ(report.top_model[0], '\0');
+  ASSERT_EQ(report.top_author[0], '\0');
+
+  /* print should NOT have cost/tokens section (since both are 0) */
+  char buf[8192];
+  err = tix_report_summary_print(&report, buf, sizeof(buf));
+  ASSERT_OK(err);
+  ASSERT_STR_CONTAINS(buf, "3 done (100%)");
+  /* should NOT contain cost or token lines */
+  ASSERT_TRUE(strstr(buf, "Cost:") == NULL);
+  ASSERT_TRUE(strstr(buf, "Tokens:") == NULL);
+  ASSERT_TRUE(strstr(buf, "Top model:") == NULL);
+
+  tix_db_close(&db);
+  teardown(tmpdir);
+  TIX_PASS();
+}
+
 /* ---- Null argument tests ---- */
 
 static void test_report_null_args(TIX_TEST_ARGS()) {
   TIX_TEST();
 
+  ASSERT_ERR(tix_report_summary(NULL, NULL));
   ASSERT_ERR(tix_report_velocity(NULL, NULL));
   ASSERT_ERR(tix_report_actors(NULL, NULL));
   ASSERT_ERR(tix_report_models(NULL, NULL));
 
+  ASSERT_ERR(tix_report_summary_print(NULL, NULL, 0));
   ASSERT_ERR(tix_report_velocity_print(NULL, NULL, 0));
   ASSERT_ERR(tix_report_actors_print(NULL, NULL, 0));
   ASSERT_ERR(tix_report_models_print(NULL, NULL, 0));
@@ -499,9 +689,14 @@ int main(void) {
   tix_test_suite_t suite;
   tix_testsuite_init(&suite, __FILE__);
 
-  /* progress (existing) */
+  /* progress (existing, used by status) */
   tix_testsuite_add(&suite, "report_empty", test_report_empty);
   tix_testsuite_add(&suite, "report_with_data", test_report_with_data);
+
+  /* summary (executive overview, bare 'tix report') */
+  tix_testsuite_add(&suite, "summary_empty", test_summary_empty);
+  tix_testsuite_add(&suite, "summary_with_data", test_summary_with_data);
+  tix_testsuite_add(&suite, "summary_no_telemetry", test_summary_no_telemetry);
 
   /* velocity */
   tix_testsuite_add(&suite, "velocity_empty", test_velocity_empty);

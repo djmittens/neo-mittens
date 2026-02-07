@@ -55,6 +55,22 @@ class _MockTix:
         self.rejected.append((task_id, reason))
         return {"id": task_id, "status": "p"}
 
+    def query_full(self) -> dict:
+        """Return full state dict."""
+        return {
+            "tasks": {
+                "pending": self._tasks,
+                "done": self._done,
+            },
+            "issues": self._issues,
+        }
+
+    def issue_add(self, desc: str) -> dict:
+        """Record an issue addition."""
+        issue_id = f"i-auto-{len(self._issues)}"
+        self._issues.append({"id": issue_id, "desc": desc})
+        return {"id": issue_id}
+
     def issue_done_ids(self, ids: list[str]) -> dict:
         """Record issue resolution and remove from internal list."""
         self.resolved_ids.append(ids)
@@ -407,3 +423,93 @@ class TestLoopFingerprint:
         fp_build = sm._loop_fingerprint(Stage.BUILD)
         fp_verify = sm._loop_fingerprint(Stage.VERIFY)
         assert fp_build != fp_verify
+
+
+class TestDecomposeDepthGuard:
+    """Tests for decompose depth enforcement in _handle_task_failure."""
+
+    def test_allows_decompose_below_max_depth(self, tmp_path: Path):
+        """Task at depth 0 with max_depth 3 should transition to DECOMPOSE."""
+        plan_path = tmp_path / "ralph" / "plan.jsonl"
+        plan_path.parent.mkdir(parents=True)
+
+        mock_tix = _MockTix(
+            tasks=[{"id": "t-1", "decompose_depth": 0}],
+        )
+        _write_orch_state(plan_path, stage="BUILD")
+
+        config = GlobalConfig()
+        config.max_decompose_depth = 3
+        sm, _ = _make_state_machine(plan_path, config=config, tix=mock_tix)
+
+        result = StageResult(
+            stage=Stage.BUILD,
+            outcome=StageOutcome.FAILURE,
+            task_id="t-1",
+            kill_reason="timeout",
+        )
+        sm._handle_task_failure(result)
+
+        state = load_state(plan_path)
+        assert state.stage == "DECOMPOSE"
+        assert state.decompose_target == "t-1"
+
+    def test_blocks_decompose_at_max_depth(self, tmp_path: Path):
+        """Task at max depth should NOT decompose — creates issue instead."""
+        plan_path = tmp_path / "ralph" / "plan.jsonl"
+        plan_path.parent.mkdir(parents=True)
+
+        mock_tix = _MockTix(
+            tasks=[{"id": "t-deep", "decompose_depth": 3}],
+        )
+        _write_orch_state(plan_path, stage="BUILD")
+
+        config = GlobalConfig()
+        config.max_decompose_depth = 3
+        sm, _ = _make_state_machine(plan_path, config=config, tix=mock_tix)
+
+        result = StageResult(
+            stage=Stage.BUILD,
+            outcome=StageOutcome.FAILURE,
+            task_id="t-deep",
+            kill_reason="context_limit",
+        )
+        sm._handle_task_failure(result)
+
+        # Should stay in BUILD, not transition to DECOMPOSE
+        state = load_state(plan_path)
+        assert state.stage == "BUILD"
+        assert state.decompose_target is None
+
+        # Should have created an issue
+        assert len(mock_tix._issues) == 1
+        assert "t-deep" in mock_tix._issues[0]["desc"]
+        assert "context_limit" in mock_tix._issues[0]["desc"]
+
+        # Should have rejected the task
+        assert len(mock_tix.rejected) == 1
+        assert mock_tix.rejected[0][0] == "t-deep"
+
+    def test_get_task_depth_returns_zero_for_unknown(self, tmp_path: Path):
+        """Unknown task ID returns depth 0."""
+        plan_path = tmp_path / "ralph" / "plan.jsonl"
+        plan_path.parent.mkdir(parents=True)
+        _write_orch_state(plan_path, stage="BUILD")
+
+        mock_tix = _MockTix(tasks=[{"id": "t-1"}])
+        sm, _ = _make_state_machine(plan_path, tix=mock_tix)
+
+        assert sm._get_task_depth("t-nonexistent") == 0
+
+    def test_get_task_depth_reads_from_tix(self, tmp_path: Path):
+        """Depth is read from the task's decompose_depth field."""
+        plan_path = tmp_path / "ralph" / "plan.jsonl"
+        plan_path.parent.mkdir(parents=True)
+        _write_orch_state(plan_path, stage="BUILD")
+
+        mock_tix = _MockTix(
+            tasks=[{"id": "t-1", "decompose_depth": 2}],
+        )
+        sm, _ = _make_state_machine(plan_path, tix=mock_tix)
+
+        assert sm._get_task_depth("t-1") == 2

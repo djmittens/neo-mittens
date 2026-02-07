@@ -33,10 +33,10 @@ from ..prompts import (
     find_project_rules,
     build_prompt_with_rules,
     load_and_inject,
-    build_build_context_tix,
-    build_verify_context_tix,
-    build_investigate_context_tix,
-    build_decompose_context_tix,
+    build_build_context,
+    build_verify_context,
+    build_investigate_context,
+    build_decompose_context,
 )
 from ..reconcile import (
     reconcile_build,
@@ -93,6 +93,7 @@ def _build_stage_prompt_tix(
     state: RalphState,
     ralph_dir: Path,
     project_rules: Optional[str] = None,
+    config: Optional[GlobalConfig] = None,
 ) -> Tuple[Optional[str], Optional[dict]]:
     """Build a prompt for a stage using tix for ticket data.
     
@@ -104,20 +105,30 @@ def _build_stage_prompt_tix(
     stage_name = stage.name.lower()
     spec_name = state.spec or ""
     meta: dict = {}
+
+    # Read spec file content for prompt injection
+    spec_content = ""
+    if spec_name:
+        spec_path = ralph_dir / "specs" / spec_name
+        if spec_path.exists():
+            try:
+                spec_content = spec_path.read_text()
+            except OSError:
+                pass
     
     if stage == Stage.BUILD:
         tasks = tix.query_tasks()
         if not tasks:
             return None, None
         task = tasks[0]
-        context = build_build_context_tix(task, spec_name)
+        context = build_build_context(task, spec_name, spec_content)
         meta["task_id"] = task.get("id", "")
     elif stage == Stage.VERIFY:
         full = tix.query_full()
         done = full.get("tasks", {}).get("done", [])
         if not done:
             return None, None
-        context = build_verify_context_tix(done, spec_name)
+        context = build_verify_context(done, spec_name, spec_content)
     elif stage == Stage.INVESTIGATE:
         issues = tix.query_issues()
         if not issues:
@@ -129,7 +140,7 @@ def _build_stage_prompt_tix(
             meta["batch_issue_ids"] = batch_ids
         else:
             meta["batch_issue_ids"] = [i.get("id", "") for i in issues]
-        context = build_investigate_context_tix(issues, spec_name)
+        context = build_investigate_context(issues, spec_name, spec_content)
     elif stage == Stage.DECOMPOSE:
         # Find killed task from state's decompose_target
         target_id = state.decompose_target
@@ -143,8 +154,12 @@ def _build_stage_prompt_tix(
         task = next((t for t in all_tasks if t.get("id") == target_id), None)
         if not task:
             return None, None
-        context = build_decompose_context_tix(task, spec_name)
+        max_depth = getattr(config, "max_decompose_depth", 3) if config else 3
+        context = build_decompose_context(
+            task, spec_name, spec_content, max_depth
+        )
         meta["task_id"] = target_id
+        meta["parent_depth"] = task.get("decompose_depth", 0)
     else:
         return None, None
     
@@ -187,7 +202,8 @@ def _reconcile_stage(
         )
     elif stage == Stage.DECOMPOSE:
         return reconcile_decompose(
-            tix, agent_output, meta.get("task_id", "")
+            tix, agent_output, meta.get("task_id", ""),
+            parent_depth=meta.get("parent_depth", 0),
         )
     else:
         return ReconcileResult(ok=False, errors=[f"Unknown stage: {stage}"])
@@ -272,7 +288,7 @@ def _run_stage(
         return _make_result(stage, StageOutcome.SKIP)
 
     prompt, meta = _build_stage_prompt_tix(
-        stage, tix, state, ralph_dir, project_rules
+        stage, tix, state, ralph_dir, project_rules, config
     )
     if not prompt or meta is None:
         return _make_result(
@@ -437,6 +453,86 @@ def _print_construct_header(
     print(f"{Colors.BLUE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━{Colors.NC}")
 
 
+def _run_acceptance_precheck(
+    tix: Tix,
+    repo_root: Path,
+    timeout_seconds: int = 60,
+) -> int:
+    """Run acceptance criteria for done tasks before spawning VERIFY agent.
+
+    For each done task whose `accept` field looks like a shell command,
+    run it in a subprocess. If it exits 0, auto-accept the task via tix.
+    Tasks without a runnable accept command are left for the agent.
+
+    Args:
+        tix: Tix instance.
+        repo_root: Repository root for subprocess cwd.
+        timeout_seconds: Max seconds per acceptance command.
+
+    Returns:
+        Number of tasks auto-accepted.
+    """
+    try:
+        done_tasks = tix.query_done_tasks()
+    except TixError:
+        return 0
+
+    accepted = 0
+    for task in done_tasks:
+        accept = task.get("accept", "").strip()
+        task_id = task.get("id", "")
+        if not accept or not task_id:
+            continue
+
+        # Heuristic: skip non-command acceptance criteria
+        # (e.g., "works correctly" is not runnable)
+        if not _looks_like_command(accept):
+            continue
+
+        try:
+            result = subprocess.run(
+                accept,
+                shell=True,
+                capture_output=True,
+                cwd=repo_root,
+                timeout=timeout_seconds,
+            )
+            if result.returncode == 0:
+                tix.task_accept(task_id)
+                print(f"  Pre-check: {task_id} auto-accepted")
+                accepted += 1
+        except (subprocess.TimeoutExpired, OSError):
+            pass  # Leave for agent
+
+    return accepted
+
+
+def _looks_like_command(text: str) -> bool:
+    """Heuristic: does this acceptance criteria look like a shell command?
+
+    Returns True if the text starts with a known command prefix or contains
+    shell-like patterns. Returns False for prose-like descriptions.
+    """
+    text = text.strip()
+    # Common command prefixes
+    cmd_prefixes = (
+        "make", "pytest", "python", "go ", "cargo", "npm ", "yarn ",
+        "grep ", "test ", "./", "bash ", "sh ", "echo ", "cat ",
+        "git ", "curl ", "gcc ", "g++", "clang",
+    )
+    first_line = text.split("\n")[0].strip()
+    lower = first_line.lower()
+
+    if any(lower.startswith(p) for p in cmd_prefixes):
+        return True
+
+    # Shell operators suggest a command
+    if any(op in first_line for op in ("|", "&&", ">>", " > ", " 2>")):
+        return True
+
+    return False
+
+
 def _create_stage_wrapper(
     repo_root: Path,
     ralph_dir: Path,
@@ -456,6 +552,21 @@ def _create_stage_wrapper(
         ctx_limit: int,
     ) -> StageResult:
         print(f"\n{Colors.CYAN}[{stage.name}]{Colors.NC}")
+
+        # Pre-check: auto-accept done tasks whose acceptance criteria pass
+        if stage == Stage.VERIFY:
+            accepted = _run_acceptance_precheck(tix_instance, repo_root)
+            if accepted > 0:
+                print(f"  Pre-check: {accepted} task(s) auto-accepted")
+                # Check if there are still done tasks needing agent review
+                try:
+                    remaining = tix_instance.query_done_tasks()
+                    if not remaining:
+                        print("  All done tasks passed pre-check — skipping agent")
+                        return _make_result(stage, StageOutcome.SUCCESS)
+                except TixError:
+                    pass
+
         return _run_stage(
             cfg, stage, st, met, timeout_ms,
             repo_root, ralph_dir, project_rules,

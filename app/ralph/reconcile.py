@@ -323,6 +323,7 @@ def reconcile_decompose(
     tix: Tix,
     agent_output: str,
     original_task_id: str,
+    parent_depth: int = 0,
 ) -> ReconcileResult:
     """Reconcile DECOMPOSE stage output.
 
@@ -334,12 +335,14 @@ def reconcile_decompose(
         ]
     }
 
-    Creates subtasks with parent link, then deletes original task.
+    Creates subtasks with parent link and incremented decompose_depth,
+    then deletes original task.
 
     Args:
         tix: Tix harness instance.
         agent_output: Full agent stdout.
         original_task_id: The task being decomposed.
+        parent_depth: Decompose depth of the parent task.
 
     Returns:
         ReconcileResult with subtasks added and original deleted.
@@ -358,9 +361,11 @@ def reconcile_decompose(
         result.ok = False
         return result
 
-    # Add each subtask with parent link
+    # Add each subtask with parent link and incremented depth
+    child_depth = parent_depth + 1
     for task_data in subtasks:
         task_data["parent"] = original_task_id
+        task_data["decompose_depth"] = child_depth
         _add_task(tix, task_data, result)
 
     # Delete original task (only if subtasks were added)

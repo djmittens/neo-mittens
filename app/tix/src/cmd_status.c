@@ -28,9 +28,22 @@ tix_err_t tix_cmd_status(tix_ctx_t *ctx, int argc, char **argv) {
   printf("Branch: %s (%s)\n", branch, head);
   printf("Main:   %s\n\n", ctx->config.main_branch);
 
-  char buf[TIX_MAX_LINE_LEN * 2];
-  err = tix_report_print(&report, buf, sizeof(buf));
-  if (err == TIX_OK) { printf("%s", buf); }
+  u32 completed = report.done_tasks + report.accepted_tasks;
+  int pct = (report.total_tasks > 0)
+              ? (int)(completed * 100 / report.total_tasks) : 0;
+  printf("Tasks: %u total, %u pending, %u done, %u accepted (%d%%)\n",
+         report.total_tasks, report.pending_tasks, report.done_tasks,
+         report.accepted_tasks, pct);
+
+  if (report.total_issues > 0) {
+    printf("Issues: %u open\n", report.total_issues);
+  }
+  if (report.total_notes > 0) {
+    printf("Notes: %u\n", report.total_notes);
+  }
+  if (report.blocked_count > 0) {
+    printf("Blocked: %u (waiting on dependencies)\n", report.blocked_count);
+  }
 
   /* show recent pending tasks */
   tix_ticket_t tasks[5];

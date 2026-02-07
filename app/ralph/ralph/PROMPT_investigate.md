@@ -12,6 +12,8 @@ Total: {{ISSUE_COUNT}} issues
 
 ## Spec: {{SPEC_FILE}}
 
+{{SPEC_CONTENT}}
+
 ## Instructions
 
 1. **Launch one subagent per issue** (Task tool) -- investigate all in parallel.

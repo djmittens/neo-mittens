@@ -3,7 +3,6 @@
 import pytest
 import json
 from pathlib import Path
-from unittest.mock import MagicMock
 
 from ralph.prompts import (
     load_prompt,
@@ -11,11 +10,11 @@ from ralph.prompts import (
     merge_prompts,
     find_project_rules,
     inject_context,
+    build_plan_context,
     build_build_context,
     build_verify_context,
     build_investigate_context,
     build_decompose_context,
-    build_plan_context,
     load_and_inject,
 )
 
@@ -326,143 +325,121 @@ class TestInjectContext:
 
 
 class TestBuildBuildContext:
-    """Tests for build_build_context function."""
+    """Tests for build_build_context (tix dict-based)."""
 
-    def test_creates_context_from_task(self):
-        task = MagicMock()
-        task.id = "t-123"
-        task.name = "Fix bug"
-        task.spec = "feature.md"
-        task.notes = "Fix the bug in module X"
-        task.accept = "pytest passes"
-        task.reject_reason = None
-        task.kill_reason = None
-        task.kill_log = None
-        task.deps = []
-        task.status = "p"
-        task.priority = "high"
-        task.parent = None
-        task.decompose_depth = 0
-        
-        context = build_build_context(task, "spec content here")
-        
+    def test_creates_context_from_task_dict(self):
+        task = {
+            "id": "t-123",
+            "name": "Fix bug",
+            "spec": "feature.md",
+            "notes": "Fix the bug in module X",
+            "accept": "pytest passes",
+            "reject": "",
+        }
+        context = build_build_context(task, "feature.md")
+
         assert context["task_id"] == "t-123"
         assert context["task_name"] == "Fix bug"
-        assert context["spec_content"] == "spec content here"
         assert context["is_retry"] == "false"
 
     def test_marks_retry_when_rejected(self):
-        task = MagicMock()
-        task.id = "t-123"
-        task.name = "Fix bug"
-        task.spec = "feature.md"
-        task.notes = "Notes"
-        task.accept = "Accept"
-        task.reject_reason = "Did not fix the root cause"
-        task.kill_reason = None
-        task.kill_log = None
-        task.deps = []
-        task.status = "p"
-        task.priority = None
-        task.parent = None
-        task.decompose_depth = 0
-        
+        task = {
+            "id": "t-123",
+            "name": "Fix bug",
+            "reject": "Did not fix the root cause",
+        }
         context = build_build_context(task)
-        
+
         assert context["is_retry"] == "true"
         assert context["task_reject"] == "Did not fix the root cause"
 
+    def test_includes_spec_content(self):
+        task = {"id": "t-1", "name": "Task"}
+        context = build_build_context(task, "s.md", "# My Spec\nDo things.")
+
+        assert context["spec_content"] == "# My Spec\nDo things."
+
+    def test_spec_content_defaults_empty(self):
+        task = {"id": "t-1", "name": "Task"}
+        context = build_build_context(task)
+
+        assert context["spec_content"] == ""
+
 
 class TestBuildVerifyContext:
-    """Tests for build_verify_context function."""
+    """Tests for build_verify_context (tix dict-based)."""
 
     def test_creates_context_from_done_tasks(self):
-        task1 = MagicMock()
-        task1.id = "t-1"
-        task1.name = "Task 1"
-        task1.spec = "spec.md"
-        task1.notes = "notes"
-        task1.accept = "pytest passes"
-        task1.deps = []
-        task1.status = "d"
-        task1.priority = None
-        task1.reject_reason = None
-        task1.kill_reason = None
-        task1.kill_log = None
-        task1.parent = None
-        task1.decompose_depth = 0
-        
-        task2 = MagicMock()
-        task2.id = "t-2"
-        task2.name = "Task 2"
-        task2.spec = "spec.md"
-        task2.notes = "notes"
-        task2.accept = "build passes"
-        task2.deps = []
-        task2.status = "d"
-        task2.priority = None
-        task2.reject_reason = None
-        task2.kill_reason = None
-        task2.kill_log = None
-        task2.parent = None
-        task2.decompose_depth = 0
-        
-        context = build_verify_context([task1, task2], "spec.md", "spec content")
-        
+        tasks = [
+            {"id": "t-1", "name": "Task 1"},
+            {"id": "t-2", "name": "Task 2"},
+        ]
+        context = build_verify_context(tasks, "spec.md")
+
         assert context["done_count"] == 2
         assert context["spec_file"] == "spec.md"
-        assert len(context["done_tasks"]) == 2
+        assert '"t-1"' in context["done_tasks_json"]
+
+    def test_includes_spec_content(self):
+        context = build_verify_context([], "s.md", "spec text")
+
+        assert context["spec_content"] == "spec text"
 
 
 class TestBuildInvestigateContext:
-    """Tests for build_investigate_context function."""
+    """Tests for build_investigate_context (tix dict-based)."""
 
     def test_creates_context_from_issues(self):
-        issue1 = MagicMock()
-        issue1.id = "i-1"
-        issue1.desc = "Test failure"
-        issue1.spec = "spec.md"
-        issue1.priority = "high"
-        
-        issue2 = MagicMock()
-        issue2.id = "i-2"
-        issue2.desc = "Warning in build"
-        issue2.spec = "spec.md"
-        issue2.priority = None
-        
-        context = build_investigate_context([issue1, issue2], "spec.md", "spec content")
-        
+        issues = [
+            {"id": "i-1", "desc": "Test failure"},
+            {"id": "i-2", "desc": "Warning in build"},
+        ]
+        context = build_investigate_context(issues, "spec.md")
+
         assert context["issue_count"] == 2
-        assert len(context["issues"]) == 2
-        assert context["issues"][0]["id"] == "i-1"
+        assert '"i-1"' in context["issues_json"]
+
+    def test_includes_spec_content(self):
+        context = build_investigate_context([], "s.md", "spec text")
+
+        assert context["spec_content"] == "spec text"
 
 
 class TestBuildDecomposeContext:
-    """Tests for build_decompose_context function."""
+    """Tests for build_decompose_context (tix dict-based)."""
 
     def test_creates_context_from_killed_task(self):
-        task = MagicMock()
-        task.id = "t-123"
-        task.name = "Large refactor"
-        task.spec = "spec.md"
-        task.notes = "Move all functions"
-        task.accept = "tests pass"
-        task.deps = []
-        task.status = "p"
-        task.priority = None
-        task.reject_reason = None
-        task.kill_reason = "context_limit"
-        task.kill_log = "/tmp/logs/t-123.log"
-        task.parent = None
-        task.decompose_depth = 1
-        
-        context = build_decompose_context(task, "log preview here", "spec content")
-        
+        task = {
+            "id": "t-123",
+            "name": "Large refactor",
+            "kill_reason": "context_limit",
+            "kill_log": "/tmp/logs/t-123.log",
+        }
+        context = build_decompose_context(task)
+
         assert context["task_id"] == "t-123"
         assert context["kill_reason"] == "context_limit"
-        assert context["kill_log_preview"] == "log preview here"
-        assert context["decompose_depth"] == 1
-        assert context["max_depth"] == 3
+        assert context["kill_log_path"] == "/tmp/logs/t-123.log"
+
+    def test_includes_spec_content(self):
+        task = {"id": "t-1", "name": "Task", "kill_reason": "timeout"}
+        context = build_decompose_context(task, "s.md", "spec text")
+
+        assert context["spec_content"] == "spec text"
+
+    def test_includes_depth_and_max_depth(self):
+        task = {"id": "t-1", "name": "Task", "decompose_depth": 2}
+        context = build_decompose_context(task, max_depth=5)
+
+        assert context["decompose_depth"] == 2
+        assert context["max_depth"] == 5
+
+    def test_depth_defaults_to_zero(self):
+        task = {"id": "t-1", "name": "Task"}
+        context = build_decompose_context(task)
+
+        assert context["decompose_depth"] == 0
+        assert context["max_depth"] == 3  # default
 
 
 class TestBuildPlanContext:

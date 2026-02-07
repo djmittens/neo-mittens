@@ -217,6 +217,23 @@ class TestReconcileDecompose:
         assert not result.ok
         mock_tix.task_delete.assert_not_called()
 
+    def test_increments_decompose_depth(self, mock_tix):
+        """Subtasks get parent_depth + 1 on their decompose_depth."""
+        output = '[RALPH_OUTPUT]\n{"subtasks": [{"name": "Sub 1", "notes": "n", "accept": "a"}]}\n[/RALPH_OUTPUT]'
+        result = reconcile_decompose(mock_tix, output, "t-parent", parent_depth=2)
+        assert result.ok
+        call_data = mock_tix.task_add.call_args[0][0]
+        assert call_data["decompose_depth"] == 3
+        assert call_data["parent"] == "t-parent"
+
+    def test_depth_defaults_to_one_when_no_parent_depth(self, mock_tix):
+        """When parent_depth is not specified, subtasks get depth 1."""
+        output = '[RALPH_OUTPUT]\n{"subtasks": [{"name": "Sub", "notes": "n", "accept": "a"}]}\n[/RALPH_OUTPUT]'
+        result = reconcile_decompose(mock_tix, output, "t-root")
+        assert result.ok
+        call_data = mock_tix.task_add.call_args[0][0]
+        assert call_data["decompose_depth"] == 1
+
 
 # =============================================================================
 # reconcile_plan

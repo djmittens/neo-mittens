@@ -12,6 +12,8 @@ Total: {{DONE_COUNT}} tasks
 
 ## Spec: {{SPEC_FILE}}
 
+{{SPEC_CONTENT}}
+
 ## Instructions
 
 1. **For each done task**, spawn a subagent (Task tool) to verify its acceptance criteria. Run all verifications in parallel.

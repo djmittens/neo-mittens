@@ -8,13 +8,8 @@ This module provides:
 
 import json
 import re
-from dataclasses import asdict
 from pathlib import Path
-from typing import Any, Optional, TYPE_CHECKING
-
-if TYPE_CHECKING:
-    from ralph.state import RalphState
-    from ralph.models import Task, Issue
+from typing import Any, Optional
 
 
 def load_prompt(stage: str, ralph_dir: Optional[Path] = None) -> str:
@@ -69,136 +64,6 @@ def inject_context(template: str, context: dict[str, Any]) -> str:
     return result
 
 
-def _task_to_context(task: "Task") -> dict[str, Any]:
-    """Convert a Task to a context dict for template injection."""
-    return {
-        "id": task.id,
-        "name": task.name,
-        "spec": task.spec,
-        "notes": task.notes or "",
-        "accept": task.accept or "",
-        "deps": task.deps or [],
-        "status": task.status,
-        "priority": task.priority or "medium",
-        "reject": task.reject_reason or "",
-        "kill_reason": task.kill_reason or "",
-        "kill_log": task.kill_log or "",
-        "parent": task.parent or "",
-        "decompose_depth": task.decompose_depth,
-    }
-
-
-def _issue_to_context(issue: "Issue") -> dict[str, Any]:
-    """Convert an Issue to a context dict for template injection."""
-    return {
-        "id": issue.id,
-        "desc": issue.desc,
-        "spec": issue.spec,
-        "priority": issue.priority or "medium",
-    }
-
-
-def build_build_context(task: "Task", spec_content: str = "") -> dict[str, Any]:
-    """Build context dict for BUILD stage prompt.
-
-    Args:
-        task: The task to build
-        spec_content: Optional spec file content
-
-    Returns:
-        Context dict with TASK_* and SPEC_CONTENT variables
-    """
-    task_ctx = _task_to_context(task)
-    return {
-        "task": task_ctx,
-        "task_json": json.dumps(task_ctx, indent=2),
-        "task_name": task.name,
-        "task_notes": task.notes or "",
-        "task_accept": task.accept or "",
-        "task_reject": task.reject_reason or "",
-        "task_id": task.id,
-        "spec_file": task.spec,
-        "spec_content": spec_content,
-        "is_retry": "true" if task.reject_reason else "false",
-    }
-
-
-def build_verify_context(
-    done_tasks: list["Task"], spec_name: str, spec_content: str = ""
-) -> dict[str, Any]:
-    """Build context dict for VERIFY stage prompt.
-
-    Args:
-        done_tasks: List of tasks with status 'd' (done)
-        spec_name: Name of the current spec
-        spec_content: Content of the spec file
-
-    Returns:
-        Context dict with DONE_TASKS and SPEC_* variables
-    """
-    tasks_data = [_task_to_context(t) for t in done_tasks]
-    return {
-        "done_tasks": tasks_data,
-        "done_tasks_json": json.dumps(tasks_data, indent=2),
-        "done_count": len(done_tasks),
-        "spec_file": spec_name,
-        "spec_content": spec_content,
-    }
-
-
-def build_investigate_context(
-    issues: list["Issue"], spec_name: str, spec_content: str = ""
-) -> dict[str, Any]:
-    """Build context dict for INVESTIGATE stage prompt.
-
-    Args:
-        issues: List of issues to investigate
-        spec_name: Name of the current spec
-        spec_content: Content of the spec file
-
-    Returns:
-        Context dict with ISSUES and SPEC_* variables
-    """
-    issues_data = [_issue_to_context(i) for i in issues]
-    return {
-        "issues": issues_data,
-        "issues_json": json.dumps(issues_data, indent=2),
-        "issue_count": len(issues),
-        "spec_file": spec_name,
-        "spec_content": spec_content,
-    }
-
-
-def build_decompose_context(
-    task: "Task", kill_log_preview: str = "", spec_content: str = ""
-) -> dict[str, Any]:
-    """Build context dict for DECOMPOSE stage prompt.
-
-    Args:
-        task: The killed task that needs decomposition
-        kill_log_preview: First/last N lines of the kill log
-        spec_content: Content of the spec file
-
-    Returns:
-        Context dict with KILLED_TASK_* and log preview variables
-    """
-    task_ctx = _task_to_context(task)
-    return {
-        "task": task_ctx,
-        "task_json": json.dumps(task_ctx, indent=2),
-        "task_name": task.name,
-        "task_notes": task.notes or "",
-        "task_id": task.id,
-        "kill_reason": task.kill_reason or "unknown",
-        "kill_log_path": task.kill_log or "",
-        "kill_log_preview": kill_log_preview,
-        "spec_file": task.spec,
-        "spec_content": spec_content,
-        "decompose_depth": task.decompose_depth,
-        "max_depth": 3,
-    }
-
-
 def build_plan_context(spec_name: str, spec_content: str) -> dict[str, Any]:
     """Build context dict for PLAN stage prompt.
 
@@ -216,16 +81,19 @@ def build_plan_context(spec_name: str, spec_content: str) -> dict[str, Any]:
 
 
 # =========================================================================
-# Tix-native context builders (work with raw dicts from tix JSON output)
+# Stage context builders (work with raw dicts from tix JSON output)
 # =========================================================================
 
 
-def build_build_context_tix(task: dict, spec_name: str = "") -> dict[str, Any]:
-    """Build context for BUILD stage from tix task dict.
+def build_build_context(
+    task: dict, spec_name: str = "", spec_content: str = ""
+) -> dict[str, Any]:
+    """Build context dict for BUILD stage prompt.
 
     Args:
-        task: Raw task dict from tix query output.
+        task: Task dict from tix query output.
         spec_name: Spec file name.
+        spec_content: Content of the spec file.
 
     Returns:
         Context dict for prompt injection.
@@ -238,18 +106,20 @@ def build_build_context_tix(task: dict, spec_name: str = "") -> dict[str, Any]:
         "task_reject": task.get("reject", ""),
         "task_id": task.get("id", ""),
         "spec_file": spec_name or task.get("spec", ""),
+        "spec_content": spec_content,
         "is_retry": "true" if task.get("reject") else "false",
     }
 
 
-def build_verify_context_tix(
-    done_tasks: list[dict], spec_name: str
+def build_verify_context(
+    done_tasks: list[dict], spec_name: str, spec_content: str = ""
 ) -> dict[str, Any]:
-    """Build context for VERIFY stage from tix task dicts.
+    """Build context dict for VERIFY stage prompt.
 
     Args:
         done_tasks: List of done task dicts from tix query.
         spec_name: Spec file name.
+        spec_content: Content of the spec file.
 
     Returns:
         Context dict for prompt injection.
@@ -258,17 +128,19 @@ def build_verify_context_tix(
         "done_tasks_json": json.dumps(done_tasks, indent=2),
         "done_count": len(done_tasks),
         "spec_file": spec_name,
+        "spec_content": spec_content,
     }
 
 
-def build_investigate_context_tix(
-    issues: list[dict], spec_name: str
+def build_investigate_context(
+    issues: list[dict], spec_name: str, spec_content: str = ""
 ) -> dict[str, Any]:
-    """Build context for INVESTIGATE stage from tix issue dicts.
+    """Build context dict for INVESTIGATE stage prompt.
 
     Args:
         issues: List of issue dicts from tix query.
         spec_name: Spec file name.
+        spec_content: Content of the spec file.
 
     Returns:
         Context dict for prompt injection.
@@ -277,17 +149,23 @@ def build_investigate_context_tix(
         "issues_json": json.dumps(issues, indent=2),
         "issue_count": len(issues),
         "spec_file": spec_name,
+        "spec_content": spec_content,
     }
 
 
-def build_decompose_context_tix(
-    task: dict, spec_name: str = ""
+def build_decompose_context(
+    task: dict,
+    spec_name: str = "",
+    spec_content: str = "",
+    max_depth: int = 3,
 ) -> dict[str, Any]:
-    """Build context for DECOMPOSE stage from tix task dict.
+    """Build context dict for DECOMPOSE stage prompt.
 
     Args:
-        task: The killed task dict from tix.
+        task: The killed task dict from tix query.
         spec_name: Spec file name.
+        spec_content: Content of the spec file.
+        max_depth: Maximum decomposition depth from config.
 
     Returns:
         Context dict for prompt injection.
@@ -299,6 +177,9 @@ def build_decompose_context_tix(
         "kill_reason": task.get("kill_reason", "unknown"),
         "kill_log_path": task.get("kill_log", ""),
         "spec_file": spec_name or task.get("spec", ""),
+        "spec_content": spec_content,
+        "decompose_depth": task.get("decompose_depth", 0),
+        "max_depth": max_depth,
     }
 
 

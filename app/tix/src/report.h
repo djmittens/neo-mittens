@@ -22,6 +22,44 @@ typedef struct {
 tix_err_t tix_report_generate(tix_db_t *db, tix_report_t *report);
 tix_err_t tix_report_print(const tix_report_t *report, char *buf, sz buf_len);
 
+/* --- Summary report (executive overview for bare 'tix report') --- */
+
+typedef struct {
+  /* counts */
+  u32 total_tasks;
+  u32 done_tasks;
+  u32 accepted_tasks;
+  u32 pending_tasks;
+  u32 total_issues;
+  u32 total_notes;
+  u32 blocked_count;
+
+  /* velocity */
+  u32 completed;            /* done + accepted with any telemetry */
+  double total_cost;
+  double avg_cost;
+  i64 total_tokens_in;
+  i64 total_tokens_out;
+  double avg_cycle_secs;
+  double avg_iterations;
+  u32 total_retries;
+  u32 total_kills;
+
+  /* top model (highest total cost among completed tasks) */
+  char top_model[TIX_MAX_NAME_LEN];
+  u32 top_model_tasks;
+  double top_model_cost;
+
+  /* top author (most total tasks) */
+  char top_author[TIX_MAX_NAME_LEN];
+  u32 top_author_total;
+  u32 top_author_done;
+} tix_summary_report_t;
+
+tix_err_t tix_report_summary(tix_db_t *db, tix_summary_report_t *report);
+tix_err_t tix_report_summary_print(const tix_summary_report_t *r,
+                                   char *buf, sz buf_len);
+
 /* --- Velocity report --- */
 
 typedef struct {

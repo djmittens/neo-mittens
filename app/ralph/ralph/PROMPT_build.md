@@ -13,6 +13,10 @@ Implement the assigned task.
 - **Acceptance criteria**: {{TASK_ACCEPT}}
 - **Rejected reason** (if retry): {{TASK_REJECT}}
 
+## Spec Content
+
+{{SPEC_CONTENT}}
+
 ## Instructions
 
 1. If this is a **retry** (reject field is set): the code is already there. Read the rejection reason, fix the specific gap. Do NOT re-explore the whole codebase.

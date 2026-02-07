@@ -102,6 +102,258 @@ tix_err_t tix_report_print(const tix_report_t *r, char *buf, sz buf_len) {
 }
 
 /* ================================================================
+ * Summary report (executive overview for bare 'tix report')
+ * ================================================================ */
+
+tix_err_t tix_report_summary(tix_db_t *db, tix_summary_report_t *report) {
+  if (db == NULL || report == NULL) { return TIX_ERR_INVALID_ARG; }
+  memset(report, 0, sizeof(*report));
+
+  /* --- Task/issue/note counts --- */
+  tix_db_count_tickets(db, TIX_TICKET_TASK, TIX_STATUS_PENDING,
+                       &report->pending_tasks);
+  tix_db_count_tickets(db, TIX_TICKET_TASK, TIX_STATUS_DONE,
+                       &report->done_tasks);
+  tix_db_count_tickets(db, TIX_TICKET_TASK, TIX_STATUS_ACCEPTED,
+                       &report->accepted_tasks);
+  report->total_tasks = report->pending_tasks + report->done_tasks +
+                        report->accepted_tasks;
+
+  tix_db_count_tickets(db, TIX_TICKET_ISSUE, TIX_STATUS_PENDING,
+                       &report->total_issues);
+  tix_db_count_tickets(db, TIX_TICKET_NOTE, TIX_STATUS_PENDING,
+                       &report->total_notes);
+
+  /* --- Blocked count --- */
+  {
+    const char *sql =
+      "SELECT COUNT(DISTINCT d.ticket_id) FROM ticket_deps d "
+      "JOIN tickets t ON d.dep_id = t.id "
+      "WHERE t.status = 0";
+    sqlite3_stmt *stmt = NULL;
+    int rc = sqlite3_prepare_v2(db->handle, sql, -1, &stmt, NULL);
+    if (rc == SQLITE_OK) {
+      if (sqlite3_step(stmt) == SQLITE_ROW) {
+        report->blocked_count = (u32)sqlite3_column_int(stmt, 0);
+      }
+      sqlite3_finalize(stmt);
+    }
+  }
+
+  /* --- Velocity aggregation over completed tasks --- */
+  {
+    const char *sql =
+      "SELECT "
+      "  COUNT(*),"
+      "  COALESCE(SUM(cost), 0.0),"
+      "  COALESCE(SUM(tokens_in), 0),"
+      "  COALESCE(SUM(tokens_out), 0),"
+      "  COALESCE(AVG(CASE WHEN updated_at > created_at AND created_at > 0 "
+      "    THEN updated_at - created_at ELSE NULL END), 0.0),"
+      "  COALESCE(AVG(CASE WHEN iterations > 0 "
+      "    THEN iterations ELSE NULL END), 0.0),"
+      "  COALESCE(SUM(retries), 0),"
+      "  COALESCE(SUM(kill_count), 0)"
+      " FROM tickets"
+      " WHERE type=0 AND status IN (1,2)";
+
+    sqlite3_stmt *stmt = NULL;
+    int rc = sqlite3_prepare_v2(db->handle, sql, -1, &stmt, NULL);
+    if (rc == SQLITE_OK) {
+      if (sqlite3_step(stmt) == SQLITE_ROW) {
+        report->completed = (u32)sqlite3_column_int(stmt, 0);
+        report->total_cost = sqlite3_column_double(stmt, 1);
+        report->total_tokens_in = sqlite3_column_int64(stmt, 2);
+        report->total_tokens_out = sqlite3_column_int64(stmt, 3);
+        report->avg_cycle_secs = sqlite3_column_double(stmt, 4);
+        report->avg_iterations = sqlite3_column_double(stmt, 5);
+        report->total_retries = (u32)sqlite3_column_int(stmt, 6);
+        report->total_kills = (u32)sqlite3_column_int(stmt, 7);
+      }
+      sqlite3_finalize(stmt);
+    }
+    if (report->completed > 0) {
+      report->avg_cost = report->total_cost / (double)report->completed;
+    }
+  }
+
+  /* --- Top model by total cost --- */
+  {
+    const char *sql =
+      "SELECT model, COUNT(*), COALESCE(SUM(cost), 0.0)"
+      " FROM tickets"
+      " WHERE type=0 AND status IN (1,2)"
+      "   AND model IS NOT NULL AND model != ''"
+      " GROUP BY model"
+      " ORDER BY SUM(cost) DESC"
+      " LIMIT 1";
+
+    sqlite3_stmt *stmt = NULL;
+    int rc = sqlite3_prepare_v2(db->handle, sql, -1, &stmt, NULL);
+    if (rc == SQLITE_OK) {
+      if (sqlite3_step(stmt) == SQLITE_ROW) {
+        const char *m = (const char *)sqlite3_column_text(stmt, 0);
+        if (m != NULL) {
+          snprintf(report->top_model, sizeof(report->top_model), "%s", m);
+        }
+        report->top_model_tasks = (u32)sqlite3_column_int(stmt, 1);
+        report->top_model_cost = sqlite3_column_double(stmt, 2);
+      }
+      sqlite3_finalize(stmt);
+    }
+  }
+
+  /* --- Top author by total tasks --- */
+  {
+    const char *sql =
+      "SELECT author, COUNT(*),"
+      "  SUM(CASE WHEN status IN (1,2) THEN 1 ELSE 0 END)"
+      " FROM tickets"
+      " WHERE type=0 AND author IS NOT NULL AND author != ''"
+      " GROUP BY author"
+      " ORDER BY COUNT(*) DESC"
+      " LIMIT 1";
+
+    sqlite3_stmt *stmt = NULL;
+    int rc = sqlite3_prepare_v2(db->handle, sql, -1, &stmt, NULL);
+    if (rc == SQLITE_OK) {
+      if (sqlite3_step(stmt) == SQLITE_ROW) {
+        const char *a = (const char *)sqlite3_column_text(stmt, 0);
+        if (a != NULL) {
+          snprintf(report->top_author, sizeof(report->top_author), "%s", a);
+        }
+        report->top_author_total = (u32)sqlite3_column_int(stmt, 1);
+        report->top_author_done = (u32)sqlite3_column_int(stmt, 2);
+      }
+      sqlite3_finalize(stmt);
+    }
+  }
+
+  return TIX_OK;
+}
+
+tix_err_t tix_report_summary_print(const tix_summary_report_t *r,
+                                   char *buf, sz buf_len) {
+  if (r == NULL || buf == NULL) { return TIX_ERR_INVALID_ARG; }
+
+  char *p = buf;
+  char *end = buf + buf_len;
+
+  TIX_BUF_PRINTF(p, end, TIX_ERR_OVERFLOW, "tix report\n");
+  TIX_BUF_PRINTF(p, end, TIX_ERR_OVERFLOW, "==========\n");
+
+  /* --- Task summary line --- */
+  u32 completed = r->done_tasks + r->accepted_tasks;
+  int pct = (r->total_tasks > 0)
+              ? (int)(completed * 100 / r->total_tasks) : 0;
+  TIX_BUF_PRINTF(p, end, TIX_ERR_OVERFLOW,
+                 "Tasks: %u total, %u done (%d%%), %u pending\n",
+                 r->total_tasks, completed, pct, r->pending_tasks);
+
+  /* Issues / notes / blocked on one line */
+  if (r->total_issues > 0 || r->total_notes > 0 || r->blocked_count > 0) {
+    int need_sep = 0;
+    if (r->total_issues > 0) {
+      TIX_BUF_PRINTF(p, end, TIX_ERR_OVERFLOW,
+                     "Issues: %u open", r->total_issues);
+      need_sep = 1;
+    }
+    if (r->total_notes > 0) {
+      TIX_BUF_PRINTF(p, end, TIX_ERR_OVERFLOW,
+                     "%sNotes: %u",
+                     need_sep ? " | " : "", r->total_notes);
+      need_sep = 1;
+    }
+    if (r->blocked_count > 0) {
+      TIX_BUF_PRINTF(p, end, TIX_ERR_OVERFLOW,
+                     "%sBlocked: %u",
+                     need_sep ? " | " : "", r->blocked_count);
+    }
+    TIX_BUF_PRINTF(p, end, TIX_ERR_OVERFLOW, "%s", "\n");
+  }
+
+  /* --- Cost & telemetry section (only if we have completed tasks) --- */
+  if (r->completed > 0 && (r->total_cost > 0.0 || r->total_tokens_in > 0)) {
+    TIX_BUF_PRINTF(p, end, TIX_ERR_OVERFLOW, "%s", "\n");
+
+    if (r->total_cost > 0.0) {
+      TIX_BUF_PRINTF(p, end, TIX_ERR_OVERFLOW,
+                     "Cost: $%.4f total, $%.4f/task avg\n",
+                     r->total_cost, r->avg_cost);
+    }
+
+    if (r->total_tokens_in > 0 || r->total_tokens_out > 0) {
+      TIX_BUF_PRINTF(p, end, TIX_ERR_OVERFLOW,
+                     "Tokens: %lld in / %lld out\n",
+                     (long long)r->total_tokens_in,
+                     (long long)r->total_tokens_out);
+    }
+
+    /* Cycle time + iterations on one line */
+    int has_cycle = (r->avg_cycle_secs > 0.0) ? 1 : 0;
+    int has_iters = (r->avg_iterations > 0.0) ? 1 : 0;
+    if (has_cycle || has_iters) {
+      if (has_cycle) {
+        double secs = r->avg_cycle_secs;
+        if (secs < 60.0) {
+          TIX_BUF_PRINTF(p, end, TIX_ERR_OVERFLOW,
+                         "Cycle time: %.0fs avg", secs);
+        } else if (secs < 3600.0) {
+          TIX_BUF_PRINTF(p, end, TIX_ERR_OVERFLOW,
+                         "Cycle time: %.1fm avg", secs / 60.0);
+        } else {
+          TIX_BUF_PRINTF(p, end, TIX_ERR_OVERFLOW,
+                         "Cycle time: %.1fh avg", secs / 3600.0);
+        }
+      }
+      if (has_iters) {
+        TIX_BUF_PRINTF(p, end, TIX_ERR_OVERFLOW,
+                       "%sIterations: %.1f avg",
+                       has_cycle ? " | " : "",
+                       r->avg_iterations);
+      }
+      TIX_BUF_PRINTF(p, end, TIX_ERR_OVERFLOW, "%s", "\n");
+    }
+
+    /* Retries + kills on one line (only if nonzero) */
+    if (r->total_retries > 0 || r->total_kills > 0) {
+      int need_sep = 0;
+      if (r->total_retries > 0) {
+        TIX_BUF_PRINTF(p, end, TIX_ERR_OVERFLOW,
+                       "Retries: %u", r->total_retries);
+        need_sep = 1;
+      }
+      if (r->total_kills > 0) {
+        TIX_BUF_PRINTF(p, end, TIX_ERR_OVERFLOW,
+                       "%sKills: %u",
+                       need_sep ? " | " : "", r->total_kills);
+      }
+      TIX_BUF_PRINTF(p, end, TIX_ERR_OVERFLOW, "%s", "\n");
+    }
+  }
+
+  /* --- Top model / top author highlights --- */
+  if (r->top_model[0] != '\0' || r->top_author[0] != '\0') {
+    TIX_BUF_PRINTF(p, end, TIX_ERR_OVERFLOW, "%s", "\n");
+
+    if (r->top_model[0] != '\0') {
+      TIX_BUF_PRINTF(p, end, TIX_ERR_OVERFLOW,
+                     "Top model:  %s (%u tasks, $%.4f)\n",
+                     r->top_model, r->top_model_tasks,
+                     r->top_model_cost);
+    }
+    if (r->top_author[0] != '\0') {
+      TIX_BUF_PRINTF(p, end, TIX_ERR_OVERFLOW,
+                     "Top author: %s (%u tasks, %u done)\n",
+                     r->top_author, r->top_author_total,
+                     r->top_author_done);
+    }
+  }
+
+  return TIX_OK;
+}
+
+/* ================================================================
  * Velocity report
  * ================================================================ */
 

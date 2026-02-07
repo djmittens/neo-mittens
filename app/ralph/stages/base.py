@@ -376,13 +376,45 @@ class ConstructStateMachine:
         return result
 
     def _handle_task_failure(self, result: StageResult) -> None:
-        """Handle a BUILD task failure by transitioning to DECOMPOSE."""
-        state = self.load_state()
+        """Handle a BUILD task failure.
 
+        If the task is at max decompose depth, create an issue instead
+        of decomposing further. Otherwise, transition to DECOMPOSE.
+        """
+        state = self.load_state()
         target_task_id = result.task_id or "__stage_failure__"
+        reason = result.kill_reason or "unknown"
+
+        # Check decompose depth limit before entering DECOMPOSE
+        max_depth = getattr(self.config, "max_decompose_depth", 3)
+        task_depth = self._get_task_depth(target_task_id)
+
+        if task_depth >= max_depth:
+            logger.warning(
+                "Task %s at max decompose depth %d/%d — "
+                "creating issue instead of decomposing",
+                target_task_id, task_depth, max_depth,
+            )
+            if self.tix:
+                try:
+                    self.tix.issue_add(
+                        f"Task {target_task_id} failed (reason: {reason}) "
+                        f"and cannot be decomposed further "
+                        f"(depth {task_depth}/{max_depth})"
+                    )
+                    self.tix.task_reject(
+                        target_task_id,
+                        f"build failed at max depth: {reason}",
+                    )
+                except Exception:
+                    pass
+            # Stay in BUILD — the issue will be picked up by INVESTIGATE
+            self.save_state(state)
+            return
+
         state.transition_to_decompose(
             task_id=target_task_id,
-            reason=result.kill_reason or "unknown",
+            reason=reason,
             log_path=result.kill_log,
         )
 
@@ -391,12 +423,29 @@ class ConstructStateMachine:
             try:
                 self.tix.task_reject(
                     result.task_id,
-                    f"build failed: {result.kill_reason}",
+                    f"build failed: {reason}",
                 )
             except Exception:
                 pass  # Best-effort
 
         self.save_state(state)
+
+    def _get_task_depth(self, task_id: str) -> int:
+        """Get the decompose_depth of a task from tix."""
+        if not self.tix or task_id == "__stage_failure__":
+            return 0
+        try:
+            full = self.tix.query_full()
+            all_tasks = (
+                full.get("tasks", {}).get("pending", [])
+                + full.get("tasks", {}).get("done", [])
+            )
+            task = next(
+                (t for t in all_tasks if t.get("id") == task_id), None
+            )
+            return task.get("decompose_depth", 0) if task else 0
+        except Exception:
+            return 0
 
     def _handle_batch_failure(
         self,
