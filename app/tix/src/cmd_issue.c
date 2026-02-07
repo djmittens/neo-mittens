@@ -1,0 +1,125 @@
+#include "cmd.h"
+#include "json.h"
+#include "search.h"
+#include "log.h"
+
+#include <stdio.h>
+#include <string.h>
+#include <time.h>
+
+static tix_err_t issue_add(tix_ctx_t *ctx, int argc, char **argv) {
+  if (argc < 1) {
+    fprintf(stderr, "usage: tix issue add \"description\"\n");
+    return TIX_ERR_INVALID_ARG;
+  }
+
+  tix_ticket_t ticket;
+  tix_ticket_init(&ticket);
+  ticket.type = TIX_TICKET_ISSUE;
+  ticket.created_at = (i64)time(NULL);
+  ticket.updated_at = ticket.created_at;
+
+  tix_err_t err = tix_ticket_gen_id(TIX_TICKET_ISSUE, ticket.id,
+                                     sizeof(ticket.id));
+  if (err != TIX_OK) { return err; }
+
+  tix_ticket_set_name(&ticket, argv[0]);
+
+  err = tix_plan_append_ticket(ctx->plan_path, &ticket);
+  if (err != TIX_OK) { return err; }
+
+  err = tix_db_upsert_ticket(&ctx->db, &ticket);
+  if (err != TIX_OK) { return err; }
+
+  tix_search_index_ticket(&ctx->db, &ticket);
+
+  char esc_desc[TIX_MAX_NAME_LEN * 2];
+  tix_json_escape(ticket.name, esc_desc, sizeof(esc_desc));
+  printf("{\"id\":\"%s\",\"desc\":\"%s\"}\n", ticket.id, esc_desc);
+  return TIX_OK;
+}
+
+static tix_err_t issue_done(tix_ctx_t *ctx, int argc, char **argv) {
+  char id[TIX_MAX_ID_LEN];
+
+  if (argc >= 1) {
+    snprintf(id, sizeof(id), "%s", argv[0]);
+  } else {
+    tix_ticket_t tickets[1];
+    u32 count = 0;
+    tix_db_list_tickets(&ctx->db, TIX_TICKET_ISSUE, TIX_STATUS_PENDING,
+                        tickets, &count, 1);
+    if (count == 0) {
+      fprintf(stderr, "error: no pending issues\n");
+      return TIX_ERR_NOT_FOUND;
+    }
+    snprintf(id, sizeof(id), "%s", tickets[0].id);
+  }
+
+  tix_err_t err = tix_db_delete_ticket(&ctx->db, id);
+  if (err != TIX_OK) { return err; }
+
+  err = tix_plan_rewrite(ctx->plan_path, &ctx->db);
+  if (err != TIX_OK) { return err; }
+
+  printf("{\"id\":\"%s\",\"status\":\"resolved\"}\n", id);
+  return TIX_OK;
+}
+
+static tix_err_t issue_done_all(tix_ctx_t *ctx) {
+  tix_ticket_t tickets[TIX_MAX_BATCH];
+  u32 count = 0;
+
+  tix_err_t err = tix_db_list_tickets(&ctx->db, TIX_TICKET_ISSUE,
+                                       TIX_STATUS_PENDING,
+                                       tickets, &count, TIX_MAX_BATCH);
+  if (err != TIX_OK) { return err; }
+
+  for (u32 i = 0; i < count; i++) {
+    tix_db_delete_ticket(&ctx->db, tickets[i].id);
+  }
+
+  err = tix_plan_rewrite(ctx->plan_path, &ctx->db);
+  if (err != TIX_OK) { return err; }
+
+  printf("{\"resolved\":%u}\n", count);
+  return TIX_OK;
+}
+
+static tix_err_t issue_done_ids(tix_ctx_t *ctx, int argc, char **argv) {
+  if (argc < 1) {
+    fprintf(stderr, "usage: tix issue done-ids <id1> <id2> ...\n");
+    return TIX_ERR_INVALID_ARG;
+  }
+
+  u32 resolved = 0;
+  for (int i = 0; i < argc; i++) {
+    tix_err_t err = tix_db_delete_ticket(&ctx->db, argv[i]);
+    if (err == TIX_OK) { resolved++; }
+  }
+
+  tix_err_t err = tix_plan_rewrite(ctx->plan_path, &ctx->db);
+  if (err != TIX_OK) { return err; }
+
+  printf("{\"resolved\":%u}\n", resolved);
+  return TIX_OK;
+}
+
+tix_err_t tix_cmd_issue(tix_ctx_t *ctx, int argc, char **argv) {
+  if (argc < 1) {
+    fprintf(stderr, "usage: tix issue <add|done|done-all|done-ids>\n");
+    return TIX_ERR_INVALID_ARG;
+  }
+
+  tix_err_t err = tix_ctx_ensure_cache(ctx);
+  if (err != TIX_OK) { return err; }
+
+  const char *sub = argv[0];
+  if (strcmp(sub, "add") == 0)      { return issue_add(ctx, argc - 1, argv + 1); }
+  if (strcmp(sub, "done") == 0)     { return issue_done(ctx, argc - 1, argv + 1); }
+  if (strcmp(sub, "done-all") == 0) { return issue_done_all(ctx); }
+  if (strcmp(sub, "done-ids") == 0) { return issue_done_ids(ctx, argc - 1, argv + 1); }
+
+  fprintf(stderr, "error: unknown issue subcommand: %s\n", sub);
+  return TIX_ERR_INVALID_ARG;
+}

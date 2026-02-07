@@ -8,3 +8,12 @@ build/ralph-logs/
 ralph/.current_task
 ralph/.runtime
 .coverage
+
+# tix
+.tix/
+app/tix/build/
+app/tix/build-asan/
+app/tix/build-tsan/
+app/tix/compile_commands.json
+app/tix/vendor/sqlite/sqlite3.c
+app/tix/vendor/sqlite/sqlite3.h

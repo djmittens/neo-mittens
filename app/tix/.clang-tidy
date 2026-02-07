@@ -1,0 +1,8 @@
+Checks: >
+  clang-analyzer-*,
+  -clang-analyzer-security.insecureAPI.DeprecatedOrUnsafeBufferHandling,
+  -clang-analyzer-security.insecureAPI.rand
+WarningsAsErrors: '*'
+HeaderFilterRegex: '.*/app/tix/src/.*\.h$'
+SystemHeaders: false
+UseColor: true

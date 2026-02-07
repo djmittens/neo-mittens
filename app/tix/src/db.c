@@ -1,0 +1,563 @@
+#include "db.h"
+#include "git.h"
+#include "json.h"
+#include "log.h"
+
+#include <stdio.h>
+#include <string.h>
+
+static const char *SCHEMA_SQL =
+  "CREATE TABLE IF NOT EXISTS tickets ("
+  "  id TEXT PRIMARY KEY,"
+  "  type INTEGER NOT NULL,"
+  "  status INTEGER NOT NULL,"
+  "  priority INTEGER DEFAULT 0,"
+  "  name TEXT NOT NULL,"
+  "  spec TEXT,"
+  "  notes TEXT,"
+  "  accept TEXT,"
+  "  done_at TEXT,"
+  "  branch TEXT,"
+  "  parent TEXT,"
+  "  created_from TEXT,"
+  "  supersedes TEXT,"
+  "  kill_reason TEXT,"
+  "  created_at INTEGER,"
+  "  updated_at INTEGER,"
+  "  commit_hash TEXT"
+  ");"
+  "CREATE TABLE IF NOT EXISTS ticket_deps ("
+  "  ticket_id TEXT NOT NULL,"
+  "  dep_id TEXT NOT NULL,"
+  "  PRIMARY KEY (ticket_id, dep_id)"
+  ");"
+  "CREATE TABLE IF NOT EXISTS tombstones ("
+  "  id TEXT PRIMARY KEY,"
+  "  done_at TEXT,"
+  "  reason TEXT,"
+  "  name TEXT,"
+  "  is_accept INTEGER,"
+  "  timestamp INTEGER"
+  ");"
+  "CREATE TABLE IF NOT EXISTS keywords ("
+  "  ticket_id TEXT NOT NULL,"
+  "  keyword TEXT NOT NULL,"
+  "  weight REAL DEFAULT 1.0,"
+  "  PRIMARY KEY (ticket_id, keyword)"
+  ");"
+  "CREATE INDEX IF NOT EXISTS idx_keywords_keyword ON keywords(keyword);"
+  "CREATE TABLE IF NOT EXISTS cache_meta ("
+  "  key TEXT PRIMARY KEY,"
+  "  value TEXT"
+  ");"
+  ;
+
+tix_err_t tix_db_open(tix_db_t *db, const char *path) {
+  if (db == NULL || path == NULL) { return TIX_ERR_INVALID_ARG; }
+
+  memset(db, 0, sizeof(*db));
+  int pn = snprintf(db->path, sizeof(db->path), "%s", path);
+  if (pn < 0 || (sz)pn >= sizeof(db->path)) { return TIX_ERR_OVERFLOW; }
+
+  int rc = sqlite3_open(path, &db->handle);
+  if (rc != SQLITE_OK) {
+    TIX_ERROR("sqlite3_open(%s) failed: %s", path, sqlite3_errmsg(db->handle));
+    return TIX_ERR_DB;
+  }
+
+  sqlite3_exec(db->handle, "PRAGMA journal_mode=WAL", NULL, NULL, NULL);
+  sqlite3_exec(db->handle, "PRAGMA synchronous=NORMAL", NULL, NULL, NULL);
+
+  return TIX_OK;
+}
+
+tix_err_t tix_db_close(tix_db_t *db) {
+  if (db == NULL || db->handle == NULL) { return TIX_ERR_INVALID_ARG; }
+  sqlite3_close(db->handle);
+  db->handle = NULL;
+  return TIX_OK;
+}
+
+tix_err_t tix_db_init_schema(tix_db_t *db) {
+  if (db == NULL || db->handle == NULL) { return TIX_ERR_INVALID_ARG; }
+
+  char *err_msg = NULL;
+  int rc = sqlite3_exec(db->handle, SCHEMA_SQL, NULL, NULL, &err_msg);
+  if (rc != SQLITE_OK) {
+    TIX_ERROR("schema init failed: %s", err_msg ? err_msg : "unknown");
+    sqlite3_free(err_msg);
+    return TIX_ERR_DB;
+  }
+  return TIX_OK;
+}
+
+tix_err_t tix_db_upsert_ticket(tix_db_t *db, const tix_ticket_t *t) {
+  if (db == NULL || t == NULL) { return TIX_ERR_INVALID_ARG; }
+
+  const char *sql =
+    "INSERT OR REPLACE INTO tickets "
+    "(id,type,status,priority,name,spec,notes,accept,done_at,branch,"
+    "parent,created_from,supersedes,kill_reason,created_at,updated_at) "
+    "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)";
+
+  sqlite3_stmt *stmt = NULL;
+  int rc = sqlite3_prepare_v2(db->handle, sql, -1, &stmt, NULL);
+  if (rc != SQLITE_OK) { return TIX_ERR_DB; }
+
+  sqlite3_bind_text(stmt, 1, t->id, -1, SQLITE_STATIC);
+  sqlite3_bind_int(stmt, 2, (int)t->type);
+  sqlite3_bind_int(stmt, 3, (int)t->status);
+  sqlite3_bind_int(stmt, 4, (int)t->priority);
+  sqlite3_bind_text(stmt, 5, t->name, -1, SQLITE_STATIC);
+  sqlite3_bind_text(stmt, 6, t->spec, -1, SQLITE_STATIC);
+  sqlite3_bind_text(stmt, 7, t->notes, -1, SQLITE_STATIC);
+  sqlite3_bind_text(stmt, 8, t->accept, -1, SQLITE_STATIC);
+  sqlite3_bind_text(stmt, 9, t->done_at, -1, SQLITE_STATIC);
+  sqlite3_bind_text(stmt, 10, t->branch, -1, SQLITE_STATIC);
+  sqlite3_bind_text(stmt, 11, t->parent, -1, SQLITE_STATIC);
+  sqlite3_bind_text(stmt, 12, t->created_from, -1, SQLITE_STATIC);
+  sqlite3_bind_text(stmt, 13, t->supersedes, -1, SQLITE_STATIC);
+  sqlite3_bind_text(stmt, 14, t->kill_reason, -1, SQLITE_STATIC);
+  sqlite3_bind_int64(stmt, 15, t->created_at);
+  sqlite3_bind_int64(stmt, 16, t->updated_at);
+
+  rc = sqlite3_step(stmt);
+  sqlite3_finalize(stmt);
+  if (rc != SQLITE_DONE) { return TIX_ERR_DB; }
+
+  /* upsert deps */
+  const char *del_deps = "DELETE FROM ticket_deps WHERE ticket_id=?";
+  rc = sqlite3_prepare_v2(db->handle, del_deps, -1, &stmt, NULL);
+  if (rc == SQLITE_OK) {
+    sqlite3_bind_text(stmt, 1, t->id, -1, SQLITE_STATIC);
+    sqlite3_step(stmt);
+    sqlite3_finalize(stmt);
+  }
+
+  if (t->dep_count > 0) {
+    const char *ins_dep =
+      "INSERT OR IGNORE INTO ticket_deps (ticket_id,dep_id) VALUES (?,?)";
+    for (u32 i = 0; i < t->dep_count; i++) {
+      rc = sqlite3_prepare_v2(db->handle, ins_dep, -1, &stmt, NULL);
+      if (rc != SQLITE_OK) { continue; }
+      sqlite3_bind_text(stmt, 1, t->id, -1, SQLITE_STATIC);
+      sqlite3_bind_text(stmt, 2, t->deps[i], -1, SQLITE_STATIC);
+      sqlite3_step(stmt);
+      sqlite3_finalize(stmt);
+    }
+  }
+
+  return TIX_OK;
+}
+
+tix_err_t tix_db_delete_ticket(tix_db_t *db, const char *id) {
+  if (db == NULL || id == NULL) { return TIX_ERR_INVALID_ARG; }
+
+  const char *sql = "DELETE FROM tickets WHERE id=?";
+  sqlite3_stmt *stmt = NULL;
+  int rc = sqlite3_prepare_v2(db->handle, sql, -1, &stmt, NULL);
+  if (rc != SQLITE_OK) { return TIX_ERR_DB; }
+
+  sqlite3_bind_text(stmt, 1, id, -1, SQLITE_STATIC);
+  sqlite3_step(stmt);
+  sqlite3_finalize(stmt);
+
+  const char *del_deps = "DELETE FROM ticket_deps WHERE ticket_id=?";
+  rc = sqlite3_prepare_v2(db->handle, del_deps, -1, &stmt, NULL);
+  if (rc == SQLITE_OK) {
+    sqlite3_bind_text(stmt, 1, id, -1, SQLITE_STATIC);
+    sqlite3_step(stmt);
+    sqlite3_finalize(stmt);
+  }
+
+  const char *del_kw = "DELETE FROM keywords WHERE ticket_id=?";
+  rc = sqlite3_prepare_v2(db->handle, del_kw, -1, &stmt, NULL);
+  if (rc == SQLITE_OK) {
+    sqlite3_bind_text(stmt, 1, id, -1, SQLITE_STATIC);
+    sqlite3_step(stmt);
+    sqlite3_finalize(stmt);
+  }
+
+  return TIX_OK;
+}
+
+static void row_to_ticket(sqlite3_stmt *stmt, tix_ticket_t *t) {
+  tix_ticket_init(t);
+  const char *id_col = (const char *)sqlite3_column_text(stmt, 0);
+  if (id_col != NULL) { snprintf(t->id, TIX_MAX_ID_LEN, "%s", id_col); }
+  t->type = (tix_ticket_type_e)sqlite3_column_int(stmt, 1);
+  t->status = (tix_status_e)sqlite3_column_int(stmt, 2);
+  t->priority = (tix_priority_e)sqlite3_column_int(stmt, 3);
+
+  const char *name = (const char *)sqlite3_column_text(stmt, 4);
+  if (name != NULL) { snprintf(t->name, TIX_MAX_NAME_LEN, "%s", name); }
+
+  const char *spec = (const char *)sqlite3_column_text(stmt, 5);
+  if (spec != NULL) { snprintf(t->spec, TIX_MAX_PATH_LEN, "%s", spec); }
+
+  const char *notes = (const char *)sqlite3_column_text(stmt, 6);
+  if (notes != NULL) { snprintf(t->notes, TIX_MAX_DESC_LEN, "%s", notes); }
+
+  const char *accept = (const char *)sqlite3_column_text(stmt, 7);
+  if (accept != NULL) { snprintf(t->accept, TIX_MAX_DESC_LEN, "%s", accept); }
+
+  const char *done_at = (const char *)sqlite3_column_text(stmt, 8);
+  if (done_at != NULL) { snprintf(t->done_at, TIX_MAX_HASH_LEN, "%s", done_at); }
+
+  const char *branch = (const char *)sqlite3_column_text(stmt, 9);
+  if (branch != NULL) { snprintf(t->branch, TIX_MAX_BRANCH_LEN, "%s", branch); }
+
+  const char *parent = (const char *)sqlite3_column_text(stmt, 10);
+  if (parent != NULL) { snprintf(t->parent, TIX_MAX_ID_LEN, "%s", parent); }
+
+  const char *cf = (const char *)sqlite3_column_text(stmt, 11);
+  if (cf != NULL) { snprintf(t->created_from, TIX_MAX_ID_LEN, "%s", cf); }
+
+  const char *ss = (const char *)sqlite3_column_text(stmt, 12);
+  if (ss != NULL) { snprintf(t->supersedes, TIX_MAX_ID_LEN, "%s", ss); }
+
+  const char *kr = (const char *)sqlite3_column_text(stmt, 13);
+  if (kr != NULL) { snprintf(t->kill_reason, TIX_MAX_KEYWORD_LEN, "%s", kr); }
+
+  t->created_at = sqlite3_column_int64(stmt, 14);
+  t->updated_at = sqlite3_column_int64(stmt, 15);
+}
+
+tix_err_t tix_db_get_ticket(tix_db_t *db, const char *id, tix_ticket_t *out) {
+  if (db == NULL || id == NULL || out == NULL) {
+    return TIX_ERR_INVALID_ARG;
+  }
+
+  const char *sql = "SELECT * FROM tickets WHERE id=?";
+  sqlite3_stmt *stmt = NULL;
+  int rc = sqlite3_prepare_v2(db->handle, sql, -1, &stmt, NULL);
+  if (rc != SQLITE_OK) { return TIX_ERR_DB; }
+
+  sqlite3_bind_text(stmt, 1, id, -1, SQLITE_STATIC);
+  rc = sqlite3_step(stmt);
+  if (rc != SQLITE_ROW) {
+    sqlite3_finalize(stmt);
+    return TIX_ERR_NOT_FOUND;
+  }
+
+  row_to_ticket(stmt, out);
+  sqlite3_finalize(stmt);
+
+  /* load deps */
+  const char *dep_sql =
+      "SELECT dep_id FROM ticket_deps WHERE ticket_id=?";
+  rc = sqlite3_prepare_v2(db->handle, dep_sql, -1, &stmt, NULL);
+  if (rc == SQLITE_OK) {
+    sqlite3_bind_text(stmt, 1, id, -1, SQLITE_STATIC);
+    while (sqlite3_step(stmt) == SQLITE_ROW && out->dep_count < TIX_MAX_DEPS) {
+      const char *dep = (const char *)sqlite3_column_text(stmt, 0);
+      if (dep != NULL) {
+        snprintf(out->deps[out->dep_count], TIX_MAX_ID_LEN, "%s", dep);
+        out->dep_count++;
+      }
+    }
+    sqlite3_finalize(stmt);
+  }
+
+  return TIX_OK;
+}
+
+tix_err_t tix_db_list_tickets(tix_db_t *db, tix_ticket_type_e type,
+                              tix_status_e status,
+                              tix_ticket_t *out, u32 *count, u32 max) {
+  if (db == NULL || out == NULL || count == NULL) {
+    return TIX_ERR_INVALID_ARG;
+  }
+
+  const char *sql = "SELECT * FROM tickets WHERE type=? AND status=? "
+                    "ORDER BY priority DESC, created_at ASC";
+  sqlite3_stmt *stmt = NULL;
+  int rc = sqlite3_prepare_v2(db->handle, sql, -1, &stmt, NULL);
+  if (rc != SQLITE_OK) { return TIX_ERR_DB; }
+
+  sqlite3_bind_int(stmt, 1, (int)type);
+  sqlite3_bind_int(stmt, 2, (int)status);
+
+  *count = 0;
+  while (sqlite3_step(stmt) == SQLITE_ROW && *count < max) {
+    row_to_ticket(stmt, &out[*count]);
+    (*count)++;
+  }
+  sqlite3_finalize(stmt);
+  return TIX_OK;
+}
+
+tix_err_t tix_db_count_tickets(tix_db_t *db, tix_ticket_type_e type,
+                               tix_status_e status, u32 *count) {
+  if (db == NULL || count == NULL) { return TIX_ERR_INVALID_ARG; }
+
+  const char *sql = "SELECT COUNT(*) FROM tickets WHERE type=? AND status=?";
+  sqlite3_stmt *stmt = NULL;
+  int rc = sqlite3_prepare_v2(db->handle, sql, -1, &stmt, NULL);
+  if (rc != SQLITE_OK) { return TIX_ERR_DB; }
+
+  sqlite3_bind_int(stmt, 1, (int)type);
+  sqlite3_bind_int(stmt, 2, (int)status);
+
+  if (sqlite3_step(stmt) == SQLITE_ROW) {
+    *count = (u32)sqlite3_column_int(stmt, 0);
+  } else {
+    *count = 0;
+  }
+  sqlite3_finalize(stmt);
+  return TIX_OK;
+}
+
+tix_err_t tix_db_upsert_tombstone(tix_db_t *db, const tix_tombstone_t *ts) {
+  if (db == NULL || ts == NULL) { return TIX_ERR_INVALID_ARG; }
+
+  const char *sql =
+    "INSERT OR REPLACE INTO tombstones "
+    "(id,done_at,reason,name,is_accept,timestamp) VALUES (?,?,?,?,?,?)";
+
+  sqlite3_stmt *stmt = NULL;
+  int rc = sqlite3_prepare_v2(db->handle, sql, -1, &stmt, NULL);
+  if (rc != SQLITE_OK) { return TIX_ERR_DB; }
+
+  sqlite3_bind_text(stmt, 1, ts->id, -1, SQLITE_STATIC);
+  sqlite3_bind_text(stmt, 2, ts->done_at, -1, SQLITE_STATIC);
+  sqlite3_bind_text(stmt, 3, ts->reason, -1, SQLITE_STATIC);
+  sqlite3_bind_text(stmt, 4, ts->name, -1, SQLITE_STATIC);
+  sqlite3_bind_int(stmt, 5, ts->is_accept);
+  sqlite3_bind_int64(stmt, 6, ts->timestamp);
+
+  rc = sqlite3_step(stmt);
+  sqlite3_finalize(stmt);
+  return (rc == SQLITE_DONE) ? TIX_OK : TIX_ERR_DB;
+}
+
+tix_err_t tix_db_list_tombstones(tix_db_t *db, int is_accept,
+                                 tix_tombstone_t *out, u32 *count, u32 max) {
+  if (db == NULL || out == NULL || count == NULL) {
+    return TIX_ERR_INVALID_ARG;
+  }
+
+  const char *sql =
+    "SELECT id,done_at,reason,name,is_accept,timestamp "
+    "FROM tombstones WHERE is_accept=? ORDER BY timestamp DESC";
+
+  sqlite3_stmt *stmt = NULL;
+  int rc = sqlite3_prepare_v2(db->handle, sql, -1, &stmt, NULL);
+  if (rc != SQLITE_OK) { return TIX_ERR_DB; }
+
+  sqlite3_bind_int(stmt, 1, is_accept);
+  *count = 0;
+
+  while (sqlite3_step(stmt) == SQLITE_ROW && *count < max) {
+    tix_tombstone_t *t = &out[*count];
+    memset(t, 0, sizeof(*t));
+    const char *id = (const char *)sqlite3_column_text(stmt, 0);
+    if (id != NULL) { snprintf(t->id, TIX_MAX_ID_LEN, "%s", id); }
+    const char *da = (const char *)sqlite3_column_text(stmt, 1);
+    if (da != NULL) { snprintf(t->done_at, TIX_MAX_HASH_LEN, "%s", da); }
+    const char *r = (const char *)sqlite3_column_text(stmt, 2);
+    if (r != NULL) { snprintf(t->reason, TIX_MAX_DESC_LEN, "%s", r); }
+    const char *n = (const char *)sqlite3_column_text(stmt, 3);
+    if (n != NULL) { snprintf(t->name, TIX_MAX_NAME_LEN, "%s", n); }
+    t->is_accept = sqlite3_column_int(stmt, 4);
+    t->timestamp = sqlite3_column_int64(stmt, 5);
+    (*count)++;
+  }
+  sqlite3_finalize(stmt);
+  return TIX_OK;
+}
+
+tix_err_t tix_db_set_meta(tix_db_t *db, const char *key, const char *value) {
+  if (db == NULL || key == NULL || value == NULL) {
+    return TIX_ERR_INVALID_ARG;
+  }
+
+  const char *sql =
+    "INSERT OR REPLACE INTO cache_meta (key,value) VALUES (?,?)";
+  sqlite3_stmt *stmt = NULL;
+  int rc = sqlite3_prepare_v2(db->handle, sql, -1, &stmt, NULL);
+  if (rc != SQLITE_OK) { return TIX_ERR_DB; }
+
+  sqlite3_bind_text(stmt, 1, key, -1, SQLITE_STATIC);
+  sqlite3_bind_text(stmt, 2, value, -1, SQLITE_STATIC);
+  rc = sqlite3_step(stmt);
+  sqlite3_finalize(stmt);
+  return (rc == SQLITE_DONE) ? TIX_OK : TIX_ERR_DB;
+}
+
+tix_err_t tix_db_get_meta(tix_db_t *db, const char *key,
+                          char *value, sz value_len) {
+  if (db == NULL || key == NULL || value == NULL) {
+    return TIX_ERR_INVALID_ARG;
+  }
+
+  const char *sql = "SELECT value FROM cache_meta WHERE key=?";
+  sqlite3_stmt *stmt = NULL;
+  int rc = sqlite3_prepare_v2(db->handle, sql, -1, &stmt, NULL);
+  if (rc != SQLITE_OK) { return TIX_ERR_DB; }
+
+  sqlite3_bind_text(stmt, 1, key, -1, SQLITE_STATIC);
+  if (sqlite3_step(stmt) == SQLITE_ROW) {
+    const char *v = (const char *)sqlite3_column_text(stmt, 0);
+    if (v != NULL) { snprintf(value, value_len, "%s", v); }
+    else { value[0] = '\0'; }
+  } else {
+    value[0] = '\0';
+  }
+  sqlite3_finalize(stmt);
+  return TIX_OK;
+}
+
+tix_err_t tix_db_is_stale(tix_db_t *db, int *is_stale) {
+  if (db == NULL || is_stale == NULL) { return TIX_ERR_INVALID_ARG; }
+
+  char cached_commit[TIX_MAX_HASH_LEN];
+  tix_err_t err = tix_db_get_meta(db, "last_commit",
+                                   cached_commit, sizeof(cached_commit));
+  if (err != TIX_OK || cached_commit[0] == '\0') {
+    *is_stale = 1;
+    return TIX_OK;
+  }
+
+  char head[TIX_MAX_HASH_LEN];
+  err = tix_git_rev_parse_head(head, sizeof(head));
+  if (err != TIX_OK) {
+    *is_stale = 1;
+    return TIX_OK;
+  }
+
+  *is_stale = (strcmp(cached_commit, head) != 0) ? 1 : 0;
+  return TIX_OK;
+}
+
+static tix_ticket_type_e type_from_jsonl(const char *t_val) {
+  if (strcmp(t_val, "task") == 0)  { return TIX_TICKET_TASK; }
+  if (strcmp(t_val, "issue") == 0) { return TIX_TICKET_ISSUE; }
+  if (strcmp(t_val, "note") == 0)  { return TIX_TICKET_NOTE; }
+  return TIX_TICKET_TASK;
+}
+
+static tix_status_e status_from_jsonl(const char *s_val) {
+  if (s_val == NULL) { return TIX_STATUS_PENDING; }
+  if (strcmp(s_val, "d") == 0) { return TIX_STATUS_DONE; }
+  if (strcmp(s_val, "a") == 0) { return TIX_STATUS_ACCEPTED; }
+  return TIX_STATUS_PENDING;
+}
+
+tix_err_t tix_db_rebuild_from_jsonl(tix_db_t *db, const char *jsonl_path) {
+  if (db == NULL || jsonl_path == NULL) { return TIX_ERR_INVALID_ARG; }
+
+  FILE *fp = fopen(jsonl_path, "r");
+  if (fp == NULL) {
+    TIX_DEBUG("plan.jsonl not found at %s, starting fresh", jsonl_path);
+    return TIX_OK;
+  }
+
+  sqlite3_exec(db->handle, "DELETE FROM tickets", NULL, NULL, NULL);
+  sqlite3_exec(db->handle, "DELETE FROM ticket_deps", NULL, NULL, NULL);
+  sqlite3_exec(db->handle, "DELETE FROM tombstones", NULL, NULL, NULL);
+  sqlite3_exec(db->handle, "DELETE FROM keywords", NULL, NULL, NULL);
+
+  sqlite3_exec(db->handle, "BEGIN TRANSACTION", NULL, NULL, NULL);
+
+  char line[TIX_MAX_LINE_LEN];
+  while (fgets(line, (int)sizeof(line), fp) != NULL) {
+    tix_json_obj_t obj;
+    if (tix_json_parse_line(line, &obj) != TIX_OK) { continue; }
+
+    const char *t_val = tix_json_get_str(&obj, "t");
+    if (t_val == NULL) { continue; }
+
+    if (strcmp(t_val, "task") == 0 || strcmp(t_val, "issue") == 0 ||
+        strcmp(t_val, "note") == 0) {
+      tix_ticket_t ticket;
+      tix_ticket_init(&ticket);
+      ticket.type = type_from_jsonl(t_val);
+
+      const char *id = tix_json_get_str(&obj, "id");
+      if (id != NULL) { snprintf(ticket.id, TIX_MAX_ID_LEN, "%s", id); }
+
+      const char *name = tix_json_get_str(&obj, "name");
+      if (name != NULL) { snprintf(ticket.name, TIX_MAX_NAME_LEN, "%s", name); }
+
+      /* issues use "desc" instead of "name" */
+      const char *desc = tix_json_get_str(&obj, "desc");
+      if (desc != NULL && ticket.name[0] == '\0') {
+        snprintf(ticket.name, TIX_MAX_NAME_LEN, "%s", desc);
+      }
+
+      const char *s = tix_json_get_str(&obj, "s");
+      ticket.status = status_from_jsonl(s);
+
+      const char *spec = tix_json_get_str(&obj, "spec");
+      if (spec != NULL) { snprintf(ticket.spec, TIX_MAX_PATH_LEN, "%s", spec); }
+
+      const char *notes = tix_json_get_str(&obj, "notes");
+      if (notes != NULL) { snprintf(ticket.notes, TIX_MAX_DESC_LEN, "%s", notes); }
+
+      const char *accept = tix_json_get_str(&obj, "accept");
+      if (accept != NULL) { snprintf(ticket.accept, TIX_MAX_DESC_LEN, "%s", accept); }
+
+      const char *done_at = tix_json_get_str(&obj, "done_at");
+      if (done_at != NULL) { snprintf(ticket.done_at, TIX_MAX_HASH_LEN, "%s", done_at); }
+
+      const char *priority = tix_json_get_str(&obj, "priority");
+      ticket.priority = tix_priority_from_str(priority);
+
+      const char *parent = tix_json_get_str(&obj, "parent");
+      if (parent != NULL) { snprintf(ticket.parent, TIX_MAX_ID_LEN, "%s", parent); }
+
+      const char *cf = tix_json_get_str(&obj, "created_from");
+      if (cf != NULL) { snprintf(ticket.created_from, TIX_MAX_ID_LEN, "%s", cf); }
+
+      const char *kr = tix_json_get_str(&obj, "kill_reason");
+      if (kr != NULL) { snprintf(ticket.kill_reason, TIX_MAX_KEYWORD_LEN, "%s", kr); }
+
+      /* load deps from JSON array */
+      for (u32 fi = 0; fi < obj.field_count; fi++) {
+        if (strcmp(obj.fields[fi].key, "deps") == 0 &&
+            obj.fields[fi].type == TIX_JSON_ARRAY) {
+          for (u32 ai = 0; ai < obj.fields[fi].arr_count &&
+               ticket.dep_count < TIX_MAX_DEPS; ai++) {
+            snprintf(ticket.deps[ticket.dep_count], TIX_MAX_ID_LEN,
+                     "%s", obj.fields[fi].arr_vals[ai]);
+            ticket.dep_count++;
+          }
+          break;
+        }
+      }
+
+      tix_db_upsert_ticket(db, &ticket);
+    } else if (strcmp(t_val, "accept") == 0 || strcmp(t_val, "reject") == 0) {
+      tix_tombstone_t ts;
+      memset(&ts, 0, sizeof(ts));
+      ts.is_accept = (strcmp(t_val, "accept") == 0) ? 1 : 0;
+
+      const char *id = tix_json_get_str(&obj, "id");
+      if (id != NULL) { snprintf(ts.id, TIX_MAX_ID_LEN, "%s", id); }
+
+      const char *done_at = tix_json_get_str(&obj, "done_at");
+      if (done_at != NULL) { snprintf(ts.done_at, TIX_MAX_HASH_LEN, "%s", done_at); }
+
+      const char *reason = tix_json_get_str(&obj, "reason");
+      if (reason != NULL) { snprintf(ts.reason, TIX_MAX_DESC_LEN, "%s", reason); }
+
+      const char *name = tix_json_get_str(&obj, "name");
+      if (name != NULL) { snprintf(ts.name, TIX_MAX_NAME_LEN, "%s", name); }
+
+      tix_db_upsert_tombstone(db, &ts);
+    }
+  }
+
+  sqlite3_exec(db->handle, "COMMIT", NULL, NULL, NULL);
+  fclose(fp);
+
+  /* update cache commit */
+  char head[TIX_MAX_HASH_LEN];
+  if (tix_git_rev_parse_head(head, sizeof(head)) == TIX_OK) {
+    tix_db_set_meta(db, "last_commit", head);
+  }
+
+  TIX_INFO("rebuilt cache from %s", jsonl_path);
+  return TIX_OK;
+}
