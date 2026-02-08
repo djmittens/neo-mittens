@@ -101,10 +101,12 @@ static void test_replay_content_delete(TIX_TEST_ARGS()) {
   tix_err_t err = tix_db_replay_content(&db, content);
   ASSERT_OK(err);
 
-  /* issue should be gone */
+  /* issue should be preserved with DELETED status */
   tix_ticket_t t;
   err = tix_db_get_ticket(&db, "i-dd001122", &t);
-  ASSERT_EQ(err, TIX_ERR_NOT_FOUND);
+  ASSERT_OK(err);
+  ASSERT_EQ((int)t.status, (int)TIX_STATUS_DELETED);
+  ASSERT_GT(t.resolved_at, 0);
 
   tix_db_close(&db);
   rmrf(tmpdir);
@@ -137,10 +139,12 @@ static void test_replay_content_accept(TIX_TEST_ARGS()) {
   tix_err_t err = tix_db_replay_content(&db, content);
   ASSERT_OK(err);
 
-  /* task should be deleted (accepted), tombstone should exist */
+  /* task should be preserved with ACCEPTED status, tombstone should exist */
   tix_ticket_t t;
   err = tix_db_get_ticket(&db, "t-ee001122", &t);
-  ASSERT_EQ(err, TIX_ERR_NOT_FOUND);
+  ASSERT_OK(err);
+  ASSERT_EQ((int)t.status, (int)TIX_STATUS_ACCEPTED);
+  ASSERT_GT(t.resolved_at, 0);
 
   tix_tombstone_t ts[4];
   u32 count = 0;

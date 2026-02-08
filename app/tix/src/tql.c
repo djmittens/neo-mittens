@@ -27,9 +27,10 @@ static const char *VALID_COLUMNS[] = {
   "id", "type", "status", "priority", "name", "spec", "notes", "accept",
   "done_at", "branch", "parent", "created_from", "supersedes",
   "kill_reason", "created_from_name", "supersedes_name",
-  "supersedes_reason", "created_at", "updated_at", "author",
+  "supersedes_reason", "created_at", "updated_at", "author", "assigned",
   "completed_at", "cost", "tokens_in", "tokens_out", "iterations",
   "model", "retries", "kill_count", "commit_hash",
+  "resolved_at", "compacted_at",
   NULL
 };
 
@@ -260,6 +261,15 @@ static tix_err_t parse_segment(const char *seg, tql_pipeline_t *p,
     }
     cursor += n;
     skip_ws(&cursor);
+
+    /* Check for 'all' modifier after source keyword */
+    if (strncmp(cursor, "all", 3) == 0 &&
+        (cursor[3] == '\0' || cursor[3] == ' ' ||
+         cursor[3] == '\t' || cursor[3] == '|')) {
+      p->has_all = 1;
+      cursor += 3;
+      skip_ws(&cursor);
+    }
 
     /* Source segment may have inline filters after the keyword */
     while (*cursor != '\0') {
@@ -523,8 +533,10 @@ static tix_err_t parse_segment(const char *seg, tql_pipeline_t *p,
     return TIX_OK;
   }
 
-  /* If the whole segment is filters (no keyword prefix) */
-  if (n > 0 && is_filter_token(cursor)) {
+  /* If the whole segment is filters (no keyword prefix).
+     Also handle negation prefix: !field=val (n==0 because ! isn't alphanumeric) */
+  if ((n > 0 && is_filter_token(cursor)) ||
+      (*cursor == '!' && is_filter_token(cursor))) {
     /* Parse as filter segment: multiple space-separated filters */
     while (*cursor != '\0') {
       skip_ws(&cursor);

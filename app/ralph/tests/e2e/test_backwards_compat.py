@@ -9,20 +9,9 @@ these tests verify that:
 
 import json
 import os
-import shutil
 from pathlib import Path
 
 import pytest
-
-
-def get_repo_root() -> Path:
-    """Find the repository root by looking for ralph/ directory."""
-    current = Path.cwd()
-    while current != current.parent:
-        if (current / "ralph" / "PROMPT_build.md").exists():
-            return current
-        current = current.parent
-    return Path.cwd().parent
 
 
 class TestReadsExistingState:
@@ -81,68 +70,42 @@ class TestReadsExistingState:
         assert restored.batch_attempt == 2
 
 
-class TestLoadsExistingPrompts:
-    """Tests for loading existing PROMPT_*.md files."""
+class TestLoadsPackagePrompts:
+    """Tests for loading prompts from package-embedded defaults."""
 
-    def test_loads_existing_prompts(self, tmp_path):
-        """Test that PROMPT_*.md files are loadable from ralph/ directory."""
+    def test_loads_all_stages(self):
+        """Test that all stage prompts are loadable from package defaults."""
         from ralph.prompts import load_prompt
 
-        repo_root = get_repo_root()
-        ralph_dir = repo_root / "ralph"
-        if not ralph_dir.exists():
-            pytest.skip("ralph/ directory not found")
-
         stages = ["plan", "build", "verify", "investigate", "decompose"]
-        loaded_count = 0
 
         for stage in stages:
-            prompt_file = ralph_dir / f"PROMPT_{stage}.md"
-            if prompt_file.exists():
-                prompt = load_prompt(stage, ralph_dir)
-                assert prompt is not None
-                assert len(prompt) > 0
-                loaded_count += 1
+            prompt = load_prompt(stage)
+            assert prompt is not None
+            assert len(prompt) > 0
 
-        assert loaded_count > 0, "No PROMPT_*.md files found in ralph/"
-
-    def test_prompt_content_is_string(self, tmp_path):
+    def test_prompt_content_is_string(self):
         """Test that loaded prompts return strings."""
         from ralph.prompts import load_prompt
 
-        repo_root = get_repo_root()
-        ralph_dir = repo_root / "ralph"
-        prompt_file = ralph_dir / "PROMPT_build.md"
-        if not prompt_file.exists():
-            pytest.skip("PROMPT_build.md not found")
-
-        prompt = load_prompt("build", ralph_dir)
+        prompt = load_prompt("build")
         assert isinstance(prompt, str)
 
-    def test_prompt_from_copied_directory(self, tmp_path):
-        """Test loading prompts from a copied directory structure."""
+    def test_prompts_contain_ralph_output(self):
+        """Test all prompts contain the RALPH_OUTPUT marker."""
         from ralph.prompts import load_prompt
 
-        repo_root = get_repo_root()
-        ralph_dir = repo_root / "ralph"
-        prompt_file = ralph_dir / "PROMPT_build.md"
-        if not prompt_file.exists():
-            pytest.skip("PROMPT_build.md not found")
+        stages = ["plan", "build", "verify", "investigate", "decompose"]
+        for stage in stages:
+            prompt = load_prompt(stage)
+            assert "RALPH_OUTPUT" in prompt, f"{stage} missing RALPH_OUTPUT"
 
-        tmp_ralph = tmp_path / "ralph"
-        tmp_ralph.mkdir()
-        shutil.copy(prompt_file, tmp_ralph / "PROMPT_build.md")
-
-        prompt = load_prompt("build", tmp_ralph)
-        assert prompt is not None
-        assert len(prompt) > 0
-
-    def test_missing_prompt_raises_error(self, tmp_path):
-        """Test that missing prompt file raises FileNotFoundError."""
+    def test_unknown_stage_raises_error(self):
+        """Test that unknown stage name raises KeyError."""
         from ralph.prompts import load_prompt
 
-        with pytest.raises(FileNotFoundError):
-            load_prompt("nonexistent_stage", tmp_path)
+        with pytest.raises(KeyError):
+            load_prompt("nonexistent_stage")
 
 
 class TestLoadsGlobalConfig:

@@ -39,7 +39,12 @@ List all pending notes as a JSON array.
 .fi
 .RE
 .SS tix note done \fIid\fR
-Archive a note (delete it from active state).
+Archive a note.
+The note is preserved in the database with
+.B deleted
+status and a
+.B resolved_at
+timestamp, but excluded from default queries.
 .PP
 .B Output:
 .RS

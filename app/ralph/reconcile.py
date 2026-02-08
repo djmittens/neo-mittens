@@ -384,18 +384,20 @@ def reconcile_plan(
     agent_output: str,
     spec_name: str,
 ) -> ReconcileResult:
-    """Reconcile PLAN stage output using tix batch add.
+    """Reconcile PLAN stage output — incremental add/drop.
 
     Expected agent output schema:
     {
         "tasks": [
             {"name": "...", "notes": "...", "accept": "...", "deps": [...]},
             ...
-        ]
+        ],
+        "drop": ["t-abc123", ...]  // optional: IDs of obsolete tasks to remove
     }
 
-    Uses tix batch add for efficiency — single subprocess call for all
-    tasks, with support for intra-batch dependency references.
+    The agent only outputs NEW tasks to add. Existing pending tasks that
+    the agent wants to keep are simply omitted from output. Tasks the
+    agent wants to remove are listed in the "drop" array.
 
     Args:
         tix: Tix harness instance.
@@ -403,7 +405,7 @@ def reconcile_plan(
         spec_name: The spec file being planned.
 
     Returns:
-        ReconcileResult with tasks added.
+        ReconcileResult with tasks added and dropped.
     """
     result = ReconcileResult()
     data = extract_structured_output(agent_output)
@@ -414,37 +416,47 @@ def reconcile_plan(
         return result
 
     raw_tasks = data.get("tasks", [])
-    if not raw_tasks:
-        result.errors.append("No tasks in plan output")
+    drop_ids = data.get("drop", [])
+
+    # Drop obsolete tasks first (so IDs don't conflict with new tasks)
+    for task_id in drop_ids:
+        if not isinstance(task_id, str) or not task_id:
+            continue
+        try:
+            tix.task_delete(task_id)
+            result.tasks_deleted.append(task_id)
+        except TixError as e:
+            result.errors.append(f"Failed to drop {task_id}: {e}")
+
+    # Allow plans with only drops and no new tasks
+    if not raw_tasks and not drop_ids:
+        result.errors.append("No tasks or drops in plan output")
         result.ok = False
         return result
 
-    # Inject spec name into all tasks
+    # Inject spec name into all new tasks
     tasks_to_add = []
     for task_data in raw_tasks:
         if not task_data.get("name"):
             result.errors.append("Task missing name field")
             continue
         task_data["spec"] = spec_name
+        task_data.setdefault("assigned", "ralph")
         tasks_to_add.append(task_data)
 
-    if not tasks_to_add:
-        result.errors.append("No valid tasks to add")
-        result.ok = False
-        return result
-
-    # Batch add via tix (single subprocess call)
-    try:
-        added = tix.task_batch_add(tasks_to_add)
-        for resp in added:
-            task_id = resp.get("id", "")
-            if task_id:
-                result.tasks_added.append(task_id)
-    except TixError as e:
-        result.errors.append(f"Batch add failed: {e}")
-        # Fallback: try individual adds
-        for task_data in tasks_to_add:
-            _add_task(tix, task_data, result)
+    if tasks_to_add:
+        # Batch add via tix (single subprocess call)
+        try:
+            added = tix.task_batch_add(tasks_to_add)
+            for resp in added:
+                task_id = resp.get("id", "")
+                if task_id:
+                    result.tasks_added.append(task_id)
+        except TixError as e:
+            result.errors.append(f"Batch add failed: {e}")
+            # Fallback: try individual adds
+            for task_data in tasks_to_add:
+                _add_task(tix, task_data, result)
 
     return result
 
@@ -460,6 +472,9 @@ def _add_task(tix: TixProtocol, task_data: dict, result: ReconcileResult) -> Non
     if not name:
         result.errors.append("Task missing name field")
         return
+
+    # Tag all tasks created by ralph so they can be filtered by assignee
+    task_data.setdefault("assigned", "ralph")
 
     try:
         resp = tix.task_add(task_data)

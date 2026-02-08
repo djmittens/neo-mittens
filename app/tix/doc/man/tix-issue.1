@@ -17,6 +17,15 @@ Issues are bug reports and problems tracked alongside tasks.
 Unlike tasks, issues have no lifecycle states\(emthey are either
 open (pending) or resolved (deleted).
 .PP
+Resolved issues are preserved in the database with a
+.B resolved_at
+timestamp and
+.B deleted
+status, but excluded from default queries.
+Use
+.B tix q "issues all"
+to view resolved issues.
+.PP
 Issue IDs use the prefix
 .BR I\- .
 .SH SUBCOMMANDS

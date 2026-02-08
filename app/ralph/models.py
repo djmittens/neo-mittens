@@ -3,7 +3,7 @@
 These dataclasses define the schema for ticket records. The tix binary
 owns the plan.jsonl file — all reads and writes go through the tix CLI
 (see ralph.tix). These models are used only for deserializing tix CLI
-JSON output and for the powerplant/ralph legacy monolith.
+JSON output.
 
 Note: RalphPlanConfig was removed — configuration now lives in
 ~/.config/ralph/config.toml via GlobalConfig.

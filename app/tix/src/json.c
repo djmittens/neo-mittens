@@ -279,6 +279,8 @@ sz tix_json_write_ticket(const void *vticket, char *buf, sz buf_len) {
   const char *status_key = "p";
   if (t->status == TIX_STATUS_DONE)     { status_key = "d"; }
   if (t->status == TIX_STATUS_ACCEPTED) { status_key = "a"; }
+  if (t->status == TIX_STATUS_REJECTED) { status_key = "r"; }
+  if (t->status == TIX_STATUS_DELETED)  { status_key = "x"; }
 
   TIX_BUF_PRINTF(p, end, 0,
       "{\"t\":\"%s\",\"id\":\"%s\",\"name\":\"%s\",\"s\":\"%s\"",
@@ -356,6 +358,11 @@ sz tix_json_write_ticket(const void *vticket, char *buf, sz buf_len) {
     tix_json_escape(t->author, esc_author, sizeof(esc_author));
     TIX_BUF_PRINTF(p, end, 0, ",\"author\":\"%s\"", esc_author);
   }
+  if (t->assigned[0] != '\0') {
+    char esc_assigned[TIX_MAX_NAME_LEN * 2];
+    tix_json_escape(t->assigned, esc_assigned, sizeof(esc_assigned));
+    TIX_BUF_PRINTF(p, end, 0, ",\"assigned\":\"%s\"", esc_assigned);
+  }
 
   /* completion timing */
   if (t->completed_at[0] != '\0') {
@@ -386,6 +393,16 @@ sz tix_json_write_ticket(const void *vticket, char *buf, sz buf_len) {
   }
   if (t->kill_count > 0) {
     TIX_BUF_PRINTF(p, end, 0, ",\"kill_count\":%d", (int)t->kill_count);
+  }
+
+  /* lifecycle timestamps */
+  if (t->resolved_at > 0) {
+    TIX_BUF_PRINTF(p, end, 0, ",\"resolved_at\":%lld",
+                   (long long)t->resolved_at);
+  }
+  if (t->compacted_at > 0) {
+    TIX_BUF_PRINTF(p, end, 0, ",\"compacted_at\":%lld",
+                   (long long)t->compacted_at);
   }
 
   TIX_BUF_PRINTF(p, end, 0, "}");

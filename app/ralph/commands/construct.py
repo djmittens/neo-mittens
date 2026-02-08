@@ -209,13 +209,10 @@ def _build_stage_prompt_tix(
     else:
         return None, None
     
-    try:
-        prompt = load_and_inject(stage_name, context, ralph_dir)
-        if project_rules:
-            prompt = build_prompt_with_rules(prompt, project_rules)
-        return prompt, meta
-    except FileNotFoundError:
-        return None, None
+    prompt = load_and_inject(stage_name, context)
+    if project_rules:
+        prompt = build_prompt_with_rules(prompt, project_rules)
+    return prompt, meta
 
 
 def _reconcile_stage(

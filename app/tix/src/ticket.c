@@ -40,6 +40,8 @@ const char *tix_status_str(tix_status_e status) {
     case TIX_STATUS_PENDING:  return "pending";
     case TIX_STATUS_DONE:     return "done";
     case TIX_STATUS_ACCEPTED: return "accepted";
+    case TIX_STATUS_REJECTED: return "rejected";
+    case TIX_STATUS_DELETED:  return "deleted";
   }
   return "unknown";
 }

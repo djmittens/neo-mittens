@@ -8,7 +8,7 @@ Features:
 - Auto-commit plan after PLAN_COMPLETE
 - Metrics tracking (cost/tokens/time)
 - Git push after commit
-- Clear old tasks via tix before planning
+- Incremental planning — existing pending tasks are preserved, agent adds/drops
 - Multi-iteration gap detection
 
 Agent outputs structured JSON via [RALPH_OUTPUT] markers.
@@ -43,10 +43,72 @@ __all__ = ["cmd_plan"]
 DEFAULT_MAX_PLAN_ITERATIONS = 5
 # Minimum timeout for plan mode (15 minutes)
 MIN_PLAN_TIMEOUT_MS = 900_000
+# Maximum tombstones to include in prompt (avoid context bloat)
+MAX_HISTORY_ITEMS = 30
+
+
+def _build_tix_history(tix: Tix, spec_name: str) -> str:
+    """Build a formatted history section from tix tombstones for the spec.
+
+    Queries accepted and rejected tombstones so the planning agent can
+    learn from prior work — avoiding re-creating accepted tasks and
+    addressing rejection reasons in new tasks.
+
+    Args:
+        tix: Tix harness instance.
+        spec_name: Spec name to filter tombstones for.
+
+    Returns:
+        Formatted markdown string for prompt injection, or empty string.
+    """
+    try:
+        tombstones = tix.query_tombstones()
+    except TixError:
+        return ""
+
+    accepted = tombstones.get("accepted", [])
+    rejected = tombstones.get("rejected", [])
+
+    if not accepted and not rejected:
+        return ""
+
+    lines = ["## Prior Work History (from tix)", ""]
+
+    if accepted:
+        lines.append(f"### Accepted Tasks ({len(accepted)} completed)")
+        lines.append("These tasks were already completed and verified. Do NOT re-create them.")
+        lines.append("")
+        for task in accepted[:MAX_HISTORY_ITEMS]:
+            name = task.get("name", "unknown")
+            tid = task.get("id", "?")
+            lines.append(f"- [{tid}] {name}")
+        if len(accepted) > MAX_HISTORY_ITEMS:
+            lines.append(f"- ... and {len(accepted) - MAX_HISTORY_ITEMS} more")
+        lines.append("")
+
+    if rejected:
+        lines.append(f"### Rejected Tasks ({len(rejected)} failed verification)")
+        lines.append("These tasks were attempted but failed. Study the rejection reasons.")
+        lines.append("")
+        for task in rejected[:MAX_HISTORY_ITEMS]:
+            name = task.get("name", "unknown")
+            tid = task.get("id", "?")
+            reason = task.get("reason", "no reason recorded")
+            lines.append(f"- [{tid}] {name}")
+            lines.append(f"  Rejected: {reason}")
+        if len(rejected) > MAX_HISTORY_ITEMS:
+            lines.append(f"- ... and {len(rejected) - MAX_HISTORY_ITEMS} more")
+        lines.append("")
+
+    return "\n".join(lines)
 
 
 def _build_plan_prompt(
-    spec_name: str, spec_content: str, project_rules: Optional[str] = None
+    spec_name: str,
+    spec_content: str,
+    project_rules: Optional[str] = None,
+    tix_history: Optional[str] = None,
+    pending_tasks: Optional[str] = None,
 ) -> Optional[str]:
     """Load the plan prompt template with injected spec context.
 
@@ -54,22 +116,22 @@ def _build_plan_prompt(
         spec_name: Name of the spec file
         spec_content: Full content of the spec file
         project_rules: Optional project rules from AGENTS.md/CLAUDE.md
+        tix_history: Optional formatted tix history for the spec
+        pending_tasks: Optional formatted pending tasks for incremental planning
 
     Returns:
         Prompt content with injected context, or None if not found.
     """
-    try:
-        context = build_plan_context(spec_name, spec_content)
-        prompt = load_and_inject("plan", context)
-        
-        # Prepend project rules if available
-        if project_rules:
-            prompt = build_prompt_with_rules(prompt, project_rules)
-        
-        return prompt
-    except FileNotFoundError:
-        print(f"{Colors.RED}Error: PROMPT_plan.md not found{Colors.NC}")
-        return None
+    context = build_plan_context(
+        spec_name, spec_content, tix_history, pending_tasks
+    )
+    prompt = load_and_inject("plan", context)
+
+    # Prepend project rules if available
+    if project_rules:
+        prompt = build_prompt_with_rules(prompt, project_rules)
+
+    return prompt
 
 
 def _run_opencode(config: GlobalConfig, prompt: str, cwd: Path) -> Tuple[Optional[str], Metrics]:
@@ -231,31 +293,86 @@ def _prioritize_tasks_tix(tix: Tix, tasks: list[dict]) -> dict:
     return stats
 
 
-def _clear_existing_tasks(tix: Tix, spec_name: str) -> int:
-    """Clear existing tasks for a spec via tix.
+def _get_pending_tasks_for_spec(tix: Tix, spec_name: str, branch: str) -> list[dict]:
+    """Get pending tasks for a spec on the current branch.
 
-    Deletes all pending tasks for the given spec so planning starts fresh.
+    Filters by both spec name and branch to ensure branch isolation.
 
     Args:
         tix: Tix harness instance.
-        spec_name: Spec name to clear tasks for.
+        spec_name: Spec name to filter tasks for.
+        branch: Current git branch name.
 
     Returns:
-        Number of tasks deleted.
+        List of pending task dicts matching spec and branch.
     """
-    deleted = 0
     try:
         tasks = tix.query_tasks()
-        for task in tasks:
-            if task.get("spec") == spec_name:
-                try:
-                    tix.task_delete(task["id"])
-                    deleted += 1
-                except TixError:
-                    pass
     except TixError:
-        pass
-    return deleted
+        return []
+
+    return [
+        t for t in tasks
+        if t.get("spec") == spec_name
+        and (t.get("branch", "") == branch or t.get("branch", "") == "")
+        and t.get("assigned", "") == "ralph"
+    ]
+
+
+# Maximum pending tasks to include in prompt (avoid context bloat)
+MAX_PENDING_ITEMS = 30
+
+
+def _build_pending_tasks(tix: Tix, spec_name: str, branch: str) -> str:
+    """Build a formatted section of existing pending tasks for the prompt.
+
+    Shows the agent what tasks already exist so it can decide whether to
+    keep them (do nothing), drop them (add to "drop" array), or add new
+    tasks alongside them.
+
+    Args:
+        tix: Tix harness instance.
+        spec_name: Spec name to filter tasks for.
+        branch: Current git branch name.
+
+    Returns:
+        Formatted markdown string for prompt injection, or empty string.
+    """
+    tasks = _get_pending_tasks_for_spec(tix, spec_name, branch)
+
+    if not tasks:
+        return ""
+
+    lines = [f"## Existing Pending Tasks ({len(tasks)} on branch {branch})", ""]
+    lines.append("These tasks are already in the backlog. Review each one:")
+    lines.append("- **Keep**: If still valid, do nothing (do NOT include in your output).")
+    lines.append("- **Drop**: If obsolete or superseded, add its ID to your `\"drop\"` array.")
+    lines.append("- You may reference these IDs in `deps` for new tasks.")
+    lines.append("")
+
+    for task in tasks[:MAX_PENDING_ITEMS]:
+        tid = task.get("id", "?")
+        name = task.get("name", "untitled")
+        priority = task.get("priority", "medium")
+        deps = task.get("deps", [])
+        notes = task.get("notes", "")
+        accept = task.get("accept", "")
+        lines.append(f"- **[{tid}]** {name} ({priority})")
+        if deps:
+            lines.append(f"  Deps: {', '.join(deps)}")
+        if notes:
+            # Truncate long notes to keep prompt manageable
+            short_notes = notes[:200] + "..." if len(notes) > 200 else notes
+            lines.append(f"  Notes: {short_notes}")
+        if accept:
+            short_accept = accept[:150] + "..." if len(accept) > 150 else accept
+            lines.append(f"  Accept: {short_accept}")
+
+    if len(tasks) > MAX_PENDING_ITEMS:
+        lines.append(f"- ... and {len(tasks) - MAX_PENDING_ITEMS} more")
+
+    lines.append("")
+    return "\n".join(lines)
 
 
 def _commit_tix_plan(tix: Tix, spec_name: str, task_count: int, cwd: Path) -> bool:
@@ -374,10 +491,10 @@ def cmd_plan(config: GlobalConfig, spec_file: str, args) -> int:
 
     This command:
     1. Loads the spec file
-    2. Clears existing tasks for this spec via tix
-    3. Builds a prompt with the spec content injected
+    2. Gathers existing pending tasks and tombstone history
+    3. Builds a prompt with spec + backlog context injected
     4. Runs OpenCode which outputs [RALPH_OUTPUT] JSON
-    5. Reconciles agent output — creates tasks via tix batch add
+    5. Reconciles agent output — adds new tasks, drops obsolete ones
     6. Auto-prioritizes, commits, and pushes
 
     Args:
@@ -415,12 +532,20 @@ def cmd_plan(config: GlobalConfig, spec_file: str, args) -> int:
 
     _print_plan_header(spec_name, branch, rules_source, config)
 
-    # Clear existing tasks for this spec
-    deleted = _clear_existing_tasks(tix, spec_name)
-    if deleted > 0:
-        print(f"{Colors.YELLOW}Cleared {deleted} existing tasks for {spec_name}{Colors.NC}")
+    # Gather tix history (tombstones: accepted/rejected)
+    tix_history = _build_tix_history(tix, spec_name)
+    if tix_history:
+        print(f"{Colors.DIM}Loaded tix history for {spec_name}{Colors.NC}")
 
-    prompt_content = _build_plan_prompt(spec_name, spec_content, project_rules)
+    # Gather existing pending tasks for incremental planning
+    pending_tasks = _build_pending_tasks(tix, spec_name, branch)
+    if pending_tasks:
+        pending_count = len(_get_pending_tasks_for_spec(tix, spec_name, branch))
+        print(f"{Colors.DIM}Found {pending_count} existing pending tasks{Colors.NC}")
+
+    prompt_content = _build_plan_prompt(
+        spec_name, spec_content, project_rules, tix_history, pending_tasks
+    )
     if prompt_content is None:
         return 1
 
@@ -474,14 +599,18 @@ def _finalize_plan(
     cwd: Path,
 ) -> int:
     """Reconcile agent output, prioritize, commit, and report."""
-    # Reconcile — parse [RALPH_OUTPUT] and create tasks via tix batch add
+    # Reconcile — parse [RALPH_OUTPUT], add new tasks, drop obsolete ones
     recon = reconcile_plan(tix, output_str, spec_name)
 
-    if not recon.tasks_added:
+    # A valid incremental plan may have adds, drops, or both
+    if not recon.tasks_added and not recon.tasks_deleted:
         _show_debug_output(output_str, recon)
         return 1
 
-    print(f"{Colors.GREEN}Added {len(recon.tasks_added)} tasks via tix{Colors.NC}")
+    if recon.tasks_added:
+        print(f"{Colors.GREEN}Added {len(recon.tasks_added)} tasks via tix{Colors.NC}")
+    if recon.tasks_deleted:
+        print(f"{Colors.YELLOW}Dropped {len(recon.tasks_deleted)} obsolete tasks{Colors.NC}")
 
     # Get tasks back from tix for prioritization and reporting
     spec_tasks = tix.query_tasks()

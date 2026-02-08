@@ -61,13 +61,16 @@ static inline const char *tix_c(const char *code) {
 
 /* ---- Semantic color helpers ---- */
 
-/* Status colors: pending=yellow, done=green, accepted=bright green */
+/* Status colors: pending=yellow, done=green, accepted=bright green,
+   rejected=red, deleted=dim */
 static inline const char *tix_status_color(tix_status_e s) {
   if (!tix_color_enabled()) { return ""; }
   switch (s) {
     case TIX_STATUS_PENDING:  return TIX_YELLOW;
     case TIX_STATUS_DONE:     return TIX_GREEN;
     case TIX_STATUS_ACCEPTED: return TIX_BRIGHT_GREEN;
+    case TIX_STATUS_REJECTED: return TIX_RED;
+    case TIX_STATUS_DELETED:  return TIX_DIM;
   }
   return "";
 }

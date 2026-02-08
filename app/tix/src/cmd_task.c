@@ -182,6 +182,12 @@ static tix_err_t task_add(tix_ctx_t *ctx, int argc, char **argv) {
     break;
   }
 
+  /* assignment */
+  const char *assigned = tix_json_get_str(&obj, "assigned");
+  if (assigned != NULL && assigned[0] != '\0') {
+    snprintf(ticket.assigned, sizeof(ticket.assigned), "%s", assigned);
+  }
+
   /* auto-fill author from git user.name */
   tix_git_user_name(ticket.author, sizeof(ticket.author));
 
@@ -320,7 +326,10 @@ static tix_err_t task_accept(tix_ctx_t *ctx, int argc, char **argv) {
   err = tix_db_upsert_tombstone(&ctx->db, &ts);
   if (err != TIX_OK) { return err; }
 
-  err = tix_db_delete_ticket(&ctx->db, id);
+  /* Mark ticket as ACCEPTED with resolved_at instead of deleting */
+  ticket.status = TIX_STATUS_ACCEPTED;
+  ticket.resolved_at = ts.timestamp;
+  err = tix_db_upsert_ticket(&ctx->db, &ticket);
   if (err != TIX_OK) { return err; }
 
   err = tix_plan_append_tombstone(ctx->plan_path, &ts);
@@ -431,7 +440,10 @@ static tix_err_t task_delete(tix_ctx_t *ctx, int argc, char **argv) {
     return TIX_ERR_DEPENDENCY;
   }
 
-  err = tix_db_delete_ticket(&ctx->db, id);
+  /* Mark ticket as DELETED with resolved_at instead of hard-deleting */
+  ticket.status = TIX_STATUS_DELETED;
+  ticket.resolved_at = (i64)time(NULL);
+  err = tix_db_upsert_ticket(&ctx->db, &ticket);
   if (err != TIX_OK) {
     fprintf(stderr, "error: failed to delete task %s\n", id);
     return err;
@@ -484,6 +496,10 @@ static tix_err_t task_update(tix_ctx_t *ctx, int argc, char **argv) {
   v = tix_json_get_str(&obj, "kill_reason");
   if (v != NULL) {
     snprintf(ticket.kill_reason, TIX_MAX_KEYWORD_LEN, "%s", v);
+  }
+  v = tix_json_get_str(&obj, "assigned");
+  if (v != NULL) {
+    snprintf(ticket.assigned, sizeof(ticket.assigned), "%s", v);
   }
 
   if (tix_json_has_key(&obj, "cost")) {

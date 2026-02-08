@@ -148,6 +148,9 @@ typedef struct {
 
   /* distinct */
   int has_distinct;
+
+  /* all: include resolved tickets (accepted/rejected/deleted) */
+  int has_all;
 } tql_pipeline_t;
 
 /* ---- Compiled SQL + bind values ---- */

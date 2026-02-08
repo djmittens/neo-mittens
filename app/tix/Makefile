@@ -61,6 +61,9 @@ define run_tests
 	$(1)/test_new_fields
 	$(1)/test_labels
 	$(1)/test_tql
+	$(1)/test_tql_features
+	$(1)/test_resolved
+	$(1)/test_assigned
 	@echo "=== All tix tests passed ($(1)) ==="
 endef
 

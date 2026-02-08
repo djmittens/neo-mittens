@@ -7,7 +7,6 @@ from pathlib import Path
 from ralph.prompts import (
     load_prompt,
     build_prompt_with_rules,
-    merge_prompts,
     find_project_rules,
     inject_context,
     build_plan_context,
@@ -22,66 +21,48 @@ from ralph.prompts import (
 class TestLoadPrompt:
     """Tests for load_prompt function."""
 
-    def test_load_prompt_success(self, tmp_path):
-        """Test loading a prompt file successfully."""
-        ralph_dir = tmp_path / "ralph"
-        ralph_dir.mkdir()
-        prompt_file = ralph_dir / "PROMPT_build.md"
-        prompt_content = "# BUILD Stage\n\nThis is the build prompt."
-        prompt_file.write_text(prompt_content)
+    def test_load_prompt_returns_string(self):
+        """Test loading a prompt returns a string."""
+        result = load_prompt("build")
+        assert isinstance(result, str)
 
-        result = load_prompt("build", ralph_dir=ralph_dir)
-
-        assert result == prompt_content
-
-    def test_load_prompt_different_stages(self, tmp_path):
-        """Test loading prompts for different stages."""
-        ralph_dir = tmp_path / "ralph"
-        ralph_dir.mkdir()
-
+    def test_load_prompt_all_stages(self):
+        """Test loading prompts for all valid stages."""
         stages = ["plan", "build", "verify", "investigate", "decompose"]
         for stage in stages:
-            prompt_file = ralph_dir / f"PROMPT_{stage}.md"
-            prompt_file.write_text(f"Content for {stage}")
+            result = load_prompt(stage)
+            assert isinstance(result, str)
+            assert len(result) > 100, f"{stage} prompt appears too short"
 
+    def test_load_prompt_unknown_stage(self):
+        """Test KeyError for unknown stage name."""
+        with pytest.raises(KeyError) as exc_info:
+            load_prompt("nonexistent")
+        assert "nonexistent" in str(exc_info.value)
+
+    def test_load_prompt_contains_ralph_output(self):
+        """Test all prompts contain the RALPH_OUTPUT marker."""
+        stages = ["plan", "build", "verify", "investigate", "decompose"]
         for stage in stages:
-            result = load_prompt(stage, ralph_dir=ralph_dir)
-            assert result == f"Content for {stage}"
+            result = load_prompt(stage)
+            assert "RALPH_OUTPUT" in result, f"{stage} prompt missing RALPH_OUTPUT"
 
-    def test_load_prompt_file_not_found(self, tmp_path):
-        """Test FileNotFoundError when prompt file doesn't exist."""
-        ralph_dir = tmp_path / "ralph"
-        ralph_dir.mkdir()
+    def test_load_prompt_build_has_spec_content(self):
+        """Test build prompt includes spec content placeholder."""
+        result = load_prompt("build")
+        assert "{{SPEC_CONTENT}}" in result
 
-        with pytest.raises(FileNotFoundError) as exc_info:
-            load_prompt("nonexistent", ralph_dir=ralph_dir)
+    def test_load_prompt_verify_has_issues_field(self):
+        """Test verify prompt documents the issues output field."""
+        result = load_prompt("verify")
+        assert "issues" in result.lower()
+        assert "Rejection Quality" in result
 
-        assert "PROMPT_nonexistent.md" in str(exc_info.value)
-
-    def test_load_prompt_empty_file(self, tmp_path):
-        """Test loading an empty prompt file."""
-        ralph_dir = tmp_path / "ralph"
-        ralph_dir.mkdir()
-        prompt_file = ralph_dir / "PROMPT_test.md"
-        prompt_file.write_text("")
-
-        result = load_prompt("test", ralph_dir=ralph_dir)
-
-        assert result == ""
-
-    def test_load_prompt_with_unicode(self, tmp_path):
-        """Test loading prompt with unicode characters."""
-        ralph_dir = tmp_path / "ralph"
-        ralph_dir.mkdir()
-        prompt_file = ralph_dir / "PROMPT_unicode.md"
-        unicode_content = (
-            "# Prompt with Unicode\n\nSymbols: \u2713 \u2717 \u2022\nEmoji: \U0001f680"
-        )
-        prompt_file.write_text(unicode_content)
-
-        result = load_prompt("unicode", ralph_dir=ralph_dir)
-
-        assert result == unicode_content
+    def test_load_prompt_decompose_has_depth(self):
+        """Test decompose prompt includes depth tracking."""
+        result = load_prompt("decompose")
+        assert "{{DECOMPOSE_DEPTH}}" in result
+        assert "{{MAX_DEPTH}}" in result
 
 
 class TestBuildPromptWithRules:
@@ -148,84 +129,6 @@ class TestBuildPromptWithRules:
         assert task_header_found
         assert result.index("Project Rules") < result.index("Ralph Task")
 
-
-class TestMergePrompts:
-    """Tests for merge_prompts function."""
-
-    def test_merge_prompts_keep_strategy(self):
-        """Test merge with 'keep' strategy returns old content."""
-        old = "Old prompt content"
-        new = "New prompt content"
-
-        result = merge_prompts(old, new, "keep")
-
-        assert result == old
-
-    def test_merge_prompts_override_strategy(self):
-        """Test merge with 'override' strategy returns new content."""
-        old = "Old prompt content"
-        new = "New prompt content"
-
-        result = merge_prompts(old, new, "override")
-
-        assert result == new
-
-    def test_merge_prompts_merge_strategy_different_content(self):
-        """Test merge strategy with different content creates merged document."""
-        old = "Customized prompt with special rules"
-        new = "Default template prompt"
-
-        result = merge_prompts(old, new, "merge")
-
-        assert "MERGED PROMPT" in result
-        assert "EXISTING CONTENT" in result
-        assert "NEW TEMPLATE" in result
-        assert old in result
-        assert new in result
-
-    def test_merge_prompts_merge_strategy_identical_content(self):
-        """Test merge strategy with identical content returns new content."""
-        content = "Identical prompt content"
-
-        result = merge_prompts(content, content, "merge")
-
-        assert result == content
-        assert "MERGED PROMPT" not in result
-
-    def test_merge_prompts_merge_strategy_whitespace_diff(self):
-        """Test merge strategy ignores leading/trailing whitespace."""
-        old = "  Same content  "
-        new = "Same content"
-
-        result = merge_prompts(old, new, "merge")
-
-        assert result == new
-        assert "MERGED PROMPT" not in result
-
-    def test_merge_prompts_invalid_strategy(self):
-        """Test invalid strategy raises ValueError."""
-        with pytest.raises(ValueError) as exc_info:
-            merge_prompts("old", "new", "invalid_strategy")
-
-        assert "Unknown merge strategy" in str(exc_info.value)
-        assert "invalid_strategy" in str(exc_info.value)
-
-    def test_merge_prompts_empty_strings(self):
-        """Test merge with empty strings."""
-        assert merge_prompts("", "new", "keep") == ""
-        assert merge_prompts("old", "", "override") == ""
-        assert merge_prompts("", "", "merge") == ""
-
-    def test_merge_prompts_multiline_content(self):
-        """Test merge with multiline content."""
-        old = "Line 1\nLine 2\nLine 3"
-        new = "New Line 1\nNew Line 2"
-
-        result = merge_prompts(old, new, "merge")
-
-        assert "Line 1" in result
-        assert "Line 2" in result
-        assert "New Line 1" in result
 
 
 class TestFindProjectRules:
@@ -455,14 +358,18 @@ class TestBuildPlanContext:
 class TestLoadAndInject:
     """Tests for load_and_inject function."""
 
-    def test_loads_and_injects_context(self, tmp_path):
-        ralph_dir = tmp_path / "ralph"
-        ralph_dir.mkdir()
-        prompt_file = ralph_dir / "PROMPT_test.md"
-        prompt_file.write_text("Task: {{TASK_NAME}}\nSpec: {{SPEC_FILE}}")
-        
-        context = {"task_name": "Build feature", "spec_file": "feature.md"}
-        result = load_and_inject("test", context, ralph_dir)
-        
-        assert "Task: Build feature" in result
-        assert "Spec: feature.md" in result
+    def test_loads_and_injects_build_context(self):
+        """Test load_and_inject with build stage and real context."""
+        context = {
+            "task_json": '{"id": "t-1"}',
+            "task_name": "Build feature",
+            "task_notes": "Fix the thing",
+            "task_accept": "tests pass",
+            "task_reject": "",
+            "spec_content": "# My Spec",
+        }
+        result = load_and_inject("build", context)
+
+        assert "Build feature" in result
+        assert "# My Spec" in result
+        assert "RALPH_OUTPUT" in result

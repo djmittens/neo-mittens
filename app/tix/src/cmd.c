@@ -219,9 +219,11 @@ tix_err_t tix_plan_compact(const char *plan_path, tix_db_t *db) {
     fwrite(preserved, 1, preserved_len, fp);
   }
 
-  /* write all live tickets sorted by ID */
+  /* write only live tickets (pending + done) sorted by ID.
+     Resolved tickets (accepted/rejected/deleted) stay in the cache
+     but are not written to the compacted plan.jsonl. */
   const char *sql =
-    "SELECT id FROM tickets ORDER BY id ASC";
+    "SELECT id FROM tickets WHERE status < 2 ORDER BY id ASC";
   sqlite3_stmt *stmt = NULL;
   int rc = sqlite3_prepare_v2(db->handle, sql, -1, &stmt, NULL);
   if (rc == SQLITE_OK) {

@@ -1,39 +1,40 @@
 """Prompt loading and management utilities for Ralph.
 
 This module provides:
-1. Template loading from PROMPT_*.md files
+1. Template loading from package-embedded defaults
 2. Context injection to replace template variables with actual data
 3. Structured context builders for each stage
 """
 
 import json
-import re
 from pathlib import Path
 from typing import Any, Optional
 
 
-def load_prompt(stage: str, ralph_dir: Optional[Path] = None) -> str:
-    """Load a prompt file for the given stage.
+def load_prompt(stage: str) -> str:
+    """Load the prompt template for the given stage.
+
+    Prompts are loaded from package-embedded defaults in init_prompts.py.
+    No files are read from the target repository.
 
     Args:
         stage: The stage name (plan, build, verify, investigate, decompose)
-        ralph_dir: Path to ralph directory. Defaults to cwd/ralph.
 
     Returns:
         The prompt content as a string.
 
     Raises:
-        FileNotFoundError: If the prompt file doesn't exist.
+        KeyError: If the stage name is not recognized.
     """
-    if ralph_dir is None:
-        ralph_dir = Path.cwd() / "ralph"
+    from ralph.commands.init_prompts import PROMPTS
 
-    prompt_file = ralph_dir / f"PROMPT_{stage}.md"
+    if stage not in PROMPTS:
+        raise KeyError(
+            f"Unknown stage: {stage!r}. "
+            f"Valid stages: {', '.join(sorted(PROMPTS))}"
+        )
 
-    if not prompt_file.exists():
-        raise FileNotFoundError(f"Prompt file not found: {prompt_file}")
-
-    return prompt_file.read_text()
+    return PROMPTS[stage]
 
 
 def inject_context(template: str, context: dict[str, Any]) -> str:
@@ -64,19 +65,28 @@ def inject_context(template: str, context: dict[str, Any]) -> str:
     return result
 
 
-def build_plan_context(spec_name: str, spec_content: str) -> dict[str, Any]:
+def build_plan_context(
+    spec_name: str,
+    spec_content: str,
+    tix_history: Optional[str] = None,
+    pending_tasks: Optional[str] = None,
+) -> dict[str, Any]:
     """Build context dict for PLAN stage prompt.
 
     Args:
         spec_name: Name of the spec file
         spec_content: Full content of the spec file
+        tix_history: Optional formatted tix history (accepted/rejected tasks)
+        pending_tasks: Optional formatted pending tasks for incremental planning
 
     Returns:
-        Context dict with SPEC_* variables
+        Context dict with SPEC_*, TIX_*, and PENDING_* variables
     """
     return {
         "spec_file": spec_name,
         "spec_content": spec_content,
+        "tix_history": tix_history or "",
+        "pending_tasks": pending_tasks or "",
     }
 
 
@@ -183,20 +193,17 @@ def build_decompose_context(
     }
 
 
-def load_and_inject(
-    stage: str, context: dict[str, Any], ralph_dir: Optional[Path] = None
-) -> str:
+def load_and_inject(stage: str, context: dict[str, Any]) -> str:
     """Load a prompt template and inject context in one step.
 
     Args:
         stage: Stage name (build, verify, investigate, decompose, plan)
         context: Context dict from build_*_context functions
-        ralph_dir: Optional path to ralph directory
 
     Returns:
         Fully rendered prompt with all placeholders replaced
     """
-    template = load_prompt(stage, ralph_dir)
+    template = load_prompt(stage)
     return inject_context(template, context)
 
 
@@ -269,33 +276,4 @@ def find_project_rules(repo_root: Path) -> Optional[str]:
     return None
 
 
-def merge_prompts(old: str, new: str, strategy: str) -> str:
-    """Merge old and new prompt content based on strategy.
 
-    Args:
-        old: Existing prompt content.
-        new: New prompt template content.
-        strategy: One of 'keep', 'override', or 'merge'.
-
-    Returns:
-        The merged prompt content.
-    """
-    if strategy == "keep":
-        return old
-    elif strategy == "override":
-        return new
-    elif strategy == "merge":
-        if old.strip() == new.strip():
-            return new
-        return f"""# MERGED PROMPT - Review and consolidate manually
-
-## === EXISTING CONTENT (preserved customizations) ===
-
-{old}
-
-## === NEW TEMPLATE ===
-
-{new}
-"""
-    else:
-        raise ValueError(f"Unknown merge strategy: {strategy}")

@@ -5,6 +5,7 @@
 
 #include <stdio.h>
 #include <string.h>
+#include <time.h>
 
 /*
  * tix compact - sync from git history, denormalize references,
@@ -159,7 +160,46 @@ tix_err_t tix_cmd_compact(tix_ctx_t *ctx, int argc, char **argv) {
   /* step 2: denormalize references before compaction */
   denormalize_refs(&ctx->db);
 
-  /* step 3: rewrite plan.jsonl with only live tickets, sorted by ID */
+  /* step 3: mark resolved tickets with compacted_at timestamp.
+     Tickets with terminal status (accepted/rejected/deleted) that don't
+     already have compacted_at set will be stamped now so we know when
+     they were physically removed from plan.jsonl. */
+  {
+    const char *mark_sql =
+      "SELECT id FROM tickets WHERE status >= 2 AND compacted_at = 0";
+    sqlite3_stmt *mark_stmt = NULL;
+    int rc = sqlite3_prepare_v2(ctx->db.handle, mark_sql, -1,
+                                &mark_stmt, NULL);
+    if (rc == SQLITE_OK) {
+      char mark_ids[TIX_MAX_BATCH][TIX_MAX_ID_LEN];
+      u32 mark_count = 0;
+      while (sqlite3_step(mark_stmt) == SQLITE_ROW &&
+             mark_count < TIX_MAX_BATCH) {
+        const char *mid = (const char *)sqlite3_column_text(mark_stmt, 0);
+        if (mid != NULL) {
+          snprintf(mark_ids[mark_count], TIX_MAX_ID_LEN, "%s", mid);
+          mark_count++;
+        }
+      }
+      sqlite3_finalize(mark_stmt);
+
+      i64 now = (i64)time(NULL);
+      for (u32 mi = 0; mi < mark_count; mi++) {
+        tix_ticket_t ticket;
+        if (tix_db_get_ticket(&ctx->db, mark_ids[mi], &ticket) == TIX_OK) {
+          ticket.compacted_at = now;
+          tix_db_upsert_ticket(&ctx->db, &ticket);
+        }
+      }
+
+      if (mark_count > 0) {
+        TIX_INFO("compact: marked %u resolved tickets with compacted_at",
+                 mark_count);
+      }
+    }
+  }
+
+  /* step 4: rewrite plan.jsonl with only live tickets, sorted by ID */
   err = tix_plan_compact(ctx->plan_path, &ctx->db);
   if (err != TIX_OK) { return err; }
 

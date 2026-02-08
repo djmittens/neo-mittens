@@ -25,6 +25,8 @@ static const tql_compile_enum_t STATUS_MAP[] = {
   {"pending",  0},
   {"done",     1},
   {"accepted", 2},
+  {"rejected", 3},
+  {"deleted",  4},
   {NULL, 0}
 };
 
@@ -46,6 +48,7 @@ static const tql_compile_enum_t PRIORITY_MAP[] = {
 static const char *INT_FIELDS[] = {
   "type", "status", "priority", "created_at", "updated_at",
   "tokens_in", "tokens_out", "iterations", "retries", "kill_count",
+  "resolved_at", "compacted_at",
   NULL
 };
 
@@ -302,6 +305,24 @@ tix_err_t tql_compile(const tql_pipeline_t *p, tql_compiled_t *out,
     out->bind_count++;
   }
 
+  /* Default: exclude resolved tickets unless 'all' modifier is set
+     or user has an explicit status filter. */
+  if (!p->has_all) {
+    int has_status_filter = 0;
+    for (u32 i = 0; i < p->filter_count; i++) {
+      if (strcmp(p->filters[i].field, "status") == 0) {
+        has_status_filter = 1;
+        break;
+      }
+    }
+    if (!has_status_filter) {
+      const char *conj = has_where ? " AND" : " WHERE";
+      TIX_BUF_PRINTF(sql, end, TIX_ERR_OVERFLOW,
+                      "%s t.status < 2", conj);
+      has_where = 1;
+    }
+  }
+
   /* User filters */
   for (u32 i = 0; i < p->filter_count; i++) {
     const tql_filter_t *f = &p->filters[i];
@@ -328,18 +349,59 @@ tix_err_t tql_compile(const tql_pipeline_t *p, tql_compiled_t *out,
       continue;
     }
 
-    /* IS NULL / IS NOT NULL */
+    /* IS NULL / IS NOT NULL.
+       For string fields, tix stores empty strings as '' not NULL,
+       so we check both (IS NULL OR = '') for "unset" semantics.
+       For numeric fields, we check (IS NULL OR = 0). */
     if (f->op == TQL_OP_IS_NULL) {
-      const char *kw = f->negated ? "IS NOT NULL" : "IS NULL";
-      TIX_BUF_PRINTF(sql, end, TIX_ERR_OVERFLOW,
-                      "%s %s%s %s", conj, cpfx, cname, kw);
+      if (f->negated) {
+        /* Negated IS NULL = IS NOT NULL */
+        if (is_int_field(cname) || is_double_field(cname)) {
+          TIX_BUF_PRINTF(sql, end, TIX_ERR_OVERFLOW,
+                          "%s (%s%s IS NOT NULL AND %s%s != 0)",
+                          conj, cpfx, cname, cpfx, cname);
+        } else {
+          TIX_BUF_PRINTF(sql, end, TIX_ERR_OVERFLOW,
+                          "%s (%s%s IS NOT NULL AND %s%s != '')",
+                          conj, cpfx, cname, cpfx, cname);
+        }
+      } else {
+        if (is_int_field(cname) || is_double_field(cname)) {
+          TIX_BUF_PRINTF(sql, end, TIX_ERR_OVERFLOW,
+                          "%s (%s%s IS NULL OR %s%s = 0)",
+                          conj, cpfx, cname, cpfx, cname);
+        } else {
+          TIX_BUF_PRINTF(sql, end, TIX_ERR_OVERFLOW,
+                          "%s (%s%s IS NULL OR %s%s = '')",
+                          conj, cpfx, cname, cpfx, cname);
+        }
+      }
       has_where = 1;
       continue;
     }
     if (f->op == TQL_OP_IS_NOT_NULL) {
-      const char *kw = f->negated ? "IS NULL" : "IS NOT NULL";
-      TIX_BUF_PRINTF(sql, end, TIX_ERR_OVERFLOW,
-                      "%s %s%s %s", conj, cpfx, cname, kw);
+      if (f->negated) {
+        /* Negated IS NOT NULL = IS NULL */
+        if (is_int_field(cname) || is_double_field(cname)) {
+          TIX_BUF_PRINTF(sql, end, TIX_ERR_OVERFLOW,
+                          "%s (%s%s IS NULL OR %s%s = 0)",
+                          conj, cpfx, cname, cpfx, cname);
+        } else {
+          TIX_BUF_PRINTF(sql, end, TIX_ERR_OVERFLOW,
+                          "%s (%s%s IS NULL OR %s%s = '')",
+                          conj, cpfx, cname, cpfx, cname);
+        }
+      } else {
+        if (is_int_field(cname) || is_double_field(cname)) {
+          TIX_BUF_PRINTF(sql, end, TIX_ERR_OVERFLOW,
+                          "%s (%s%s IS NOT NULL AND %s%s != 0)",
+                          conj, cpfx, cname, cpfx, cname);
+        } else {
+          TIX_BUF_PRINTF(sql, end, TIX_ERR_OVERFLOW,
+                          "%s (%s%s IS NOT NULL AND %s%s != '')",
+                          conj, cpfx, cname, cpfx, cname);
+        }
+      }
       has_where = 1;
       continue;
     }
@@ -405,21 +467,65 @@ tix_err_t tql_compile(const tql_pipeline_t *p, tql_compiled_t *out,
     }
   }
 
-  /* HAVING */
+  /* HAVING: map column aliases back to aggregate expressions.
+     SQLite does not support ordinal references in HAVING, so we must
+     repeat the aggregate expression (e.g., HAVING COUNT(*) >= ?). */
   for (u32 i = 0; i < p->having_count; i++) {
     const tql_having_t *h = &p->havings[i];
     const char *hconj = (i == 0) ? " HAVING" : " AND";
 
-    int found_col = 0;
-    for (u32 c = 0; c < out->column_count; c++) {
-      if (strcmp(h->column, out->columns[c]) == 0) {
-        TIX_BUF_PRINTF(sql, end, TIX_ERR_OVERFLOW,
-                        "%s %u %s ?", hconj, c + 1, op_to_sql(h->op));
-        found_col = 1;
-        break;
+    /* Find matching aggregate and emit its SQL expression */
+    int found = 0;
+
+    /* Check "count" alias -> COUNT(*) */
+    if (strcmp(h->column, "count") == 0) {
+      TIX_BUF_PRINTF(sql, end, TIX_ERR_OVERFLOW,
+                      "%s COUNT(*) %s ?", hconj, op_to_sql(h->op));
+      found = 1;
+    }
+
+    /* Check aggregate aliases: sum_field, avg_field, etc. */
+    if (!found) {
+      for (u32 a = 0; a < p->agg_count && !found; a++) {
+        if (p->aggregates[a].field[0] == '\0') { continue; }
+
+        /* Build expected alias name and compare */
+        char alias[TQL_MAX_FIELD_LEN];
+        const char *prefix = "count";
+        switch (p->aggregates[a].func) {
+          case TQL_AGG_COUNT:          prefix = "count"; break;
+          case TQL_AGG_SUM:            prefix = "sum"; break;
+          case TQL_AGG_AVG:            prefix = "avg"; break;
+          case TQL_AGG_MIN:            prefix = "min"; break;
+          case TQL_AGG_MAX:            prefix = "max"; break;
+          case TQL_AGG_COUNT_DISTINCT: prefix = "count_distinct"; break;
+        }
+        int alen = snprintf(alias, sizeof(alias), "%s_%.40s",
+                           prefix, p->aggregates[a].field);
+        if (alen < 0 || (sz)alen >= sizeof(alias)) {
+          alias[sizeof(alias) - 1] = '\0';
+        }
+
+        if (strcmp(h->column, alias) == 0) {
+          const char *func = agg_to_sql(p->aggregates[a].func);
+          if (p->aggregates[a].func == TQL_AGG_COUNT_DISTINCT) {
+            TIX_BUF_PRINTF(sql, end, TIX_ERR_OVERFLOW,
+                            "%s COUNT(DISTINCT t.%s) %s ?",
+                            hconj, p->aggregates[a].field,
+                            op_to_sql(h->op));
+          } else {
+            TIX_BUF_PRINTF(sql, end, TIX_ERR_OVERFLOW,
+                            "%s %s(t.%s) %s ?",
+                            hconj, func, p->aggregates[a].field,
+                            op_to_sql(h->op));
+          }
+          found = 1;
+        }
       }
     }
-    if (!found_col) {
+
+    /* Fallback: use column name as-is (raw expression) */
+    if (!found) {
       TIX_BUF_PRINTF(sql, end, TIX_ERR_OVERFLOW,
                       "%s %s %s ?", hconj, h->column, op_to_sql(h->op));
     }

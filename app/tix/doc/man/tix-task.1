@@ -36,6 +36,18 @@ Tasks follow a state machine:
 .IR pending " \(-> " done " \(-> " accepted .
 Rejected tasks return to
 .IR pending .
+Deleted tasks move to
+.IR deleted .
+.PP
+All terminal states (accepted, rejected, deleted) are preserved in
+the database with a
+.B resolved_at
+timestamp.
+These resolved tickets are excluded from default queries but can
+be viewed with
+.B tix q "tasks all"
+or explicit status filters (see
+.BR tql (7)).
 .PP
 All commands enforce
 .B branch scope:
@@ -61,6 +73,7 @@ created_from|string|no
 supersedes|string|no
 deps|array|no
 labels|array|no
+assigned|string|no
 .TE
 .PP
 The
@@ -90,6 +103,13 @@ and must not be a duplicate.
 .PP
 .B labels
 is an array of strings (max 16).
+.PP
+.B assigned
+is the agent or user responsible for the task.
+Unlike
+.BR author ,
+which is auto\-filled from git config, the assigned field must be
+explicitly set in the JSON input.
 .PP
 .B Auto\-filled fields:
 .BR id " (generated),"
@@ -130,7 +150,7 @@ and writes an ISO 8601 timestamp to
 .fi
 .RE
 .SS tix task accept \fR[\fIid\fR]
-Accept a completed task, removing it from the active ticket set.
+Accept a completed task, moving it to terminal status.
 If
 .I id
 is omitted, the first done task is selected.
@@ -138,7 +158,12 @@ is omitted, the first done task is selected.
 The task must be in
 .B done
 status.
-Creates a tombstone record and deletes the task from the live database.
+Creates a tombstone record, sets status to
+.BR accepted ,
+and records a
+.B resolved_at
+timestamp.
+The ticket remains in the database but is excluded from default queries.
 .PP
 .B Output:
 .RS
@@ -168,8 +193,15 @@ field.
 .fi
 .RE
 .SS tix task delete \fIid\fR
-Delete a task permanently.
+Delete a task, moving it to terminal status.
 The task must not have other tasks depending on it.
+.PP
+Sets status to
+.BR deleted
+and records a
+.B resolved_at
+timestamp.
+The ticket remains in the database but is excluded from default queries.
 .PP
 .B Output:
 .RS
@@ -209,7 +241,8 @@ Only the provided fields are updated; others are preserved.
 .BR iterations " (number),"
 .BR retries " (number),"
 .BR kill_count " (number),"
-.BR labels " (array, replaces all)."
+.BR labels " (array, replaces all),"
+.BR assigned " (string)."
 .PP
 This is the primary way to attach agent telemetry (cost, tokens,
 iterations) to a completed task.

@@ -72,7 +72,14 @@ static tix_err_t note_done(tix_ctx_t *ctx, int argc, char **argv) {
     return TIX_ERR_INVALID_ARG;
   }
 
-  tix_err_t err = tix_db_delete_ticket(&ctx->db, argv[0]);
+  /* Mark as DELETED with resolved_at instead of hard-deleting */
+  tix_ticket_t ticket;
+  tix_err_t err = tix_db_get_ticket(&ctx->db, argv[0], &ticket);
+  if (err != TIX_OK) { return err; }
+
+  ticket.status = TIX_STATUS_DELETED;
+  ticket.resolved_at = (i64)time(NULL);
+  err = tix_db_upsert_ticket(&ctx->db, &ticket);
   if (err != TIX_OK) { return err; }
 
   err = tix_plan_append_delete(ctx->plan_path, argv[0]);

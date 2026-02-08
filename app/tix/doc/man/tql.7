@@ -41,6 +41,33 @@ Note tickets only (type=2).
 .TP
 .B tickets
 All ticket types (no type filter).
+.SS The \fBall\fR modifier
+By default, queries exclude resolved tickets (status >= 2: accepted,
+rejected, deleted).
+Only pending and done tickets are returned.
+.PP
+Append
+.B all
+after the source keyword to include resolved tickets:
+.PP
+.RS
+.nf
+tasks all
+tasks all | status=accepted
+issues all | sort resolved_at desc
+.fi
+.RE
+.PP
+The default exclusion is also suppressed when an explicit
+.B status
+filter is present:
+.PP
+.RS
+.nf
+tasks | status=accepted        \fR# no \fBall\fR needed\fP
+tasks | status=deleted,rejected
+.fi
+.RE
 .SH FILTERS
 Filters restrict the result set.
 Multiple filters within the same pipe segment combine with AND logic.
@@ -59,6 +86,10 @@ less than|field<value|field < ?
 greater or equal|field>=value|field >= ?
 less or equal|field<=value|field <= ?
 pattern match|field~pattern|field LIKE ?
+is empty|field=|field IS NULL OR field = ''
+is not empty|field!=|field IS NOT NULL AND field != ''
+in (OR logic)|field=a,b,c|field IN (?,?,?)
+not in|field!=a,b,c|field NOT IN (?,?,?)
 .TE
 .SS Pattern matching
 The
@@ -85,7 +116,7 @@ tab(|);
 lb lb lb
 l l l.
 Field|Names|Values
-status|pending, done, accepted|0, 1, 2
+status|pending, done, accepted, rejected, deleted|0, 1, 2, 3, 4
 type|task, issue, note|0, 1, 2
 priority|none, low, medium, high|0, 1, 2, 3
 .TE
@@ -107,6 +138,55 @@ tasks | label=blocked
 tasks | label~module:*
 .fi
 .RE
+.SS Negation prefix
+Any filter can be negated by prefixing the field name with
+.BR ! :
+.PP
+.RS
+.nf
+tasks | !status=done
+tasks | !label=blocked
+tasks | !name~Deploy*
+.fi
+.RE
+.PP
+For label filters,
+.B !label=foo
+uses a NOT EXISTS subquery to find tickets that do
+.I not
+have the specified label.
+For comparison operators, negation flips the operator
+(= becomes !=, > becomes <=, etc.).
+.SS OR logic (comma values)
+Multiple values can be specified with commas for OR logic:
+.PP
+.RS
+.nf
+tasks | status=pending,done
+tasks | author=alice,bob,charlie
+tasks | priority!=none,low
+.fi
+.RE
+.PP
+Comma\-separated values on
+.B =
+compile to SQL IN (...), and on
+.B !=
+compile to NOT IN (...).
+Enum sugar applies to each value individually.
+.SS Empty value (IS NULL / IS NOT NULL)
+An empty value after the operator checks whether a field is set:
+.PP
+.RS
+.nf
+tasks | spec=              \fR# tasks with no spec\fP
+tasks | model!=            \fR# tasks that have a model set\fP
+tasks | cost!=             \fR# tasks with non-zero cost\fP
+.fi
+.RE
+.PP
+For string fields, this checks both NULL and empty string.
+For numeric fields, this checks both NULL and zero.
 .SS Quoted values
 Values containing spaces can be quoted with double quotes:
 .PP
@@ -116,6 +196,16 @@ Values containing spaces can be quoted with double quotes:
 .SH STAGES
 Stages transform the result set.
 Each stage occupies its own pipe segment.
+.SS distinct
+Add DISTINCT to the SELECT clause, eliminating duplicate rows.
+Typically combined with
+.BR select :
+.PP
+.RS
+.nf
+tasks | distinct | select author
+.fi
+.RE
 .SS select \fIf1,f2,...\fR
 Choose specific columns instead of all columns.
 Column names are comma\-separated with no spaces.
@@ -166,6 +256,29 @@ Produces
 Maximum of a field.
 Produces
 .BI max_ field .
+.SS count_distinct \fIfield\fR
+Count distinct values of a field.
+Produces a column named
+.BI count_distinct_ field .
+.PP
+.RS
+.nf
+tasks | group spec | count_distinct author
+.fi
+.RE
+.SS having \fIcolumn\fR\fIop\fR\fIvalue\fR [\fIcolumn\fR\fIop\fR\fIvalue\fR ...]
+Filter aggregate results.
+The column name must match an aggregate alias
+.RB ( count ", " sum_cost ", " avg_cost ", "
+.BR count_distinct_author ", etc.)."
+Multiple having filters can be space\-separated within the same segment.
+.PP
+.RS
+.nf
+tasks | group author | count | having count>=2
+tasks | group author | count | sum cost | having count>1 sum_cost<100
+.fi
+.RE
 .SS sort \fIfield\fR [\fIasc\fR|\fIdesc\fR]
 Order results by a field.
 Default direction is
@@ -188,6 +301,20 @@ by default.
 Limit the number of returned rows.
 .I N
 must be a positive integer.
+.SS offset \fIN\fR
+Skip the first
+.I N
+rows (for pagination).
+Can be used with or without
+.BR limit .
+If used without limit, an implicit unlimited limit is added
+(required by SQLite).
+.PP
+.RS
+.nf
+tasks | sort created_at asc | limit 10 | offset 20
+.fi
+.RE
 .SH AVAILABLE FIELDS
 .TS
 tab(|);
@@ -196,7 +323,7 @@ l l.
 Field|Description
 id|ticket ID (e.g., T\-a1b2c3d4)
 type|ticket type (0=task, 1=issue, 2=note)
-status|status (0=pending, 1=done, 2=accepted)
+status|status (0=pending, 1=done, 2=accepted, 3=rejected, 4=deleted)
 priority|priority (0=none, 1=low, 2=medium, 3=high)
 name|ticket name / description
 spec|spec file path
@@ -209,6 +336,7 @@ created_from|source ticket ID
 supersedes|superseded ticket ID
 kill_reason|reason task was killed
 author|who created the ticket
+assigned|who the ticket is assigned to
 completed_at|ISO 8601 completion timestamp
 cost|dollar cost (real)
 tokens_in|input tokens (integer)
@@ -219,6 +347,8 @@ retries|retry count
 kill_count|kill count
 created_at|creation unix epoch
 updated_at|last update unix epoch
+resolved_at|unix epoch when ticket reached terminal status
+compacted_at|unix epoch when ticket was removed from plan.jsonl
 label|pseudo\-field for ticket labels
 .TE
 .SH EXAMPLES
@@ -262,6 +392,81 @@ Tasks with labels, grouped by label:
 .RS
 .B tix q "tasks | group label | count | sort count desc"
 .RE
+.PP
+Pending or done tasks (OR logic):
+.RS
+.B tix q "tasks | status=pending,done"
+.RE
+.PP
+Tasks NOT blocked:
+.RS
+.B tix q "tasks | !label=blocked"
+.RE
+.PP
+Authors with 3+ tasks (HAVING):
+.RS
+.B tix q "tasks | group author | count | having count>=3"
+.RE
+.PP
+Distinct authors who have tasks:
+.RS
+.B tix q "tasks | distinct | select author"
+.RE
+.PP
+Unique contributors per spec:
+.RS
+.B tix q "tasks | group spec | count_distinct author"
+.RE
+.PP
+Page 3 of results (10 per page):
+.RS
+.B tix q "tasks | sort created_at asc | limit 10 | offset 20"
+.RE
+.PP
+Tasks with no spec assigned:
+.RS
+.B tix q "tasks | spec="
+.RE
+.PP
+Tasks that have cost data:
+.RS
+.B tix q "tasks | cost!= | select id,name,cost"
+.RE
+.PP
+Tasks assigned to ralph:
+.RS
+.B tix q "tasks | assigned=ralph"
+.RE
+.PP
+Unassigned tasks:
+.RS
+.B tix q "tasks | assigned="
+.RE
+.PP
+Tasks NOT assigned to ralph:
+.RS
+.B tix q "tasks | assigned!=ralph"
+.RE
+.PP
+All tasks including accepted and deleted:
+.RS
+.B tix q "tasks all"
+.RE
+.PP
+Recently accepted tasks:
+.RS
+.B tix q "tasks | status=accepted | sort resolved_at desc | limit 10"
+.RE
+.PP
+Deleted tasks with their resolution time:
+.RS
+.B tix q "tasks all | status=deleted | select id,name,resolved_at"
+.RE
+.PP
+Tasks accepted or rejected:
+.RS
+.B tix q "tasks all | status=accepted,rejected"
+.RE
 .SH LIMITS
 .TP
 .B TQL_MAX_FILTERS
@@ -276,11 +481,17 @@ Tasks with labels, grouped by label:
 .B TQL_MAX_AGGREGATES
 8 aggregate functions per query.
 .TP
+.B TQL_MAX_HAVINGS
+8 HAVING filters per query.
+.TP
+.B TQL_MAX_OR_VALUES
+8 comma\-separated values per IN filter.
+.TP
 .B TQL_MAX_SQL_LEN
 4096 bytes of generated SQL.
 .TP
 .B TQL_MAX_BINDS
-32 bound parameters.
+48 bound parameters.
 .SH SEE ALSO
 .BR tix (1),
 .BR tix\-query (1),

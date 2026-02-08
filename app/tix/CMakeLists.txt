@@ -48,6 +48,9 @@ set(TIX_SOURCES
   src/ticket.c
   src/git.c
   src/db.c
+  src/db_query.c
+  src/db_replay.c
+  src/db_refs.c
   src/config.c
   src/search.c
   src/tree.c
@@ -127,3 +130,6 @@ tix_add_test(test_new_fields      test/e2e/test_new_fields.c)
 target_link_libraries(test_new_fields PRIVATE m)
 tix_add_test(test_labels          test/e2e/test_labels.c)
 tix_add_test(test_tql             test/e2e/test_tql.c)
+tix_add_test(test_tql_features   test/e2e/test_tql_features.c)
+tix_add_test(test_resolved       test/e2e/test_resolved.c)
+tix_add_test(test_assigned       test/e2e/test_assigned.c)

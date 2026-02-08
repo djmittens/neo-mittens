@@ -1,7 +1,8 @@
 """Ralph init command.
 
-Creates ralph directory structure, prompt templates, and initializes tix.
-Supports both fresh initialization and updating existing installations.
+Creates ralph directory structure and initializes tix. Prompt templates
+are embedded in the package and loaded at runtime — no prompt files are
+written to the target repository.
 """
 
 from pathlib import Path
@@ -11,16 +12,15 @@ from ralph.config import get_global_config
 from ralph.tix import Tix
 from ralph.utils import Colors
 
-from ralph.commands.init_helpers import handle_prompt_file
-from ralph.commands.init_prompts import EXAMPLE_SPEC, PROMPT_TEMPLATES
+from ralph.commands.init_prompts import EXAMPLE_SPEC
 
 
 def cmd_init(repo_root: Optional[Path] = None) -> int:
-    """Initialize or update Ralph in a repository.
+    """Initialize Ralph in a repository.
 
-    Creates the ralph directory structure, prompt templates, and
-    initializes tix for ticket management. If ralph is already
-    initialized, offers to update prompt templates with merge options.
+    Creates the ralph directory structure and initializes tix for ticket
+    management. Prompt templates are embedded in the package and do not
+    need to be written to disk.
 
     Args:
         repo_root: Repository root directory. If None, uses current directory.
@@ -39,49 +39,29 @@ def cmd_init(repo_root: Optional[Path] = None) -> int:
     is_update = ralph_dir.exists()
 
     if is_update:
-        print(f"Updating Ralph in {repo_root}")
-    else:
-        print(f"Initializing Ralph in {repo_root}")
+        print(f"Ralph already initialized in {repo_root}")
+        return 0
+
+    print(f"Initializing Ralph in {repo_root}")
 
     ralph_dir.mkdir(parents=True, exist_ok=True)
     specs_dir.mkdir(parents=True, exist_ok=True)
     log_dir.mkdir(parents=True, exist_ok=True)
 
-    for filename, content in PROMPT_TEMPLATES.items():
-        prompt_path = ralph_dir / filename
-        handle_prompt_file(prompt_path, content, repo_root)
+    example_spec = specs_dir / "example.md"
+    if not example_spec.exists():
+        example_spec.write_text(EXAMPLE_SPEC)
 
-    if not is_update:
-        example_spec = specs_dir / "example.md"
-        if not example_spec.exists():
-            example_spec.write_text(EXAMPLE_SPEC)
+    # Initialize tix (creates .tix/ directory and plan.jsonl)
+    tix = Tix(repo_root)
+    try:
+        tix.init()
+    except Exception:
+        # tix init may fail if already initialized — that's fine
+        pass
 
-        # Initialize tix (creates .tix/ directory and plan.jsonl)
-        tix = Tix(repo_root)
-        try:
-            tix.init()
-        except Exception:
-            # tix init may fail if already initialized — that's fine
-            pass
-
-    if is_update:
-        print(f"\n{Colors.GREEN}Ralph updated!{Colors.NC}")
-        print(f"""
-Updated files:
-  ralph/
-  ├── PROMPT_plan.md        (planning mode)
-  ├── PROMPT_build.md       (build stage)
-  ├── PROMPT_verify.md      (verify stage)
-  ├── PROMPT_investigate.md (investigate stage)
-  └── PROMPT_decompose.md   (decompose stage)
-
-Preserved:
-  ├── .tix/plan.jsonl       (ticket data)
-  └── specs/*
-""")
-    else:
-        print(f"\n{Colors.GREEN}Ralph initialized!{Colors.NC}")
-        print("""
+    print(f"\n{Colors.GREEN}Ralph initialized!{Colors.NC}")
+    print("""
 Next steps:
   1. Write specs in ralph/specs/
   2. Run 'ralph plan <spec.md>' to generate tasks
@@ -89,11 +69,6 @@ Next steps:
 
 Files created:
   ralph/
-  ├── PROMPT_plan.md        (planning mode)
-  ├── PROMPT_build.md       (build stage)
-  ├── PROMPT_verify.md      (verify stage)
-  ├── PROMPT_investigate.md (investigate stage)
-  ├── PROMPT_decompose.md   (decompose stage)
   └── specs/
       └── example.md        (delete and add your own)
   .tix/

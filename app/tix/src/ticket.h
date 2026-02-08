@@ -13,6 +13,8 @@ typedef enum {
   TIX_STATUS_PENDING  = 0,
   TIX_STATUS_DONE     = 1,
   TIX_STATUS_ACCEPTED = 2,
+  TIX_STATUS_REJECTED = 3,
+  TIX_STATUS_DELETED  = 4,
 } tix_status_e;
 
 typedef enum {
@@ -50,9 +52,14 @@ typedef struct {
 
   /* identity & attribution */
   char author[TIX_MAX_NAME_LEN];
+  char assigned[TIX_MAX_NAME_LEN]; /* who should work on this ticket */
 
   /* completion timing (ISO 8601 with timezone, e.g. "2026-02-07T14:30:00-08:00") */
   char completed_at[64];
+
+  /* lifecycle timestamps (unix epoch) */
+  i64 resolved_at;     /* when ticket reached terminal state (accepted/rejected/deleted) */
+  i64 compacted_at;    /* when ticket was physically removed from plan.jsonl by compact */
 
   /* agent telemetry (populated by orchestrator at task completion) */
   double cost;            /* total dollar cost, 0.0 = not set */

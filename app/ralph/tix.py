@@ -158,6 +158,41 @@ class Tix:
         result = self._run("query")
         return result.data if isinstance(result.data, dict) else {}
 
+    def query_tombstones(self) -> dict:
+        """Get accepted and rejected tombstones.
+
+        Uses TQL SQL query against the tombstones table.
+
+        Returns:
+            Dict with 'accepted' and 'rejected' lists of dicts.
+        """
+        try:
+            result = self._run(
+                "q", "sql",
+                "SELECT id, name, reason, is_accept FROM tombstones",
+            )
+        except TixError:
+            return {"accepted": [], "rejected": []}
+
+        raw = result.raw
+        rows: list[dict] = []
+        try:
+            parsed = json.loads(raw)
+            if isinstance(parsed, list):
+                rows = parsed
+        except (ValueError, TypeError):
+            pass
+
+        accepted: list[dict] = []
+        rejected: list[dict] = []
+        for row in rows:
+            if row.get("is_accept"):
+                accepted.append(row)
+            else:
+                rejected.append(row)
+
+        return {"accepted": accepted, "rejected": rejected}
+
     def status(self) -> str:
         """Get human-readable status string."""
         result = self._run("status", parse_json=False)

@@ -66,7 +66,14 @@ static tix_err_t issue_done(tix_ctx_t *ctx, int argc, char **argv) {
     snprintf(id, sizeof(id), "%s", tickets[0].id);
   }
 
-  tix_err_t err = tix_db_delete_ticket(&ctx->db, id);
+  /* Mark as DELETED with resolved_at instead of hard-deleting */
+  tix_ticket_t ticket;
+  tix_err_t err = tix_db_get_ticket(&ctx->db, id, &ticket);
+  if (err != TIX_OK) { return err; }
+
+  ticket.status = TIX_STATUS_DELETED;
+  ticket.resolved_at = (i64)time(NULL);
+  err = tix_db_upsert_ticket(&ctx->db, &ticket);
   if (err != TIX_OK) { return err; }
 
   err = tix_plan_append_delete(ctx->plan_path, id);
@@ -85,8 +92,11 @@ static tix_err_t issue_done_all(tix_ctx_t *ctx) {
                                        tickets, &count, TIX_MAX_BATCH);
   if (err != TIX_OK) { return err; }
 
+  i64 now = (i64)time(NULL);
   for (u32 i = 0; i < count; i++) {
-    tix_db_delete_ticket(&ctx->db, tickets[i].id);
+    tickets[i].status = TIX_STATUS_DELETED;
+    tickets[i].resolved_at = now;
+    tix_db_upsert_ticket(&ctx->db, &tickets[i]);
     tix_plan_append_delete(ctx->plan_path, tickets[i].id);
   }
 
@@ -100,10 +110,14 @@ static tix_err_t issue_done_ids(tix_ctx_t *ctx, int argc, char **argv) {
     return TIX_ERR_INVALID_ARG;
   }
 
+  i64 now = (i64)time(NULL);
   u32 resolved = 0;
   for (int i = 0; i < argc; i++) {
-    tix_err_t err = tix_db_delete_ticket(&ctx->db, argv[i]);
-    if (err == TIX_OK) {
+    tix_ticket_t ticket;
+    if (tix_db_get_ticket(&ctx->db, argv[i], &ticket) == TIX_OK) {
+      ticket.status = TIX_STATUS_DELETED;
+      ticket.resolved_at = now;
+      tix_db_upsert_ticket(&ctx->db, &ticket);
       tix_plan_append_delete(ctx->plan_path, argv[i]);
       resolved++;
     }
