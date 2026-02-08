@@ -167,10 +167,7 @@ A task was killed (exceeded context or timeout). Break it into smaller subtasks.
 - **Kill reason**: {{KILL_REASON}}
 - **Kill log**: {{KILL_LOG_PATH}}
 - **Decompose depth**: {{DECOMPOSE_DEPTH}} / {{MAX_DEPTH}}
-
-## Spec Content
-
-{{SPEC_CONTENT}}
+- **Spec**: {{SPEC_FILE}}
 
 ## Instructions
 

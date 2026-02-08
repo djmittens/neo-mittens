@@ -36,8 +36,14 @@ class GlobalConfig:
     """
 
     # Models - must be set via config.toml
+    # model: fallback for any stage without a specific override
     model: str = ""
+    # Per-stage model overrides (empty string = fall back to `model`)
     model_build: str = ""
+    model_verify: str = ""
+    model_investigate: str = ""
+    model_decompose: str = ""
+    model_plan: str = ""
 
     # Context limits
     context_window: int = 200_000
@@ -89,6 +95,25 @@ class GlobalConfig:
 
     # Profile name (for display/debugging)
     profile: str = "default"
+
+    def model_for_stage(self, stage: str) -> str:
+        """Resolve the model to use for a given stage.
+
+        Resolution order:
+        1. model_{stage} if set (e.g. model_build, model_verify)
+        2. model (global fallback)
+
+        Args:
+            stage: Stage name (build, verify, investigate, decompose, plan).
+
+        Returns:
+            Model identifier string (may be empty if nothing configured).
+        """
+        stage_field = f"model_{stage.lower()}"
+        stage_model = getattr(self, stage_field, "")
+        if stage_model:
+            return stage_model
+        return self.model
 
     @classmethod
     def _load_toml_data(cls, config_path: Path) -> Optional[dict]:

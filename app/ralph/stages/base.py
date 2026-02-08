@@ -96,55 +96,70 @@ class ConstructStateMachine:
         self.loop_detector = loop_detector
         self._last_stage_output: str = ""
         self._batch_failure_count: int = 0
+        self._ticket_cache: Optional[dict] = None
 
     # =========================================================================
-    # Ticket queries (via tix)
+    # Ticket queries (via tix, with per-iteration cache)
     # =========================================================================
+
+    def _refresh_ticket_cache(self) -> None:
+        """Refresh the cached ticket state from tix.
+
+        Call once at the start of each iteration (or after mutations)
+        to avoid redundant subprocess calls. All _has_* and _get_*
+        methods read from this cache.
+        """
+        if not self.tix:
+            self._ticket_cache = {}
+            return
+        try:
+            self._ticket_cache = self.tix.query_full()
+        except Exception:
+            self._ticket_cache = {}
+
+    def _invalidate_ticket_cache(self) -> None:
+        """Invalidate the cache so the next query re-fetches from tix."""
+        self._ticket_cache = None
+
+    def _get_cached_full(self) -> dict:
+        """Get cached full ticket state, refreshing if needed.
+
+        Returns:
+            Full ticket state dict from tix.
+        """
+        if self._ticket_cache is None:
+            self._refresh_ticket_cache()
+        return self._ticket_cache or {}
 
     def _has_pending_tasks(self) -> bool:
-        """Check if there are pending tasks via tix."""
-        if not self.tix:
-            return False
-        try:
-            return len(self.tix.query_tasks()) > 0
-        except Exception:
-            return False
+        """Check if there are pending tasks (from cache)."""
+        full = self._get_cached_full()
+        pending = full.get("tasks", {}).get("pending", [])
+        return len(pending) > 0
 
     def _has_done_tasks(self) -> bool:
-        """Check if there are done tasks via tix."""
-        if not self.tix:
-            return False
-        try:
-            return len(self.tix.query_done_tasks()) > 0
-        except Exception:
-            return False
+        """Check if there are done tasks (from cache)."""
+        full = self._get_cached_full()
+        done = full.get("tasks", {}).get("done", [])
+        return len(done) > 0
 
     def _get_done_task_ids(self) -> list[str]:
-        """Get IDs of done tasks via tix."""
-        if not self.tix:
-            return []
-        try:
-            return [t.get("id", "") for t in self.tix.query_done_tasks()]
-        except Exception:
-            return []
+        """Get IDs of done tasks (from cache)."""
+        full = self._get_cached_full()
+        done = full.get("tasks", {}).get("done", [])
+        return [t.get("id", "") for t in done]
 
     def _has_issues(self) -> bool:
-        """Check if there are open issues via tix."""
-        if not self.tix:
-            return False
-        try:
-            return len(self.tix.query_issues()) > 0
-        except Exception:
-            return False
+        """Check if there are open issues (from cache)."""
+        full = self._get_cached_full()
+        issues = full.get("issues", [])
+        return len(issues) > 0
 
     def _get_issue_ids(self) -> list[str]:
-        """Get IDs of open issues via tix."""
-        if not self.tix:
-            return []
-        try:
-            return [i.get("id", "") for i in self.tix.query_issues()]
-        except Exception:
-            return []
+        """Get IDs of open issues (from cache)."""
+        full = self._get_cached_full()
+        issues = full.get("issues", [])
+        return [i.get("id", "") for i in issues]
 
     def _escalate_stuck_tasks(self) -> int:
         """Detect tasks stuck in reject loops and escalate them.
@@ -159,10 +174,8 @@ class ConstructStateMachine:
         if not self.tix:
             return 0
         max_retries = getattr(self.config, "max_retries_per_task", 3)
-        try:
-            tasks = self.tix.query_tasks()
-        except Exception:
-            return 0
+        full = self._get_cached_full()
+        tasks = full.get("tasks", {}).get("pending", [])
 
         escalated = 0
         for task in tasks:
@@ -228,10 +241,8 @@ class ConstructStateMachine:
         """
         if not self.tix:
             return 0
-        try:
-            issues = self.tix.query_issues()
-        except Exception:
-            return 0
+        full = self._get_cached_full()
+        issues = full.get("issues", [])
         if len(issues) < 2:
             return 0
 
@@ -296,6 +307,8 @@ class ConstructStateMachine:
         Returns:
             Tuple of (should_continue, spec_complete)
         """
+        # Refresh ticket cache once per iteration (replaces 8-12 subprocess calls)
+        self._refresh_ticket_cache()
         state = self.load_state()
 
         if not state.spec:
@@ -352,7 +365,9 @@ class ConstructStateMachine:
 
     def _run_investigate(self, state: "RalphState") -> tuple[bool, bool]:
         """Run INVESTIGATE stage with bounded batching."""
-        self._deduplicate_issues()
+        deduped = self._deduplicate_issues()
+        if deduped > 0:
+            self._invalidate_ticket_cache()
         issue_ids = self._get_issue_ids()
         if issue_ids:
             batch_size = self._effective_batch_size(
@@ -398,7 +413,9 @@ class ConstructStateMachine:
 
     def _run_build(self, state: "RalphState") -> tuple[bool, bool]:
         """Run BUILD stage. Transitions to VERIFY."""
-        self._escalate_stuck_tasks()
+        escalated = self._escalate_stuck_tasks()
+        if escalated > 0:
+            self._invalidate_ticket_cache()
 
         if self._has_pending_tasks():
             result = self._run_stage_with_state(Stage.BUILD, state)
@@ -495,6 +512,9 @@ class ConstructStateMachine:
             self.context_limit,
         )
 
+        # Invalidate cache after any stage run (agent may have mutated tickets)
+        self._invalidate_ticket_cache()
+
         if self.loop_detector and result.outcome == StageOutcome.SUCCESS:
             # Include ticket state in fingerprint so runs on different
             # tasks/issues don't hash identically (false-positive loop).
@@ -571,21 +591,18 @@ class ConstructStateMachine:
         self.save_state(state)
 
     def _get_task_depth(self, task_id: str) -> int:
-        """Get the decompose_depth of a task from tix."""
+        """Get the decompose_depth of a task (from cache)."""
         if not self.tix or task_id == "__stage_failure__":
             return 0
-        try:
-            full = self.tix.query_full()
-            all_tasks = (
-                full.get("tasks", {}).get("pending", [])
-                + full.get("tasks", {}).get("done", [])
-            )
-            task = next(
-                (t for t in all_tasks if t.get("id") == task_id), None
-            )
-            return task.get("decompose_depth", 0) if task else 0
-        except Exception:
-            return 0
+        full = self._get_cached_full()
+        all_tasks = (
+            full.get("tasks", {}).get("pending", [])
+            + full.get("tasks", {}).get("done", [])
+        )
+        task = next(
+            (t for t in all_tasks if t.get("id") == task_id), None
+        )
+        return task.get("decompose_depth", 0) if task else 0
 
     def _handle_batch_failure(
         self,
@@ -666,13 +683,18 @@ class ConstructStateMachine:
 
         Includes pending/done/issue IDs so that runs on different tickets
         in the same stage don't hash identically (which would cause
-        false-positive loop detection).
+        false-positive loop detection). Uses cached ticket state.
         """
+        full = self._get_cached_full()
         pending_ids = sorted(
-            t.get("id", "") for t in (self.tix.query_tasks() if self.tix else [])
+            t.get("id", "") for t in full.get("tasks", {}).get("pending", [])
         )
-        done_ids = sorted(self._get_done_task_ids())
-        issue_ids = sorted(self._get_issue_ids())
+        done_ids = sorted(
+            t.get("id", "") for t in full.get("tasks", {}).get("done", [])
+        )
+        issue_ids = sorted(
+            i.get("id", "") for i in full.get("issues", [])
+        )
         return (
             f"{stage.name}|p={pending_ids}|d={done_ids}|i={issue_ids}"
         )

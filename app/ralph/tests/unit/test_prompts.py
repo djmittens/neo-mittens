@@ -324,11 +324,13 @@ class TestBuildDecomposeContext:
         assert context["kill_reason"] == "context_limit"
         assert context["kill_log_path"] == "/tmp/logs/t-123.log"
 
-    def test_includes_spec_content(self):
+    def test_omits_spec_content_to_save_tokens(self):
+        """DECOMPOSE intentionally omits spec_content to reduce token usage."""
         task = {"id": "t-1", "name": "Task", "kill_reason": "timeout"}
         context = build_decompose_context(task, "s.md", "spec text")
 
-        assert context["spec_content"] == "spec text"
+        assert "spec_content" not in context
+        assert context["spec_file"] == "s.md"
 
     def test_includes_depth_and_max_depth(self):
         task = {"id": "t-1", "name": "Task", "decompose_depth": 2}

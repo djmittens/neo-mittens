@@ -171,10 +171,14 @@ def build_decompose_context(
 ) -> dict[str, Any]:
     """Build context dict for DECOMPOSE stage prompt.
 
+    Intentionally omits spec_content to save tokens — DECOMPOSE only
+    needs the task JSON and kill info. The spec filename is included
+    for reference only.
+
     Args:
         task: The killed task dict from tix query.
         spec_name: Spec file name.
-        spec_content: Content of the spec file.
+        spec_content: Unused (kept for API compat). Not injected.
         max_depth: Maximum decomposition depth from config.
 
     Returns:
@@ -187,7 +191,6 @@ def build_decompose_context(
         "kill_reason": task.get("kill_reason", "unknown"),
         "kill_log_path": task.get("kill_log", ""),
         "spec_file": spec_name or task.get("spec", ""),
-        "spec_content": spec_content,
         "decompose_depth": task.get("decompose_depth", 0),
         "max_depth": max_depth,
     }

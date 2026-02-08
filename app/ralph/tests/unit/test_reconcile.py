@@ -238,7 +238,7 @@ class TestReconcileDecompose:
 
     def test_depth_defaults_to_one_when_no_parent_depth(self, mock_tix):
         """When parent_depth is not specified, subtasks get depth 1."""
-        output = '[RALPH_OUTPUT]\n{"subtasks": [{"name": "Sub", "notes": "n", "accept": "a"}]}\n[/RALPH_OUTPUT]'
+        output = '[RALPH_OUTPUT]\n{"subtasks": [{"name": "Sub task", "notes": "notes", "accept": "a"}]}\n[/RALPH_OUTPUT]'
         result = reconcile_decompose(mock_tix, output, "t-root")
         assert result.ok
         call_data = mock_tix.task_add.call_args[0][0]

@@ -21,7 +21,7 @@ from pathlib import Path
 from typing import Optional, Tuple, Callable
 
 from ..config import GlobalConfig
-from ..context import Metrics, LoopDetector, SessionSummary
+from ..context import Metrics, LoopDetector, SessionSummary, context_pressure
 from ..git import (
     get_current_branch,
     has_uncommitted_tix,
@@ -281,6 +281,7 @@ def _execute_opencode(
     repo_root: Path,
     stage_timeout_ms: int,
     print_output: bool = True,
+    stage_name: str = "",
 ) -> Tuple[int, str, bool, float, int, int, int]:
     """Execute opencode with real-time streaming output.
     
@@ -288,7 +289,7 @@ def _execute_opencode(
         Tuple of (return_code, output, timed_out, cost, tokens_in,
                   tokens_out, iterations).
     """
-    model = config.model if hasattr(config, "model") else None
+    model = config.model_for_stage(stage_name) if stage_name else config.model
     proc = spawn_opencode(prompt, cwd=repo_root, timeout=stage_timeout_ms, model=model)
     
     timeout_seconds = stage_timeout_ms // 1000
@@ -329,6 +330,7 @@ def _run_stage(
          tokens_in, tokens_out, stage_iters) = _execute_opencode(
             config, prompt, repo_root, stage_timeout_ms,
             print_output=print_output,
+            stage_name=stage.name.lower(),
         )
     except Exception as e:
         return _make_result(
@@ -351,13 +353,27 @@ def _run_stage(
             cost=cost, tokens_used=tokens,
         )
 
+    # Detect context pressure — if the stage used most of the context window,
+    # it likely hit the auto-compact plugin or was constrained. Log it.
+    kill_pct = getattr(config, "context_kill_pct", 95)
+    compact_pct = getattr(config, "context_compact_pct", 85)
+    ctx_window = getattr(config, "context_window", 200_000)
+    if ctx_window > 0 and tokens_in > 0:
+        usage_pct = (tokens_in / ctx_window) * 100
+        if usage_pct >= kill_pct:
+            metrics.kills_context += 1
+            print(f"  Context pressure: {usage_pct:.0f}% (kill threshold: {kill_pct}%)")
+        elif usage_pct >= compact_pct:
+            print(f"  Context pressure: {usage_pct:.0f}% (compact threshold: {compact_pct}%)")
+
     # Build per-task telemetry for reconciliation
+    stage_model = config.model_for_stage(stage.name.lower())
     stage_metrics = {
         "cost": round(cost, 6),
         "tokens_in": tokens_in,
         "tokens_out": tokens_out,
         "iterations": stage_iters,
-        "model": config.model or "",
+        "model": stage_model or "",
     }
     meta["stage_metrics"] = stage_metrics
 
@@ -462,6 +478,14 @@ def _print_construct_header(
     else:
         print(f"Rules:  {Colors.YELLOW}None{Colors.NC}")
     print(f"Model:  {config.model or 'default'}")
+    # Show per-stage overrides if any differ from default
+    stage_overrides = []
+    for stage_name in ("build", "verify", "investigate", "decompose", "plan"):
+        stage_model = config.model_for_stage(stage_name)
+        if stage_model and stage_model != config.model:
+            stage_overrides.append(f"{stage_name}={stage_model}")
+    if stage_overrides:
+        print(f"Routes: {', '.join(stage_overrides)}")
     if max_iterations > 0:
         print(f"Max iterations: {max_iterations}")
     if max_cost > 0:
@@ -537,9 +561,11 @@ def _looks_like_command(text: str) -> bool:
     text = text.strip()
     # Common command prefixes
     cmd_prefixes = (
-        "make", "pytest", "python", "go ", "cargo", "npm ", "yarn ",
+        "make", "pytest", "python", "python3", "go ", "cargo", "npm ", "yarn ",
         "grep ", "test ", "./", "bash ", "sh ", "echo ", "cat ",
         "git ", "curl ", "gcc ", "g++", "clang",
+        "cd ", "ls ", "find ", "wc ", "diff ", "head ", "tail ",
+        "docker ", "cmake ", "ninja ", "meson ",
     )
     first_line = text.split("\n")[0].strip()
     lower = first_line.lower()
@@ -549,6 +575,14 @@ def _looks_like_command(text: str) -> bool:
 
     # Shell operators suggest a command
     if any(op in first_line for op in ("|", "&&", ">>", " > ", " 2>")):
+        return True
+
+    # python -c "..." or python3 -m ... patterns
+    if "python" in lower and ("-c " in lower or "-m " in lower):
+        return True
+
+    # Inline commands: `from X import Y` (backtick-wrapped)
+    if first_line.startswith("`") and first_line.endswith("`"):
         return True
 
     return False
@@ -588,11 +622,20 @@ def _create_stage_wrapper(
                 except TixError:
                     pass
 
-        return _run_stage(
+        result = _run_stage(
             cfg, stage, st, met, timeout_ms,
             repo_root, ralph_dir, project_rules,
             True, tix_instance, time.time(),
         )
+
+        # Post-BUILD: try auto-accepting the task immediately
+        # Saves a full VERIFY round trip if acceptance criteria are runnable
+        if stage == Stage.BUILD and result.outcome == StageOutcome.SUCCESS:
+            post_accepted = _run_acceptance_precheck(tix_instance, repo_root)
+            if post_accepted > 0:
+                print(f"  Post-BUILD pre-check: {post_accepted} task(s) auto-accepted")
+
+        return result
 
     return run_stage_wrapper
 

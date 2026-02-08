@@ -16,6 +16,7 @@ from dataclasses import dataclass, field
 from typing import Any, Optional
 
 from ralph.tix import Tix, TixError, TixProtocol
+from ralph.validation import validate_task, validate_issue
 
 __all__ = [
     "ReconcileResult",
@@ -126,9 +127,95 @@ def _find_last_json_object(text: str) -> Optional[dict]:
     return None
 
 
+# Stage output schemas: required fields and their expected types
+_STAGE_SCHEMAS: dict[str, dict[str, type]] = {
+    "build": {"verdict": str},
+    "verify": {"results": list},
+    "investigate": {"tasks": list},
+    "decompose": {"subtasks": list},
+    "plan": {"tasks": list},
+}
+
+
+def _repair_output(data: dict, stage: str) -> tuple[dict, list[str]]:
+    """Attempt to repair common schema issues in agent output.
+
+    Fixes:
+    - Missing fields with safe defaults
+    - Wrong types (e.g., string "true" -> bool True)
+    - Normalized field names (e.g., "task" -> "tasks")
+
+    Args:
+        data: Parsed JSON output from agent.
+        stage: Stage name for schema lookup.
+
+    Returns:
+        Tuple of (repaired_data, list_of_repairs_made).
+    """
+    repairs: list[str] = []
+    schema = _STAGE_SCHEMAS.get(stage, {})
+
+    for field_name, expected_type in schema.items():
+        if field_name not in data:
+            # Try common misspellings/singularizations
+            singular = field_name.rstrip("s")
+            plural = field_name + "s" if not field_name.endswith("s") else field_name
+            for alt in (singular, plural):
+                if alt in data and alt != field_name:
+                    data[field_name] = data.pop(alt)
+                    repairs.append(f"renamed '{alt}' -> '{field_name}'")
+                    break
+
+        if field_name not in data:
+            # Add safe default
+            if expected_type == list:
+                data[field_name] = []
+                repairs.append(f"added empty '{field_name}' list")
+            elif expected_type == str:
+                data[field_name] = ""
+                repairs.append(f"added empty '{field_name}' string")
+
+    # Fix common type issues in verify results
+    if stage == "verify":
+        for item in data.get("results", []):
+            if isinstance(item.get("passed"), str):
+                item["passed"] = item["passed"].lower() == "true"
+                repairs.append(f"coerced 'passed' string to bool for {item.get('task_id', '?')}")
+
+    # Fix build verdict normalization
+    if stage == "build":
+        verdict = data.get("verdict", "")
+        if isinstance(verdict, str):
+            data["verdict"] = verdict.lower().strip()
+            if data["verdict"] in ("complete", "completed", "finished", "success"):
+                data["verdict"] = "done"
+                repairs.append("normalized verdict to 'done'")
+
+    return data, repairs
+
+
 # =============================================================================
 # Stage-specific reconcilers
 # =============================================================================
+
+
+def _extract_and_repair(
+    agent_output: str, stage: str
+) -> tuple[Optional[dict], list[str]]:
+    """Extract structured output and apply schema repairs.
+
+    Args:
+        agent_output: Full agent stdout.
+        stage: Stage name for schema-aware repair.
+
+    Returns:
+        Tuple of (parsed_data_or_None, list_of_repairs).
+    """
+    data = extract_structured_output(agent_output)
+    if data is None:
+        return None, []
+    repaired, repairs = _repair_output(data, stage)
+    return repaired, repairs
 
 
 def reconcile_build(
@@ -157,7 +244,7 @@ def reconcile_build(
         ReconcileResult with actions taken.
     """
     result = ReconcileResult()
-    data = extract_structured_output(agent_output)
+    data, repairs = _extract_and_repair(agent_output, "build")
 
     if data is None:
         # No structured output — check if agent exited cleanly
@@ -165,6 +252,10 @@ def reconcile_build(
         result.errors.append("No structured output from agent")
         result.ok = False
         return result
+
+    if repairs:
+        for repair in repairs:
+            print(f"  Schema repair: {repair}", file=sys.stderr)
 
     verdict = data.get("verdict", "")
 
@@ -228,12 +319,16 @@ def reconcile_verify(
         ReconcileResult with accept/reject actions taken.
     """
     result = ReconcileResult()
-    data = extract_structured_output(agent_output)
+    data, repairs = _extract_and_repair(agent_output, "verify")
 
     if data is None:
         result.errors.append("No structured output from agent")
         result.ok = False
         return result
+
+    if repairs:
+        for repair in repairs:
+            print(f"  Schema repair: {repair}", file=sys.stderr)
 
     # Process task verdicts
     for item in data.get("results", []):
@@ -291,12 +386,16 @@ def reconcile_investigate(
         ReconcileResult with tasks added and issues cleared.
     """
     result = ReconcileResult()
-    data = extract_structured_output(agent_output)
+    data, repairs = _extract_and_repair(agent_output, "investigate")
 
     if data is None:
         result.errors.append("No structured output from agent")
         result.ok = False
         return result
+
+    if repairs:
+        for repair in repairs:
+            print(f"  Schema repair: {repair}", file=sys.stderr)
 
     # Add all investigation tasks
     for task_data in data.get("tasks", []):
@@ -348,12 +447,16 @@ def reconcile_decompose(
         ReconcileResult with subtasks added and original deleted.
     """
     result = ReconcileResult()
-    data = extract_structured_output(agent_output)
+    data, repairs = _extract_and_repair(agent_output, "decompose")
 
     if data is None:
         result.errors.append("No structured output from agent")
         result.ok = False
         return result
+
+    if repairs:
+        for repair in repairs:
+            print(f"  Schema repair: {repair}", file=sys.stderr)
 
     subtasks = data.get("subtasks", [])
     if not subtasks:
@@ -408,12 +511,16 @@ def reconcile_plan(
         ReconcileResult with tasks added and dropped.
     """
     result = ReconcileResult()
-    data = extract_structured_output(agent_output)
+    data, repairs = _extract_and_repair(agent_output, "plan")
 
     if data is None:
         result.errors.append("No structured output from agent")
         result.ok = False
         return result
+
+    if repairs:
+        for repair in repairs:
+            print(f"  Schema repair: {repair}", file=sys.stderr)
 
     raw_tasks = data.get("tasks", [])
     drop_ids = data.get("drop", [])
@@ -467,10 +574,23 @@ def reconcile_plan(
 
 
 def _add_task(tix: TixProtocol, task_data: dict, result: ReconcileResult) -> None:
-    """Add a single task via tix, updating result."""
+    """Add a single task via tix, updating result.
+
+    Validates the task before adding. Invalid tasks are rejected
+    programmatically to prevent wasting BUILD cycles on bad tasks.
+    """
     name = task_data.get("name", "")
     if not name:
         result.errors.append("Task missing name field")
+        return
+
+    # Validate task quality before adding (non-strict to allow decompose subtasks)
+    notes = task_data.get("notes", "")
+    accept = task_data.get("accept", "")
+    vr = validate_task(name, notes, accept, is_modification=True, strict=False)
+    if not vr.valid:
+        reasons = "; ".join(e.message for e in vr.errors)
+        result.errors.append(f"Task '{name}' rejected by validation: {reasons}")
         return
 
     # Tag all tasks created by ralph so they can be filtered by assignee
@@ -514,17 +634,13 @@ def _reject_task(
 def _increment_reject_count(tix: TixProtocol, task_id: str) -> None:
     """Increment reject_count on a task for pattern detection.
 
+    Uses targeted query for the single task instead of fetching all tasks.
     Best-effort: failure here does not affect reconciliation.
     """
     try:
-        full = tix.query_full()
-        all_tasks = (
-            full.get("tasks", {}).get("pending", [])
-            + full.get("tasks", {}).get("done", [])
-        )
-        task = next(
-            (t for t in all_tasks if t.get("id") == task_id), None
-        )
+        # Use query_tasks (pending only) — rejected tasks return to pending
+        tasks = tix.query_tasks()
+        task = next((t for t in tasks if t.get("id") == task_id), None)
         current = task.get("reject_count", 0) if task else 0
         tix.task_update(task_id, {"reject_count": current + 1})
     except (TixError, Exception):
@@ -534,10 +650,19 @@ def _increment_reject_count(tix: TixProtocol, task_id: str) -> None:
 def _add_issues(
     tix: TixProtocol, issues: list[dict], result: ReconcileResult
 ) -> None:
-    """Add discovered issues via tix, updating result."""
+    """Add discovered issues via tix, updating result.
+
+    Validates issue descriptions before adding. Too-short or empty
+    descriptions are rejected to prevent noise in the issue queue.
+    """
     for issue in issues:
         desc = issue.get("desc", "")
         if not desc:
+            continue
+        vr = validate_issue(desc)
+        if not vr.valid:
+            reasons = "; ".join(e.message for e in vr.errors)
+            result.errors.append(f"Issue rejected by validation: {reasons}")
             continue
         try:
             resp = tix.issue_add(desc)

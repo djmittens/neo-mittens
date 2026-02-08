@@ -91,10 +91,7 @@ Implement the assigned task.
 
 ## Your Task
 
-```json
-{{TASK_JSON}}
-```
-
+- **ID**: {{TASK_ID}}
 - **Name**: {{TASK_NAME}}
 - **Notes**: {{TASK_NOTES}}
 - **Acceptance criteria**: {{TASK_ACCEPT}}
