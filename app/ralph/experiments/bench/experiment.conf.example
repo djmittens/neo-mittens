@@ -1,0 +1,67 @@
+# experiment.conf - Configuration for a ralph benchmarking experiment
+#
+# This file is sourced by bash scripts. Use KEY=VALUE syntax only.
+# No spaces around '='. Quote values containing spaces.
+#
+# Copy this to your experiment directory and customize.
+
+# ─────────────────────────────────────────────────────────────────────
+# TARGET PROJECT
+# ─────────────────────────────────────────────────────────────────────
+
+# Absolute path to the target git repository
+TARGET_REPO="$HOME/src/valkyria"
+
+# Branch or commit to branch experiments from
+BASE_REF="networking"
+
+# Ralph spec filename (must exist in the target repo's ralph/specs/)
+SPEC="system-architecture-refactor.md"
+
+# ─────────────────────────────────────────────────────────────────────
+# EXPERIMENT PARAMETERS
+# ─────────────────────────────────────────────────────────────────────
+
+# Space-separated list of ralph profiles to test
+PROFILES="hybrid opus sonnet opus-sonnet sonnet-hybrid devstral"
+
+# Max construct iterations per run
+MAX_ITERATIONS=25
+
+# Max wall-clock time per run in seconds (7200 = 2 hours)
+MAX_WALL_TIME=7200
+
+# Max consecutive failures before circuit breaker
+MAX_FAILURES=3
+
+# ─────────────────────────────────────────────────────────────────────
+# PATHS (override defaults if needed)
+# ─────────────────────────────────────────────────────────────────────
+
+# Where to create git worktrees (one per profile)
+# Default: ~/src/<target-repo-name>-experiments/
+WORKTREE_BASE=""
+
+# Where ralph writes its ledger (runs.jsonl, iterations.jsonl)
+# Default: /tmp/ralph-logs (from ralph config)
+RALPH_LOG_DIR="/tmp/ralph-logs"
+
+# Where this experiment stores collected reports
+# Default: <experiment-dir>/results/
+RESULTS_DIR=""
+
+# ─────────────────────────────────────────────────────────────────────
+# CORRECTNESS CHECKS (project-specific gate commands)
+# ─────────────────────────────────────────────────────────────────────
+
+# Command to verify build succeeds (run inside worktree)
+BUILD_CMD="make build"
+
+# Command to verify tests pass (run inside worktree, will be wrapped in timeout)
+TEST_CMD="make test"
+TEST_TIMEOUT=300
+
+# Optional: extra gate check command(s) and label
+# These are run inside the worktree; exit 0 = PASS, nonzero = FAIL
+# Use | as separator for label|command pairs
+GATE_CHECKS="Phase0-OldSymbols|grep -rcE 'heap2_|tlab2_|page2_|stats2_|mark_ctx2_|valk_gc_malloc_' src/ test/ && exit 1 || exit 0"
