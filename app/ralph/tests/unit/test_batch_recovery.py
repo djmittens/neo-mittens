@@ -470,22 +470,20 @@ class TestPickBestTask:
 
     def test_prefers_fewer_rejections(self):
         tasks = [
-            {"id": "t-retry", "name": "Retried", "priority": "high",
-             "reject_count": 2},
-            {"id": "t-fresh", "name": "Fresh", "priority": "high",
-             "reject_count": 0},
+            {"id": "t-retry", "name": "Retried", "priority": "high"},
+            {"id": "t-fresh", "name": "Fresh", "priority": "high"},
         ]
-        best = _pick_best_task(tasks)
+        retry_counts = {"t-retry": 2, "t-fresh": 0}
+        best = _pick_best_task(tasks, retry_counts=retry_counts)
         assert best["id"] == "t-fresh"
 
     def test_priority_trumps_reject_count(self):
         tasks = [
-            {"id": "t-low-fresh", "name": "Low fresh", "priority": "low",
-             "reject_count": 0},
-            {"id": "t-high-retry", "name": "High retry", "priority": "high",
-             "reject_count": 2},
+            {"id": "t-low-fresh", "name": "Low fresh", "priority": "low"},
+            {"id": "t-high-retry", "name": "High retry", "priority": "high"},
         ]
-        best = _pick_best_task(tasks)
+        retry_counts = {"t-low-fresh": 0, "t-high-retry": 2}
+        best = _pick_best_task(tasks, retry_counts=retry_counts)
         assert best["id"] == "t-high-retry"
 
     def test_single_task(self):
@@ -583,20 +581,22 @@ class TestEscalateStuckTasks:
     """Tests for _escalate_stuck_tasks pattern detection."""
 
     def test_escalates_task_at_max_retries(self, tmp_path: Path):
-        """Task with reject_count >= max is escalated to issue."""
+        """Task with retries >= max is escalated to issue."""
         repo_root = tmp_path
         (repo_root / ".tix").mkdir(parents=True, exist_ok=True)
 
         mock_tix = _MockTix(
             tasks=[
                 {"id": "t-stuck", "name": "Stuck task",
-                 "reject": "test fails", "reject_count": 3},
+                 "reject": "test fails"},
             ],
         )
         _write_orch_state(repo_root, stage="BUILD")
         config = GlobalConfig()
         config.max_retries_per_task = 3
         sm, _ = _make_state_machine(repo_root, config=config, tix=mock_tix)
+        # Populate in-memory retry count
+        sm._retry_counts["t-stuck"] = 3
 
         escalated = sm._escalate_stuck_tasks()
         assert escalated == 1
@@ -606,27 +606,29 @@ class TestEscalateStuckTasks:
         assert "3 times" in mock_tix._issues[0]["desc"]
 
     def test_leaves_task_below_threshold(self, tmp_path: Path):
-        """Task with reject_count below max is left alone."""
+        """Task with retries below max is left alone."""
         repo_root = tmp_path
         (repo_root / ".tix").mkdir(parents=True, exist_ok=True)
 
         mock_tix = _MockTix(
             tasks=[
                 {"id": "t-retry", "name": "Retry task",
-                 "reject": "test fails", "reject_count": 1},
+                 "reject": "test fails"},
             ],
         )
         _write_orch_state(repo_root, stage="BUILD")
         config = GlobalConfig()
         config.max_retries_per_task = 3
         sm, _ = _make_state_machine(repo_root, config=config, tix=mock_tix)
+        # Populate in-memory retry count below threshold
+        sm._retry_counts["t-retry"] = 1
 
         escalated = sm._escalate_stuck_tasks()
         assert escalated == 0
         assert len(mock_tix._issues) == 0
 
-    def test_no_reject_count_field_skipped(self, tmp_path: Path):
-        """Tasks without reject_count are treated as fresh."""
+    def test_no_retries_field_skipped(self, tmp_path: Path):
+        """Tasks without in-memory retries are treated as fresh."""
         repo_root = tmp_path
         (repo_root / ".tix").mkdir(parents=True, exist_ok=True)
 
@@ -656,17 +658,21 @@ class TestEscalateStuckTasks:
 
         mock_tix = _MockTix(
             tasks=[
-                {"id": "t-ok", "name": "OK task", "reject_count": 0},
+                {"id": "t-ok", "name": "OK task"},
                 {"id": "t-stuck", "name": "Stuck",
-                 "reject": "fails", "reject_count": 5},
+                 "reject": "fails"},
                 {"id": "t-retry", "name": "Retry",
-                 "reject": "fails", "reject_count": 2},
+                 "reject": "fails"},
             ],
         )
         _write_orch_state(repo_root, stage="BUILD")
         config = GlobalConfig()
         config.max_retries_per_task = 3
         sm, _ = _make_state_machine(repo_root, config=config, tix=mock_tix)
+        # Set in-memory retry counts
+        sm._retry_counts["t-ok"] = 0
+        sm._retry_counts["t-stuck"] = 5
+        sm._retry_counts["t-retry"] = 2
 
         escalated = sm._escalate_stuck_tasks()
         assert escalated == 1

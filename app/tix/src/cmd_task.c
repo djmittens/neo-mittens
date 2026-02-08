@@ -487,8 +487,6 @@ static tix_err_t task_update(tix_ctx_t *ctx, int argc, char **argv) {
   if (v != NULL) {
     snprintf(ticket.completed_at, sizeof(ticket.completed_at), "%s", v);
   }
-  v = tix_json_get_str(&obj, "model");
-  if (v != NULL) { snprintf(ticket.model, sizeof(ticket.model), "%s", v); }
   v = tix_json_get_str(&obj, "notes");
   if (v != NULL) { snprintf(ticket.notes, TIX_MAX_DESC_LEN, "%s", v); }
   v = tix_json_get_str(&obj, "accept");
@@ -500,25 +498,6 @@ static tix_err_t task_update(tix_ctx_t *ctx, int argc, char **argv) {
   v = tix_json_get_str(&obj, "assigned");
   if (v != NULL) {
     snprintf(ticket.assigned, sizeof(ticket.assigned), "%s", v);
-  }
-
-  if (tix_json_has_key(&obj, "cost")) {
-    ticket.cost = tix_json_get_double(&obj, "cost", 0.0);
-  }
-  if (tix_json_has_key(&obj, "tokens_in")) {
-    ticket.tokens_in = tix_json_get_num(&obj, "tokens_in", 0);
-  }
-  if (tix_json_has_key(&obj, "tokens_out")) {
-    ticket.tokens_out = tix_json_get_num(&obj, "tokens_out", 0);
-  }
-  if (tix_json_has_key(&obj, "iterations")) {
-    ticket.iterations = (i32)tix_json_get_num(&obj, "iterations", 0);
-  }
-  if (tix_json_has_key(&obj, "retries")) {
-    ticket.retries = (i32)tix_json_get_num(&obj, "retries", 0);
-  }
-  if (tix_json_has_key(&obj, "kill_count")) {
-    ticket.kill_count = (i32)tix_json_get_num(&obj, "kill_count", 0);
   }
 
   /* labels - replace if provided */
@@ -538,6 +517,37 @@ static tix_err_t task_update(tix_ctx_t *ctx, int argc, char **argv) {
 
   err = tix_db_upsert_ticket(&ctx->db, &ticket);
   if (err != TIX_OK) { return err; }
+
+  /* route metadata fields (legacy inline + meta.* prefixed) */
+  static const char *META_NUM_KEYS[] = {
+    "cost", "tokens_in", "tokens_out", "iterations",
+    "retries", "kill_count", NULL
+  };
+  static const char *META_STR_KEYS[] = { "model", NULL };
+  for (int ki = 0; META_NUM_KEYS[ki] != NULL; ki++) {
+    if (tix_json_has_key(&obj, META_NUM_KEYS[ki])) {
+      double mv = tix_json_get_double(&obj, META_NUM_KEYS[ki], 0.0);
+      tix_db_set_ticket_meta_num(&ctx->db, ticket.id, META_NUM_KEYS[ki], mv);
+    }
+  }
+  for (int ki = 0; META_STR_KEYS[ki] != NULL; ki++) {
+    const char *mv = tix_json_get_str(&obj, META_STR_KEYS[ki]);
+    if (mv != NULL && mv[0] != '\0') {
+      tix_db_set_ticket_meta_str(&ctx->db, ticket.id, META_STR_KEYS[ki], mv);
+    }
+  }
+  for (u32 fi = 0; fi < obj.field_count; fi++) {
+    if (strncmp(obj.fields[fi].key, "meta.", 5) != 0) { continue; }
+    const char *mkey = obj.fields[fi].key + 5;
+    if (mkey[0] == '\0') { continue; }
+    if (obj.fields[fi].type == TIX_JSON_NUMBER) {
+      tix_db_set_ticket_meta_num(&ctx->db, ticket.id,
+                                  mkey, obj.fields[fi].dbl_val);
+    } else if (obj.fields[fi].type == TIX_JSON_STRING) {
+      tix_db_set_ticket_meta_str(&ctx->db, ticket.id,
+                                  mkey, obj.fields[fi].str_val);
+    }
+  }
 
   err = tix_plan_append_ticket(ctx->plan_path, &ticket);
   if (err != TIX_OK) { return err; }

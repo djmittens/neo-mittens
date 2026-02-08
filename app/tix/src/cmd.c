@@ -34,7 +34,7 @@ tix_err_t tix_ctx_init(tix_ctx_t *ctx) {
 
   struct stat st;
 
-  /* fallback: if configured plan file doesn't exist, try ralph/plan.jsonl */
+  /* fallback: if configured plan file doesn't exist, try legacy path */
   if (stat(ctx->plan_path, &st) != 0) {
     char legacy_path[TIX_MAX_PATH_LEN];
     n = snprintf(legacy_path, sizeof(legacy_path),
@@ -203,6 +203,81 @@ tix_err_t tix_plan_append_delete(const char *plan_path, const char *id) {
   return TIX_OK;
 }
 
+/* Write a ticket JSON line to a file, appending ticket_meta as "meta":{...}.
+   The ticket JSON ends with "}", so we replace it with ","meta":{...}}".
+   If no metadata exists, writes the ticket JSON as-is. */
+static void write_ticket_with_meta(FILE *fp, tix_db_t *db,
+                                   const tix_ticket_t *ticket) {
+  char buf[TIX_MAX_LINE_LEN];
+  sz len = tix_json_write_ticket(ticket, buf, sizeof(buf));
+  if (len == 0) { return; }
+
+  /* query ticket_meta for this ticket */
+  const char *sql =
+    "SELECT key, value_text, value_num FROM ticket_meta "
+    "WHERE ticket_id=? ORDER BY key";
+  sqlite3_stmt *stmt = NULL;
+  int rc = sqlite3_prepare_v2(db->handle, sql, -1, &stmt, NULL);
+  if (rc != SQLITE_OK) {
+    fprintf(fp, "%s\n", buf);
+    return;
+  }
+  sqlite3_bind_text(stmt, 1, ticket->id, -1, SQLITE_STATIC);
+
+  /* collect meta entries */
+  char meta_buf[TIX_MAX_LINE_LEN / 2];
+  char *mp = meta_buf;
+  char *mend = meta_buf + sizeof(meta_buf);
+  int meta_count = 0;
+
+  while (sqlite3_step(stmt) == SQLITE_ROW) {
+    const char *key = (const char *)sqlite3_column_text(stmt, 0);
+    const char *vtext = (const char *)sqlite3_column_text(stmt, 1);
+    if (key == NULL) { continue; }
+
+    if (meta_count > 0 && mp < mend - 1) {
+      *mp++ = ',';
+    }
+    char esc_key[TIX_MAX_KEYWORD_LEN * 2];
+    tix_json_escape(key, esc_key, sizeof(esc_key));
+
+    if (vtext != NULL && vtext[0] != '\0') {
+      char esc_val[TIX_MAX_NAME_LEN * 2];
+      tix_json_escape(vtext, esc_val, sizeof(esc_val));
+      int n = snprintf(mp, (sz)(mend - mp), "\"%s\":\"%s\"",
+                       esc_key, esc_val);
+      if (n > 0 && mp + n < mend) { mp += n; }
+    } else {
+      double vnum = sqlite3_column_double(stmt, 2);
+      /* write integer if it's a whole number */
+      if (vnum == (double)(i64)vnum && vnum >= -1e15 && vnum <= 1e15) {
+        int n = snprintf(mp, (sz)(mend - mp), "\"%s\":%lld",
+                         esc_key, (long long)(i64)vnum);
+        if (n > 0 && mp + n < mend) { mp += n; }
+      } else {
+        int n = snprintf(mp, (sz)(mend - mp), "\"%s\":%.6g",
+                         esc_key, vnum);
+        if (n > 0 && mp + n < mend) { mp += n; }
+      }
+    }
+    meta_count++;
+  }
+  sqlite3_finalize(stmt);
+
+  if (meta_count == 0) {
+    fprintf(fp, "%s\n", buf);
+    return;
+  }
+
+  /* replace trailing "}" with ","meta":{...}}" */
+  if (len > 0 && buf[len - 1] == '}') {
+    buf[len - 1] = '\0';
+    fprintf(fp, "%s,\"meta\":{%s}}\n", buf, meta_buf);
+  } else {
+    fprintf(fp, "%s\n", buf);
+  }
+}
+
 tix_err_t tix_plan_compact(const char *plan_path, tix_db_t *db) {
   if (plan_path == NULL || db == NULL) { return TIX_ERR_INVALID_ARG; }
 
@@ -234,9 +309,7 @@ tix_err_t tix_plan_compact(const char *plan_path, tix_db_t *db) {
       if (id == NULL) { continue; }
       tix_ticket_t ticket;
       if (tix_db_get_ticket(db, id, &ticket) != TIX_OK) { continue; }
-      char buf[TIX_MAX_LINE_LEN];
-      sz len = tix_json_write_ticket(&ticket, buf, sizeof(buf));
-      if (len > 0) { fprintf(fp, "%s\n", buf); }
+      write_ticket_with_meta(fp, db, &ticket);
     }
     sqlite3_finalize(stmt);
   }
@@ -257,9 +330,7 @@ tix_err_t tix_plan_compact(const char *plan_path, tix_db_t *db) {
       /* write the ticket line (with its current resolved status) */
       tix_ticket_t ticket;
       if (tix_db_get_ticket(db, id, &ticket) != TIX_OK) { continue; }
-      char buf[TIX_MAX_LINE_LEN];
-      sz len = tix_json_write_ticket(&ticket, buf, sizeof(buf));
-      if (len > 0) { fprintf(fp, "%s\n", buf); }
+      write_ticket_with_meta(fp, db, &ticket);
 
       /* write the corresponding tombstone (accept/reject) if it exists */
       tix_tombstone_t ts;

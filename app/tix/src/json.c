@@ -126,6 +126,71 @@ tix_err_t tix_json_parse_line(const char *line, tix_json_obj_t *obj) {
       f->dbl_val = strtod(p, &end);
       f->num_val = (i64)f->dbl_val;
       p = end;
+    } else if (*p == '{') {
+      /* nested object: flatten fields as "parent.child" keys */
+      char prefix[TIX_MAX_KEYWORD_LEN];
+      snprintf(prefix, sizeof(prefix), "%s", f->key);
+      /* don't count the parent key itself as a field */
+      p++;
+      while (*p != '\0' && *p != '}' &&
+             obj->field_count < TIX_JSON_MAX_KEYS) {
+        p = skip_ws(p);
+        if (*p == '}') { break; }
+        tix_json_field_t *sf = &obj->fields[obj->field_count];
+        memset(sf, 0, sizeof(*sf));
+        char child_key[TIX_MAX_KEYWORD_LEN];
+        p = parse_string(p, child_key, sizeof(child_key));
+        if (p == NULL) { return TIX_ERR_PARSE; }
+        /* build "prefix.child" key with explicit truncation check */
+        {
+          sz plen = strlen(prefix);
+          sz clen = strlen(child_key);
+          sz max = (sz)(TIX_MAX_KEYWORD_LEN - 1);
+          if (plen + 1 + clen > max) {
+            /* truncate child_key to fit */
+            clen = (plen + 1 < max) ? max - plen - 1 : 0;
+          }
+          memcpy(sf->key, prefix, plen);
+          sf->key[plen] = '.';
+          memcpy(sf->key + plen + 1, child_key, clen);
+          sf->key[plen + 1 + clen] = '\0';
+        }
+        p = skip_ws(p);
+        if (*p != ':') { return TIX_ERR_PARSE; }
+        p++;
+        p = skip_ws(p);
+        if (*p == '"') {
+          sf->type = TIX_JSON_STRING;
+          p = parse_string(p, sf->str_val, TIX_MAX_DESC_LEN);
+          if (p == NULL) { return TIX_ERR_PARSE; }
+        } else if (*p == '-' || isdigit((unsigned char)*p)) {
+          sf->type = TIX_JSON_NUMBER;
+          char *ne = NULL;
+          sf->dbl_val = strtod(p, &ne);
+          sf->num_val = (i64)sf->dbl_val;
+          p = ne;
+        } else if (*p == 'n' && strncmp(p, "null", 4) == 0) {
+          sf->type = TIX_JSON_NULL;
+          p += 4;
+        } else if (*p == 't' || *p == 'f') {
+          sf->type = TIX_JSON_BOOL;
+          if (strncmp(p, "true", 4) == 0) { sf->bool_val = 1; p += 4; }
+          else if (strncmp(p, "false", 5) == 0) { sf->bool_val = 0; p += 5; }
+          else { return TIX_ERR_PARSE; }
+        } else {
+          return TIX_ERR_PARSE;
+        }
+        obj->field_count++;
+        p = skip_ws(p);
+        if (*p == ',') { p++; }
+      }
+      p = skip_ws(p);
+      if (*p != '}') { return TIX_ERR_PARSE; }
+      p++;
+      /* skip incrementing field_count - sub-fields already added */
+      p = skip_ws(p);
+      if (*p == ',') { p++; }
+      continue;
     } else {
       return TIX_ERR_PARSE;
     }
@@ -367,32 +432,6 @@ sz tix_json_write_ticket(const void *vticket, char *buf, sz buf_len) {
   /* completion timing */
   if (t->completed_at[0] != '\0') {
     TIX_BUF_PRINTF(p, end, 0, ",\"completed_at\":\"%s\"", t->completed_at);
-  }
-
-  /* agent telemetry - skip zero values */
-  if (t->cost > 0.0) {
-    TIX_BUF_PRINTF(p, end, 0, ",\"cost\":%.4f", t->cost);
-  }
-  if (t->tokens_in > 0) {
-    TIX_BUF_PRINTF(p, end, 0, ",\"tokens_in\":%lld", (long long)t->tokens_in);
-  }
-  if (t->tokens_out > 0) {
-    TIX_BUF_PRINTF(p, end, 0, ",\"tokens_out\":%lld",
-                   (long long)t->tokens_out);
-  }
-  if (t->iterations > 0) {
-    TIX_BUF_PRINTF(p, end, 0, ",\"iterations\":%d", (int)t->iterations);
-  }
-  if (t->model[0] != '\0') {
-    char esc_model[TIX_MAX_NAME_LEN * 2];
-    tix_json_escape(t->model, esc_model, sizeof(esc_model));
-    TIX_BUF_PRINTF(p, end, 0, ",\"model\":\"%s\"", esc_model);
-  }
-  if (t->retries > 0) {
-    TIX_BUF_PRINTF(p, end, 0, ",\"retries\":%d", (int)t->retries);
-  }
-  if (t->kill_count > 0) {
-    TIX_BUF_PRINTF(p, end, 0, ",\"kill_count\":%d", (int)t->kill_count);
   }
 
   /* lifecycle timestamps */

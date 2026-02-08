@@ -180,19 +180,13 @@ class Tix:
             return [result.data]
         return []
 
-    def report(self, kind: str = "") -> str:
-        """Run a tix report and return the human-readable output.
-
-        Args:
-            kind: Report type - "" (summary), "velocity", "actors", "models".
+    def report(self) -> str:
+        """Run tix report and return the human-readable progress output.
 
         Returns:
-            Report text output.
+            Progress report text (task counts, priorities, blocked).
         """
-        args = ["report"]
-        if kind:
-            args.append(kind)
-        result = self._run(*args, parse_json=False)
+        result = self._run("report", parse_json=False)
         return result.raw
 
     def report_models(self) -> list[dict]:
@@ -203,17 +197,46 @@ class Tix:
         analysis and routing decisions.
         """
         return self.query_tql(
-            "tasks all | model!= | group model"
-            " | count | sum cost | avg cost"
-            " | sum tokens_in | sum tokens_out"
-            " | avg iterations | sort sum_cost desc"
+            "tasks all | meta.model!= | group meta.model"
+            " | count | sum meta.cost | avg meta.cost"
+            " | sum meta.tokens_in | sum meta.tokens_out"
+            " | avg meta.iterations | sort sum_meta.cost desc"
         )
 
     def report_labels(self) -> list[dict]:
         """Get per-label task count and cost breakdown via TQL."""
         return self.query_tql(
             "tasks all | group label"
-            " | count | sum cost | avg cost | sort count desc"
+            " | count | sum meta.cost | avg meta.cost | sort count desc"
+        )
+
+    def report_velocity(self) -> list[dict]:
+        """Get velocity metrics for completed tasks via TQL.
+
+        Returns a single-row list with aggregated metrics across all
+        completed tasks (done + accepted).
+
+        Returns:
+            List with one dict containing count, sum_meta.cost, etc.
+        """
+        return self.query_tql(
+            "tasks all | status=done,accepted"
+            " | count | sum meta.cost | avg meta.cost"
+            " | sum meta.tokens_in | sum meta.tokens_out"
+            " | avg meta.iterations"
+            " | sum meta.retries | sum meta.kill_count"
+        )
+
+    def report_actors(self) -> list[dict]:
+        """Get per-author task breakdown via TQL.
+
+        Returns:
+            List of dicts with author, count, cost metrics.
+        """
+        return self.query_tql(
+            "tasks all | author!= | group author"
+            " | count | sum meta.cost | avg meta.cost"
+            " | avg meta.iterations | sort count desc"
         )
 
     def query_tombstones(self) -> dict:

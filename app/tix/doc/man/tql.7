@@ -180,8 +180,8 @@ An empty value after the operator checks whether a field is set:
 .RS
 .nf
 tasks | spec=              \fR# tasks with no spec\fP
-tasks | model!=            \fR# tasks that have a model set\fP
-tasks | cost!=             \fR# tasks with non-zero cost\fP
+tasks | spec!=             \fR# tasks that have a spec set\fP
+tasks | branch!=           \fR# tasks with a branch set\fP
 .fi
 .RE
 .PP
@@ -212,7 +212,7 @@ Column names are comma\-separated with no spaces.
 .PP
 .RS
 .nf
-tasks | select id,name,author,cost
+tasks | select id,name,author,branch
 .fi
 .RE
 .SS group \fIfield\fR
@@ -269,14 +269,14 @@ tasks | group spec | count_distinct author
 .SS having \fIcolumn\fR\fIop\fR\fIvalue\fR [\fIcolumn\fR\fIop\fR\fIvalue\fR ...]
 Filter aggregate results.
 The column name must match an aggregate alias
-.RB ( count ", " sum_cost ", " avg_cost ", "
+.RB ( count ", " sum_priority ", " avg_priority ", "
 .BR count_distinct_author ", etc.)."
 Multiple having filters can be space\-separated within the same segment.
 .PP
 .RS
 .nf
 tasks | group author | count | having count>=2
-tasks | group author | count | sum cost | having count>1 sum_cost<100
+tasks | group author | count | having count>1
 .fi
 .RE
 .SS sort \fIfield\fR [\fIasc\fR|\fIdesc\fR]
@@ -338,19 +338,35 @@ kill_reason|reason task was killed
 author|who created the ticket
 assigned|who the ticket is assigned to
 completed_at|ISO 8601 completion timestamp
-cost|dollar cost (real)
-tokens_in|input tokens (integer)
-tokens_out|output tokens (integer)
-iterations|loop iterations (integer)
-model|model name
-retries|retry count
-kill_count|kill count
 created_at|creation unix epoch
 updated_at|last update unix epoch
 resolved_at|unix epoch when ticket reached terminal status
 compacted_at|unix epoch when ticket was removed from plan.jsonl
 label|pseudo\-field for ticket labels
+meta.*|metadata pseudo\-field (see below)
 .TE
+.SS Metadata fields (meta.*)
+The
+.B meta.*
+prefix accesses arbitrary key\-value metadata stored in the
+.B ticket_meta
+table.
+Any key name is valid after the prefix (e.g.,
+.BR meta.cost ", " meta.model ", " meta.tokens_in ).
+.PP
+For filters, numeric values compare against
+.BR value_num ;
+string values compare against
+.BR value_text .
+For aggregates (sum, avg, min, max),
+.B value_num
+is used.
+For select and group\-by,
+both columns are coalesced.
+.PP
+Each distinct meta key generates a LEFT JOIN, so tickets without
+the requested metadata key are still returned (with NULL values).
+A maximum of 4 distinct meta keys can be used in a single query.
 .SH EXAMPLES
 .PP
 All pending tasks:
@@ -368,19 +384,9 @@ Task count per author, sorted:
 .B tix q "tasks | group author | count | sort count desc"
 .RE
 .PP
-Total cost by model:
-.RS
-.B tix q "tasks | status=done | group model | sum cost | sort sum_cost desc"
-.RE
-.PP
 Blocked issues in the parser module:
 .RS
 .B tix q "issues | label~module:parser*"
-.RE
-.PP
-Top 5 most expensive completed tasks:
-.RS
-.B tix q "tasks | status=done | sort cost desc | limit 5"
 .RE
 .PP
 All tickets across types created after a timestamp:
@@ -428,14 +434,9 @@ Tasks with no spec assigned:
 .B tix q "tasks | spec="
 .RE
 .PP
-Tasks that have cost data:
+Tasks assigned to alice:
 .RS
-.B tix q "tasks | cost!= | select id,name,cost"
-.RE
-.PP
-Tasks assigned to ralph:
-.RS
-.B tix q "tasks | assigned=ralph"
+.B tix q "tasks | assigned=alice"
 .RE
 .PP
 Unassigned tasks:
@@ -443,9 +444,9 @@ Unassigned tasks:
 .B tix q "tasks | assigned="
 .RE
 .PP
-Tasks NOT assigned to ralph:
+Tasks NOT assigned to alice:
 .RS
-.B tix q "tasks | assigned!=ralph"
+.B tix q "tasks | assigned!=alice"
 .RE
 .PP
 All tasks including accepted and deleted:
@@ -467,6 +468,26 @@ Tasks accepted or rejected:
 .RS
 .B tix q "tasks all | status=accepted,rejected"
 .RE
+.PP
+Expensive tasks (cost > $1):
+.RS
+.B tix q "tasks | meta.cost>1.0 | select id,name,meta.cost"
+.RE
+.PP
+Total cost by model:
+.RS
+.B tix q "tasks | group meta.model | sum meta.cost | sort sum_meta.cost desc"
+.RE
+.PP
+Tasks with cost data:
+.RS
+.B tix q "tasks | meta.cost!="
+.RE
+.PP
+Sort by cost descending:
+.RS
+.B tix q "tasks | sort meta.cost desc | limit 5"
+.RE
 .SH LIMITS
 .TP
 .B TQL_MAX_FILTERS
@@ -486,6 +507,9 @@ Tasks accepted or rejected:
 .TP
 .B TQL_MAX_OR_VALUES
 8 comma\-separated values per IN filter.
+.TP
+.B TQL_MAX_META_JOINS
+4 distinct meta.* keys per query.
 .TP
 .B TQL_MAX_SQL_LEN
 4096 bytes of generated SQL.

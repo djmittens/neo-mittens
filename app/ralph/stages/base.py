@@ -97,6 +97,11 @@ class ConstructStateMachine:
         self._last_stage_output: str = ""
         self._batch_failure_count: int = 0
         self._ticket_cache: Optional[dict] = None
+        # In-memory tracking for retries and kills per task.
+        # These are the authoritative source for escalation decisions.
+        # Values are also written to ticket_meta for persistence/reporting.
+        self._retry_counts: dict[str, int] = {}
+        self._kill_counts: dict[str, int] = {}
 
     # =========================================================================
     # Ticket queries (via tix, with per-iteration cache)
@@ -168,8 +173,7 @@ class ConstructStateMachine:
         Creates an issue describing the pattern and rejects the task
         so the next INVESTIGATE stage can address the root cause.
 
-        Reads the ``retries`` field (tix native) written by
-        ``_increment_reject_count`` in reconcile.py.
+        Uses in-memory ``_retry_counts`` as the authoritative source.
 
         Returns:
             Number of tasks escalated.
@@ -182,12 +186,11 @@ class ConstructStateMachine:
 
         escalated = 0
         for task in tasks:
-            # Check both tix-native "retries" and legacy "reject_count"
-            retry_count = task.get("retries", 0) or task.get("reject_count", 0)
+            task_id = task.get("id", "")
+            retry_count = self._retry_counts.get(task_id, 0)
             if retry_count < max_retries:
                 continue
 
-            task_id = task.get("id", "")
             task_name = task.get("name", "")
             reason = task.get("reject", "unknown")
             logger.warning(
@@ -208,6 +211,19 @@ class ConstructStateMachine:
             escalated += 1
 
         return escalated
+
+    def increment_retries(self, task_id: str) -> int:
+        """Increment in-memory retry count for a task.
+
+        Args:
+            task_id: Task ID.
+
+        Returns:
+            New retry count.
+        """
+        current = self._retry_counts.get(task_id, 0)
+        self._retry_counts[task_id] = current + 1
+        return current + 1
 
     @staticmethod
     def _token_similarity(a: str, b: str) -> float:
@@ -617,25 +633,18 @@ class ConstructStateMachine:
     def _record_kill(self, task_id: str, reason: str) -> None:
         """Increment kill_count and set kill_reason on a ticket.
 
-        Writes to tix native fields so ``tix report velocity`` aggregates
-        total kills and ``tix report models`` can correlate kills per model.
+        Uses in-memory ``_kill_counts`` and writes to ``ticket_meta``
+        via the ``meta`` sub-object for persistence and reporting.
         Best-effort: failure does not affect state machine flow.
         """
         if not self.tix or task_id == "__stage_failure__":
             return
+        current = self._kill_counts.get(task_id, 0)
+        self._kill_counts[task_id] = current + 1
         try:
-            full = self._get_cached_full()
-            all_tasks = (
-                full.get("tasks", {}).get("pending", [])
-                + full.get("tasks", {}).get("done", [])
-            )
-            task = next(
-                (t for t in all_tasks if t.get("id") == task_id), None
-            )
-            current = task.get("kill_count", 0) if task else 0
             self.tix.task_update(
                 task_id,
-                {"kill_count": current + 1, "kill_reason": reason},
+                {"meta": {"kill_count": current + 1, "kill_reason": reason}},
             )
         except Exception:
             pass

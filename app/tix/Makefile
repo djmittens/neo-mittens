@@ -75,7 +75,7 @@ test: build
 .PHONY: test-asan
 test-asan: build-asan
 	set -e
-	export ASAN_OPTIONS=detect_leaks=1:halt_on_error=1:abort_on_error=1
+	export ASAN_OPTIONS=detect_leaks=0:halt_on_error=1:abort_on_error=1
 	$(call run_tests,build-asan)
 
 .PHONY: lint

@@ -111,7 +111,10 @@ def _load_spec_content(ralph_dir: Path, spec_name: str) -> str:
 _PRIORITY_ORDER = {"high": 0, "medium": 1, "low": 2}
 
 
-def _pick_best_task(tasks: list[dict]) -> dict:
+def _pick_best_task(
+    tasks: list[dict],
+    retry_counts: Optional[dict[str, int]] = None,
+) -> dict:
     """Select the highest-priority task from a list of pending tasks.
 
     Priority ordering:
@@ -124,11 +127,13 @@ def _pick_best_task(tasks: list[dict]) -> dict:
 
     Args:
         tasks: Non-empty list of task dicts from tix.
+        retry_counts: In-memory retry counts from ConstructStateMachine.
 
     Returns:
         The best task to build next.
     """
     pending_ids = {t.get("id", "") for t in tasks}
+    retries_map = retry_counts or {}
 
     def sort_key(task: dict) -> tuple[int, int, int]:
         deps = task.get("deps") or []
@@ -136,7 +141,8 @@ def _pick_best_task(tasks: list[dict]) -> dict:
         prio = _PRIORITY_ORDER.get(
             task.get("priority", ""), 3
         )
-        retries = task.get("retries", 0) or task.get("reject_count", 0)
+        tid = task.get("id", "")
+        retries = retries_map.get(tid, 0)
         return (unmet, prio, retries)
 
     return min(tasks, key=sort_key)
@@ -732,7 +738,7 @@ def _print_final_report(
     print(f"{color}{label}{Colors.NC}")
     print(f"Iterations:     {iterations}")
 
-    # Use tix report for the authoritative summary
+    # Use tix progress report + Ralph-side velocity/models queries
     tix_report_shown = False
     if tix:
         try:
@@ -741,11 +747,46 @@ def _print_final_report(
                 print()
                 print(report_text)
                 tix_report_shown = True
-            # Show per-model breakdown if multiple models used
-            models_text = tix.report("models")
-            if models_text.strip() and "Model" in models_text:
-                print()
-                print(models_text)
+        except Exception:
+            pass
+
+        # Ralph-owned velocity summary from TQL
+        try:
+            velocity = tix.report_velocity()
+            if velocity:
+                v = velocity[0]
+                count = v.get("count", 0)
+                if count:
+                    total_cost = v.get("sum_meta.cost", 0.0)
+                    avg_cost = v.get("avg_meta.cost", 0.0)
+                    tok_in = v.get("sum_meta.tokens_in", 0)
+                    tok_out = v.get("sum_meta.tokens_out", 0)
+                    retries = v.get("sum_meta.retries", 0)
+                    kills = v.get("sum_meta.kill_count", 0)
+                    print(f"\nCost: ${total_cost:.4f} total, "
+                          f"${avg_cost:.4f}/task avg")
+                    if tok_in or tok_out:
+                        print(f"Tokens: {tok_in} in / {tok_out} out")
+                    parts = []
+                    if retries:
+                        parts.append(f"Retries: {retries}")
+                    if kills:
+                        parts.append(f"Kills: {kills}")
+                    if parts:
+                        print(" | ".join(parts))
+        except Exception:
+            pass
+
+        # Ralph-owned per-model breakdown from TQL
+        try:
+            models = tix.report_models()
+            if models and len(models) > 1:
+                print("\nPer-model breakdown:")
+                for m in models:
+                    name = m.get("meta.model", "?")
+                    cnt = m.get("count", 0)
+                    cost = m.get("sum_meta.cost", 0.0)
+                    print(f"  {name}: {cnt} tasks, ${cost:.4f}")
         except Exception:
             pass
 

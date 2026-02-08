@@ -74,7 +74,7 @@ static void replay_one_line(tix_db_t *db, const char *line) {
     const char *name = tix_json_get_str(&obj, "name");
     if (name != NULL) { snprintf(ticket.name, TIX_MAX_NAME_LEN, "%s", name); }
 
-    /* issues use "desc" instead of "name" */
+    /* legacy: "desc" is an alias for "name" on issues */
     const char *desc = tix_json_get_str(&obj, "desc");
     if (desc != NULL && ticket.name[0] == '\0') {
       snprintf(ticket.name, TIX_MAX_NAME_LEN, "%s", desc);
@@ -147,18 +147,6 @@ static void replay_one_line(tix_db_t *db, const char *line) {
                "%s", completed_at);
     }
 
-    /* agent telemetry */
-    ticket.cost = tix_json_get_double(&obj, "cost", 0.0);
-    ticket.tokens_in = tix_json_get_num(&obj, "tokens_in", 0);
-    ticket.tokens_out = tix_json_get_num(&obj, "tokens_out", 0);
-    ticket.iterations = (i32)tix_json_get_num(&obj, "iterations", 0);
-    const char *model = tix_json_get_str(&obj, "model");
-    if (model != NULL) {
-      snprintf(ticket.model, TIX_MAX_NAME_LEN, "%s", model);
-    }
-    ticket.retries = (i32)tix_json_get_num(&obj, "retries", 0);
-    ticket.kill_count = (i32)tix_json_get_num(&obj, "kill_count", 0);
-
     /* lifecycle timestamps */
     ticket.resolved_at = tix_json_get_num(&obj, "resolved_at", 0);
     ticket.compacted_at = tix_json_get_num(&obj, "compacted_at", 0);
@@ -195,6 +183,45 @@ static void replay_one_line(tix_db_t *db, const char *line) {
     }
 
     tix_db_upsert_ticket(db, &ticket);
+
+    /* route metadata to ticket_meta table.
+       Supports both legacy inline keys (cost, model, etc.) and
+       new meta.* prefixed keys (from "meta":{...} sub-object). */
+    if (ticket.id[0] != '\0') {
+      /* legacy inline telemetry keys */
+      static const char *LEGACY_NUM_KEYS[] = {
+        "cost", "tokens_in", "tokens_out", "iterations",
+        "retries", "kill_count", NULL
+      };
+      static const char *LEGACY_STR_KEYS[] = {
+        "model", NULL
+      };
+      for (int ki = 0; LEGACY_NUM_KEYS[ki] != NULL; ki++) {
+        double v = tix_json_get_double(&obj, LEGACY_NUM_KEYS[ki], 0.0);
+        if (v != 0.0) {
+          tix_db_set_ticket_meta_num(db, ticket.id, LEGACY_NUM_KEYS[ki], v);
+        }
+      }
+      for (int ki = 0; LEGACY_STR_KEYS[ki] != NULL; ki++) {
+        const char *v = tix_json_get_str(&obj, LEGACY_STR_KEYS[ki]);
+        if (v != NULL && v[0] != '\0') {
+          tix_db_set_ticket_meta_str(db, ticket.id, LEGACY_STR_KEYS[ki], v);
+        }
+      }
+      /* new meta.* prefixed keys (from "meta":{...} sub-object) */
+      for (u32 fi = 0; fi < obj.field_count; fi++) {
+        if (strncmp(obj.fields[fi].key, "meta.", 5) != 0) { continue; }
+        const char *mkey = obj.fields[fi].key + 5; /* skip "meta." */
+        if (mkey[0] == '\0') { continue; }
+        if (obj.fields[fi].type == TIX_JSON_NUMBER) {
+          tix_db_set_ticket_meta_num(db, ticket.id,
+                                     mkey, obj.fields[fi].dbl_val);
+        } else if (obj.fields[fi].type == TIX_JSON_STRING) {
+          tix_db_set_ticket_meta_str(db, ticket.id,
+                                     mkey, obj.fields[fi].str_val);
+        }
+      }
+    }
   } else if (strcmp(t_val, "accept") == 0 || strcmp(t_val, "reject") == 0) {
     tix_tombstone_t ts;
     memset(&ts, 0, sizeof(ts));
@@ -255,6 +282,7 @@ tix_err_t tix_db_clear_tickets(tix_db_t *db) {
   sqlite3_exec(db->handle, "DELETE FROM ticket_labels", NULL, NULL, NULL);
   sqlite3_exec(db->handle, "DELETE FROM tombstones", NULL, NULL, NULL);
   sqlite3_exec(db->handle, "DELETE FROM keywords", NULL, NULL, NULL);
+  sqlite3_exec(db->handle, "DELETE FROM ticket_meta", NULL, NULL, NULL);
   return TIX_OK;
 }
 

@@ -65,19 +65,6 @@ static void row_to_ticket(sqlite3_stmt *stmt, tix_ticket_t *t) {
   col_text(stmt, col_idx(stmt, "assigned"), t->assigned, TIX_MAX_NAME_LEN);
   col_text(stmt, col_idx(stmt, "completed_at"), t->completed_at,
            sizeof(t->completed_at));
-  ci = col_idx(stmt, "cost");
-  if (ci >= 0) { t->cost = sqlite3_column_double(stmt, ci); }
-  ci = col_idx(stmt, "tokens_in");
-  if (ci >= 0) { t->tokens_in = sqlite3_column_int64(stmt, ci); }
-  ci = col_idx(stmt, "tokens_out");
-  if (ci >= 0) { t->tokens_out = sqlite3_column_int64(stmt, ci); }
-  ci = col_idx(stmt, "iterations");
-  if (ci >= 0) { t->iterations = (i32)sqlite3_column_int(stmt, ci); }
-  col_text(stmt, col_idx(stmt, "model"), t->model, TIX_MAX_NAME_LEN);
-  ci = col_idx(stmt, "retries");
-  if (ci >= 0) { t->retries = (i32)sqlite3_column_int(stmt, ci); }
-  ci = col_idx(stmt, "kill_count");
-  if (ci >= 0) { t->kill_count = (i32)sqlite3_column_int(stmt, ci); }
   ci = col_idx(stmt, "resolved_at");
   if (ci >= 0) { t->resolved_at = sqlite3_column_int64(stmt, ci); }
   ci = col_idx(stmt, "compacted_at");

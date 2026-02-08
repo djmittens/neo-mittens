@@ -116,13 +116,13 @@ static void test_parse_piped_filters(TIX_TEST_ARGS()) {
   char err[256] = {0};
   tql_pipeline_t p;
 
-  ASSERT_OK(tql_parse("tasks | status=pending author=ralph", &p,
+  ASSERT_OK(tql_parse("tasks | status=pending author=alice", &p,
                        err, sizeof(err)));
   ASSERT_EQ(p.filter_count, 2);
   ASSERT_STR_EQ(p.filters[0].field, "status");
   ASSERT_STR_EQ(p.filters[0].value, "pending");
   ASSERT_STR_EQ(p.filters[1].field, "author");
-  ASSERT_STR_EQ(p.filters[1].value, "ralph");
+  ASSERT_STR_EQ(p.filters[1].value, "alice");
 
   TIX_PASS();
 }
@@ -133,7 +133,7 @@ static void test_parse_all_operators(TIX_TEST_ARGS()) {
   tql_pipeline_t p;
 
   ASSERT_OK(tql_parse("tickets | priority!=none created_at>1700000000 "
-                       "cost<10.0 iterations>=5 retries<=2 name~auth*",
+                       "updated_at<1800000000 resolved_at>=5 compacted_at<=2 name~auth*",
                        &p, err, sizeof(err)));
   ASSERT_EQ(p.filter_count, 6);
   ASSERT_EQ(p.filters[0].op, TQL_OP_NE);
@@ -181,12 +181,12 @@ static void test_parse_aggregates(TIX_TEST_ARGS()) {
   char err[256] = {0};
   tql_pipeline_t p;
 
-  ASSERT_OK(tql_parse("tasks | group author | count | sum cost | avg cost",
+  ASSERT_OK(tql_parse("tasks | group author | count | sum created_at | avg created_at",
                        &p, err, sizeof(err)));
   ASSERT_EQ(p.agg_count, 3);
   ASSERT_EQ(p.aggregates[0].func, TQL_AGG_COUNT);
   ASSERT_EQ(p.aggregates[1].func, TQL_AGG_SUM);
-  ASSERT_STR_EQ(p.aggregates[1].field, "cost");
+  ASSERT_STR_EQ(p.aggregates[1].field, "created_at");
   ASSERT_EQ(p.aggregates[2].func, TQL_AGG_AVG);
 
   TIX_PASS();
@@ -393,9 +393,9 @@ static void test_compile_sum(TIX_TEST_ARGS()) {
   char err[256] = {0};
   tql_compiled_t c;
 
-  ASSERT_OK(tql_prepare("tasks | group author | sum cost", &c,
+  ASSERT_OK(tql_prepare("tasks | group author | sum created_at", &c,
                          err, sizeof(err)));
-  ASSERT_STR_CONTAINS(c.sql, "SUM(t.cost)");
+  ASSERT_STR_CONTAINS(c.sql, "SUM(t.created_at)");
   ASSERT_STR_CONTAINS(c.sql, "GROUP BY t.author");
 
   TIX_PASS();
@@ -896,17 +896,21 @@ static void test_exec_raw_sql(TIX_TEST_ARGS()) {
   tix_ticket_t t1, t2;
   make_task(&t1, "T001", "Parser", TIX_STATUS_PENDING,
             TIX_PRIORITY_HIGH, "alice");
-  t1.cost = 1.50;
   make_task(&t2, "T002", "Tests", TIX_STATUS_PENDING,
             TIX_PRIORITY_MEDIUM, "alice");
-  t2.cost = 2.50;
 
   ASSERT_OK(tix_db_upsert_ticket(&db, &t1));
   ASSERT_OK(tix_db_upsert_ticket(&db, &t2));
 
+  /* store cost in ticket_meta */
+  tix_db_set_ticket_meta_num(&db, "T001", "cost", 1.50);
+  tix_db_set_ticket_meta_num(&db, "T002", "cost", 2.50);
+
   /* Verify raw SQL works by preparing it directly */
-  const char *sql = "SELECT author, SUM(cost) as total FROM tickets "
-                    "GROUP BY author";
+  const char *sql = "SELECT t.author, SUM(m.value_num) as total "
+                    "FROM tickets t "
+                    "LEFT JOIN ticket_meta m ON m.ticket_id=t.id AND m.key='cost' "
+                    "GROUP BY t.author";
   sqlite3_stmt *stmt = NULL;
   ASSERT_EQ(sqlite3_prepare_v2(db.handle, sql, -1, &stmt, NULL), SQLITE_OK);
 

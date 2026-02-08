@@ -1,7 +1,7 @@
 /*
  * E2E tests for session 6 additions:
  *  - tix_json_get_double / float JSON parsing
- *  - telemetry fields roundtrip (JSON -> DB -> JSON)
+ *  - metadata fields roundtrip (JSON -> DB -> ticket_meta)
  *  - author auto-fill via tix_git_user_name
  *  - completed_at via tix_timestamp_iso8601
  *  - task update subcommand (DB-level merge)
@@ -42,6 +42,45 @@ static void cleanup_env(const char *tmpdir) {
   char cmd[512];
   snprintf(cmd, sizeof(cmd), "rm -rf \"%s\"", tmpdir);
   system(cmd);
+}
+
+/* Helper: query a numeric metadata value from ticket_meta */
+static double get_meta_num(tix_db_t *db, const char *ticket_id,
+                           const char *key) {
+  const char *sql =
+    "SELECT value_num FROM ticket_meta WHERE ticket_id=? AND key=?";
+  sqlite3_stmt *stmt = NULL;
+  double val = 0.0;
+  if (sqlite3_prepare_v2(db->handle, sql, -1, &stmt, NULL) == SQLITE_OK) {
+    sqlite3_bind_text(stmt, 1, ticket_id, -1, SQLITE_STATIC);
+    sqlite3_bind_text(stmt, 2, key, -1, SQLITE_STATIC);
+    if (sqlite3_step(stmt) == SQLITE_ROW) {
+      val = sqlite3_column_double(stmt, 0);
+    }
+    sqlite3_finalize(stmt);
+  }
+  return val;
+}
+
+/* Helper: query a string metadata value from ticket_meta */
+static const char *get_meta_str_buf(tix_db_t *db, const char *ticket_id,
+                                    const char *key, char *buf, sz buf_len) {
+  const char *sql =
+    "SELECT value_text FROM ticket_meta WHERE ticket_id=? AND key=?";
+  sqlite3_stmt *stmt = NULL;
+  buf[0] = '\0';
+  if (sqlite3_prepare_v2(db->handle, sql, -1, &stmt, NULL) == SQLITE_OK) {
+    sqlite3_bind_text(stmt, 1, ticket_id, -1, SQLITE_STATIC);
+    sqlite3_bind_text(stmt, 2, key, -1, SQLITE_STATIC);
+    if (sqlite3_step(stmt) == SQLITE_ROW) {
+      const char *v = (const char *)sqlite3_column_text(stmt, 0);
+      if (v != NULL) {
+        snprintf(buf, buf_len, "%s", v);
+      }
+    }
+    sqlite3_finalize(stmt);
+  }
+  return buf;
 }
 
 /* ---- JSON double parsing ---- */
@@ -116,105 +155,9 @@ static void test_json_get_double_null_args(TIX_TEST_ARGS()) {
   TIX_PASS();
 }
 
-/* ---- Telemetry fields: JSON write -> parse roundtrip ---- */
+/* ---- Metadata fields: ticket_meta DB roundtrip ---- */
 
-static void test_telemetry_json_roundtrip(TIX_TEST_ARGS()) {
-  TIX_TEST();
-
-  tix_ticket_t t;
-  tix_ticket_init(&t);
-  t.type = TIX_TICKET_TASK;
-  t.status = TIX_STATUS_DONE;
-  snprintf(t.id, sizeof(t.id), "t-telem01");
-  tix_ticket_set_name(&t, "Telemetry test");
-  snprintf(t.author, sizeof(t.author), "Test Author");
-  snprintf(t.completed_at, sizeof(t.completed_at),
-           "2026-02-07T14:30:00-08:00");
-  t.cost = 0.0573;
-  t.tokens_in = 15000;
-  t.tokens_out = 3200;
-  t.iterations = 4;
-  snprintf(t.model, sizeof(t.model), "claude-sonnet-4-20250514");
-  t.retries = 1;
-  t.kill_count = 2;
-
-  /* write to JSON */
-  char buf[TIX_MAX_LINE_LEN];
-  sz len = tix_json_write_ticket(&t, buf, sizeof(buf));
-  ASSERT_GT(len, 0);
-
-  /* verify JSON contains expected fields */
-  ASSERT_STR_CONTAINS(buf, "\"author\":\"Test Author\"");
-  ASSERT_STR_CONTAINS(buf, "\"completed_at\":\"2026-02-07T14:30:00-08:00\"");
-  ASSERT_STR_CONTAINS(buf, "\"cost\":");
-  ASSERT_STR_CONTAINS(buf, "\"tokens_in\":15000");
-  ASSERT_STR_CONTAINS(buf, "\"tokens_out\":3200");
-  ASSERT_STR_CONTAINS(buf, "\"iterations\":4");
-  ASSERT_STR_CONTAINS(buf, "\"model\":\"claude-sonnet-4-20250514\"");
-  ASSERT_STR_CONTAINS(buf, "\"retries\":1");
-  ASSERT_STR_CONTAINS(buf, "\"kill_count\":2");
-
-  /* parse it back */
-  tix_json_obj_t obj;
-  tix_err_t err = tix_json_parse_line(buf, &obj);
-  ASSERT_OK(err);
-
-  const char *author = tix_json_get_str(&obj, "author");
-  ASSERT_NOT_NULL(author);
-  ASSERT_STR_EQ(author, "Test Author");
-
-  const char *cat = tix_json_get_str(&obj, "completed_at");
-  ASSERT_NOT_NULL(cat);
-  ASSERT_STR_EQ(cat, "2026-02-07T14:30:00-08:00");
-
-  double cost = tix_json_get_double(&obj, "cost", 0.0);
-  ASSERT_TRUE(fabs(cost - 0.0573) < 0.001);
-
-  ASSERT_EQ(tix_json_get_num(&obj, "tokens_in", 0), 15000);
-  ASSERT_EQ(tix_json_get_num(&obj, "tokens_out", 0), 3200);
-  ASSERT_EQ(tix_json_get_num(&obj, "iterations", 0), 4);
-
-  const char *model = tix_json_get_str(&obj, "model");
-  ASSERT_NOT_NULL(model);
-  ASSERT_STR_EQ(model, "claude-sonnet-4-20250514");
-
-  ASSERT_EQ(tix_json_get_num(&obj, "retries", 0), 1);
-  ASSERT_EQ(tix_json_get_num(&obj, "kill_count", 0), 2);
-
-  TIX_PASS();
-}
-
-static void test_telemetry_zero_skipped(TIX_TEST_ARGS()) {
-  TIX_TEST();
-
-  /* When telemetry fields are zero/empty, they should NOT appear in JSON */
-  tix_ticket_t t;
-  tix_ticket_init(&t);
-  t.type = TIX_TICKET_TASK;
-  snprintf(t.id, sizeof(t.id), "t-notelem");
-  tix_ticket_set_name(&t, "No telemetry");
-
-  char buf[TIX_MAX_LINE_LEN];
-  sz len = tix_json_write_ticket(&t, buf, sizeof(buf));
-  ASSERT_GT(len, 0);
-
-  /* none of these should be present */
-  ASSERT_TRUE(strstr(buf, "\"author\"") == NULL);
-  ASSERT_TRUE(strstr(buf, "\"completed_at\"") == NULL);
-  ASSERT_TRUE(strstr(buf, "\"cost\"") == NULL);
-  ASSERT_TRUE(strstr(buf, "\"tokens_in\"") == NULL);
-  ASSERT_TRUE(strstr(buf, "\"tokens_out\"") == NULL);
-  ASSERT_TRUE(strstr(buf, "\"iterations\"") == NULL);
-  ASSERT_TRUE(strstr(buf, "\"model\"") == NULL);
-  ASSERT_TRUE(strstr(buf, "\"retries\"") == NULL);
-  ASSERT_TRUE(strstr(buf, "\"kill_count\"") == NULL);
-
-  TIX_PASS();
-}
-
-/* ---- Telemetry fields: DB roundtrip ---- */
-
-static void test_telemetry_db_roundtrip(TIX_TEST_ARGS()) {
+static void test_metadata_db_roundtrip(TIX_TEST_ARGS()) {
   TIX_TEST();
 
   char tmpdir[256], db_path[512];
@@ -227,7 +170,7 @@ static void test_telemetry_db_roundtrip(TIX_TEST_ARGS()) {
   tix_db_open(&db, db_path);
   tix_db_init_schema(&db);
 
-  /* create ticket with all telemetry fields */
+  /* create ticket */
   tix_ticket_t t;
   tix_ticket_init(&t);
   t.type = TIX_TICKET_TASK;
@@ -237,31 +180,38 @@ static void test_telemetry_db_roundtrip(TIX_TEST_ARGS()) {
   snprintf(t.author, sizeof(t.author), "Test User");
   snprintf(t.completed_at, sizeof(t.completed_at),
            "2026-02-07T10:00:00+00:00");
-  t.cost = 1.2345;
-  t.tokens_in = 50000;
-  t.tokens_out = 8000;
-  t.iterations = 7;
-  snprintf(t.model, sizeof(t.model), "claude-opus-4-20250514");
-  t.retries = 3;
-  t.kill_count = 1;
 
   tix_err_t err = tix_db_upsert_ticket(&db, &t);
   ASSERT_OK(err);
 
-  /* read back */
+  /* set metadata via ticket_meta API */
+  tix_db_set_ticket_meta_num(&db, "t-dbrt01", "cost", 1.2345);
+  tix_db_set_ticket_meta_num(&db, "t-dbrt01", "tokens_in", 50000.0);
+  tix_db_set_ticket_meta_num(&db, "t-dbrt01", "tokens_out", 8000.0);
+  tix_db_set_ticket_meta_num(&db, "t-dbrt01", "iterations", 7.0);
+  tix_db_set_ticket_meta_str(&db, "t-dbrt01", "model", "claude-opus-4-20250514");
+  tix_db_set_ticket_meta_num(&db, "t-dbrt01", "retries", 3.0);
+  tix_db_set_ticket_meta_num(&db, "t-dbrt01", "kill_count", 1.0);
+
+  /* read back ticket fields (non-meta) */
   tix_ticket_t out;
   err = tix_db_get_ticket(&db, "t-dbrt01", &out);
   ASSERT_OK(err);
 
   ASSERT_STR_EQ(out.author, "Test User");
   ASSERT_STR_EQ(out.completed_at, "2026-02-07T10:00:00+00:00");
-  ASSERT_TRUE(fabs(out.cost - 1.2345) < 0.001);
-  ASSERT_EQ(out.tokens_in, 50000);
-  ASSERT_EQ(out.tokens_out, 8000);
-  ASSERT_EQ(out.iterations, 7);
-  ASSERT_STR_EQ(out.model, "claude-opus-4-20250514");
-  ASSERT_EQ(out.retries, 3);
-  ASSERT_EQ(out.kill_count, 1);
+
+  /* verify metadata via SQL */
+  ASSERT_TRUE(fabs(get_meta_num(&db, "t-dbrt01", "cost") - 1.2345) < 0.001);
+  ASSERT_TRUE(fabs(get_meta_num(&db, "t-dbrt01", "tokens_in") - 50000.0) < 1.0);
+  ASSERT_TRUE(fabs(get_meta_num(&db, "t-dbrt01", "tokens_out") - 8000.0) < 1.0);
+  ASSERT_TRUE(fabs(get_meta_num(&db, "t-dbrt01", "iterations") - 7.0) < 0.1);
+  ASSERT_TRUE(fabs(get_meta_num(&db, "t-dbrt01", "retries") - 3.0) < 0.1);
+  ASSERT_TRUE(fabs(get_meta_num(&db, "t-dbrt01", "kill_count") - 1.0) < 0.1);
+
+  char model_buf[256];
+  get_meta_str_buf(&db, "t-dbrt01", "model", model_buf, sizeof(model_buf));
+  ASSERT_STR_EQ(model_buf, "claude-opus-4-20250514");
 
   tix_db_close(&db);
   cleanup_env(tmpdir);
@@ -269,9 +219,9 @@ static void test_telemetry_db_roundtrip(TIX_TEST_ARGS()) {
   TIX_PASS();
 }
 
-/* ---- replay_one_line picks up telemetry from JSONL ---- */
+/* ---- replay_one_line picks up telemetry from legacy JSONL ---- */
 
-static void test_telemetry_replay(TIX_TEST_ARGS()) {
+static void test_metadata_replay_legacy(TIX_TEST_ARGS()) {
   TIX_TEST();
 
   char tmpdir[256], db_path[512];
@@ -284,7 +234,7 @@ static void test_telemetry_replay(TIX_TEST_ARGS()) {
   tix_db_open(&db, db_path);
   tix_db_init_schema(&db);
 
-  /* simulate a JSONL line that includes telemetry */
+  /* simulate a legacy JSONL line with inline telemetry */
   const char *jsonl =
     "{\"t\":\"task\",\"id\":\"t-replay1\",\"name\":\"Replay test\","
     "\"s\":\"d\",\"author\":\"ReplayBot\","
@@ -301,14 +251,61 @@ static void test_telemetry_replay(TIX_TEST_ARGS()) {
 
   ASSERT_STR_EQ(out.author, "ReplayBot");
   ASSERT_STR_EQ(out.completed_at, "2026-01-15T09:00:00-05:00");
-  ASSERT_TRUE(fabs(out.cost - 0.42) < 0.01);
-  ASSERT_EQ(out.tokens_in, 20000);
-  ASSERT_EQ(out.tokens_out, 5000);
-  ASSERT_EQ(out.iterations, 3);
-  ASSERT_STR_EQ(out.model, "gpt-5");
-  ASSERT_EQ(out.retries, 2);
-  ASSERT_EQ(out.kill_count, 0);
   ASSERT_EQ(out.status, TIX_STATUS_DONE);
+
+  /* telemetry should be in ticket_meta, not struct fields */
+  ASSERT_TRUE(fabs(get_meta_num(&db, "t-replay1", "cost") - 0.42) < 0.01);
+  ASSERT_TRUE(fabs(get_meta_num(&db, "t-replay1", "tokens_in") - 20000.0) < 1.0);
+  ASSERT_TRUE(fabs(get_meta_num(&db, "t-replay1", "tokens_out") - 5000.0) < 1.0);
+  ASSERT_TRUE(fabs(get_meta_num(&db, "t-replay1", "iterations") - 3.0) < 0.1);
+  ASSERT_TRUE(fabs(get_meta_num(&db, "t-replay1", "retries") - 2.0) < 0.1);
+  /* kill_count=0 should NOT be stored (we skip zero values) */
+
+  char model_buf[256];
+  get_meta_str_buf(&db, "t-replay1", "model", model_buf, sizeof(model_buf));
+  ASSERT_STR_EQ(model_buf, "gpt-5");
+
+  tix_db_close(&db);
+  cleanup_env(tmpdir);
+
+  TIX_PASS();
+}
+
+/* ---- replay with new meta:{} nested object format ---- */
+
+static void test_metadata_replay_nested(TIX_TEST_ARGS()) {
+  TIX_TEST();
+
+  char tmpdir[256], db_path[512];
+  if (setup_env(tmpdir, sizeof(tmpdir), db_path, sizeof(db_path)) != 0) {
+    TIX_FAIL_MSG("setup_env failed");
+    return;
+  }
+
+  tix_db_t db;
+  tix_db_open(&db, db_path);
+  tix_db_init_schema(&db);
+
+  /* new-format JSONL with "meta":{...} nested object */
+  const char *jsonl =
+    "{\"t\":\"task\",\"id\":\"t-meta01\",\"name\":\"Meta test\","
+    "\"s\":\"d\",\"meta\":{\"cost\":1.23,\"model\":\"test-v2\","
+    "\"tokens_in\":30000,\"custom_field\":\"hello\"}}";
+
+  tix_err_t err = tix_db_replay_content(&db, jsonl);
+  ASSERT_OK(err);
+
+  /* verify metadata */
+  ASSERT_TRUE(fabs(get_meta_num(&db, "t-meta01", "cost") - 1.23) < 0.01);
+  ASSERT_TRUE(fabs(get_meta_num(&db, "t-meta01", "tokens_in") - 30000.0) < 1.0);
+
+  char model_buf[256];
+  get_meta_str_buf(&db, "t-meta01", "model", model_buf, sizeof(model_buf));
+  ASSERT_STR_EQ(model_buf, "test-v2");
+
+  char custom_buf[256];
+  get_meta_str_buf(&db, "t-meta01", "custom_field", custom_buf, sizeof(custom_buf));
+  ASSERT_STR_EQ(custom_buf, "hello");
 
   tix_db_close(&db);
   cleanup_env(tmpdir);
@@ -414,41 +411,34 @@ static void test_task_update_merge(TIX_TEST_ARGS()) {
   tix_err_t err = tix_db_upsert_ticket(&db, &t);
   ASSERT_OK(err);
 
-  /* simulate task_update: read, merge, write */
-  tix_ticket_t existing;
-  err = tix_db_get_ticket(&db, "t-upd001", &existing);
-  ASSERT_OK(err);
+  /* simulate setting metadata after upsert */
+  tix_db_set_ticket_meta_num(&db, "t-upd001", "cost", 0.88);
+  tix_db_set_ticket_meta_num(&db, "t-upd001", "tokens_in", 12000.0);
+  tix_db_set_ticket_meta_num(&db, "t-upd001", "tokens_out", 2500.0);
+  tix_db_set_ticket_meta_num(&db, "t-upd001", "iterations", 5.0);
+  tix_db_set_ticket_meta_str(&db, "t-upd001", "model", "claude-sonnet-4-20250514");
+  tix_db_set_ticket_meta_num(&db, "t-upd001", "retries", 1.0);
+  tix_db_set_ticket_meta_num(&db, "t-upd001", "kill_count", 0.0);
 
-  /* merge telemetry fields */
-  existing.cost = 0.88;
-  existing.tokens_in = 12000;
-  existing.tokens_out = 2500;
-  existing.iterations = 5;
-  snprintf(existing.model, sizeof(existing.model), "claude-sonnet-4-20250514");
-  existing.retries = 1;
-  existing.kill_count = 0;
-
-  err = tix_db_upsert_ticket(&db, &existing);
-  ASSERT_OK(err);
-
-  /* verify original + merged fields persisted */
+  /* verify original ticket fields preserved */
   tix_ticket_t result;
   err = tix_db_get_ticket(&db, "t-upd001", &result);
   ASSERT_OK(err);
 
-  /* original fields preserved */
   ASSERT_STR_EQ(result.name, "Update test");
   ASSERT_STR_EQ(result.author, "OrigAuthor");
   ASSERT_EQ(result.status, TIX_STATUS_DONE);
 
-  /* merged telemetry */
-  ASSERT_TRUE(fabs(result.cost - 0.88) < 0.01);
-  ASSERT_EQ(result.tokens_in, 12000);
-  ASSERT_EQ(result.tokens_out, 2500);
-  ASSERT_EQ(result.iterations, 5);
-  ASSERT_STR_EQ(result.model, "claude-sonnet-4-20250514");
-  ASSERT_EQ(result.retries, 1);
-  ASSERT_EQ(result.kill_count, 0);
+  /* verify metadata */
+  ASSERT_TRUE(fabs(get_meta_num(&db, "t-upd001", "cost") - 0.88) < 0.01);
+  ASSERT_TRUE(fabs(get_meta_num(&db, "t-upd001", "tokens_in") - 12000.0) < 1.0);
+  ASSERT_TRUE(fabs(get_meta_num(&db, "t-upd001", "tokens_out") - 2500.0) < 1.0);
+  ASSERT_TRUE(fabs(get_meta_num(&db, "t-upd001", "iterations") - 5.0) < 0.1);
+  ASSERT_TRUE(fabs(get_meta_num(&db, "t-upd001", "retries") - 1.0) < 0.1);
+
+  char model_buf[256];
+  get_meta_str_buf(&db, "t-upd001", "model", model_buf, sizeof(model_buf));
+  ASSERT_STR_EQ(model_buf, "claude-sonnet-4-20250514");
 
   tix_db_close(&db);
   cleanup_env(tmpdir);
@@ -497,7 +487,7 @@ static void test_schema_version_migration(TIX_TEST_ARGS()) {
   /* Schema version should be updated */
   char ver[32];
   tix_db_get_meta(&db, "schema_version", ver, sizeof(ver));
-  ASSERT_STR_EQ(ver, "5");
+  ASSERT_STR_EQ(ver, "6");
 
   tix_db_close(&db);
   cleanup_env(tmpdir);
@@ -505,77 +495,29 @@ static void test_schema_version_migration(TIX_TEST_ARGS()) {
   TIX_PASS();
 }
 
-/* ---- Full JSON -> DB -> JSON roundtrip with telemetry ---- */
+/* ---- JSON write does NOT include telemetry (now in meta) ---- */
 
-static void test_full_telemetry_roundtrip(TIX_TEST_ARGS()) {
+static void test_json_write_no_telemetry(TIX_TEST_ARGS()) {
   TIX_TEST();
 
-  char tmpdir[256], db_path[512];
-  if (setup_env(tmpdir, sizeof(tmpdir), db_path, sizeof(db_path)) != 0) {
-    TIX_FAIL_MSG("setup_env failed");
-    return;
-  }
+  tix_ticket_t t;
+  tix_ticket_init(&t);
+  t.type = TIX_TICKET_TASK;
+  snprintf(t.id, sizeof(t.id), "t-notelem");
+  tix_ticket_set_name(&t, "No telemetry");
 
-  tix_db_t db;
-  tix_db_open(&db, db_path);
-  tix_db_init_schema(&db);
-
-  /* Step 1: write a ticket struct to JSON */
-  tix_ticket_t original;
-  tix_ticket_init(&original);
-  original.type = TIX_TICKET_TASK;
-  original.status = TIX_STATUS_DONE;
-  snprintf(original.id, sizeof(original.id), "t-full01");
-  tix_ticket_set_name(&original, "Full roundtrip");
-  snprintf(original.author, sizeof(original.author), "Alice");
-  snprintf(original.completed_at, sizeof(original.completed_at),
-           "2026-02-07T12:00:00+00:00");
-  original.cost = 2.5678;
-  original.tokens_in = 100000;
-  original.tokens_out = 20000;
-  original.iterations = 10;
-  snprintf(original.model, sizeof(original.model), "test-model-v1");
-  original.retries = 2;
-  original.kill_count = 3;
-
-  char json_buf[TIX_MAX_LINE_LEN];
-  sz len = tix_json_write_ticket(&original, json_buf, sizeof(json_buf));
+  char buf[TIX_MAX_LINE_LEN];
+  sz len = tix_json_write_ticket(&t, buf, sizeof(buf));
   ASSERT_GT(len, 0);
 
-  /* Step 2: replay that JSON line into DB */
-  tix_err_t err = tix_db_replay_content(&db, json_buf);
-  ASSERT_OK(err);
-
-  /* Step 3: read from DB */
-  tix_ticket_t from_db;
-  err = tix_db_get_ticket(&db, "t-full01", &from_db);
-  ASSERT_OK(err);
-
-  /* Step 4: write DB ticket back to JSON */
-  char json_buf2[TIX_MAX_LINE_LEN];
-  sz len2 = tix_json_write_ticket(&from_db, json_buf2, sizeof(json_buf2));
-  ASSERT_GT(len2, 0);
-
-  /* Step 5: verify all fields survived the full trip */
-  ASSERT_STR_EQ(from_db.id, "t-full01");
-  ASSERT_STR_EQ(from_db.name, "Full roundtrip");
-  ASSERT_STR_EQ(from_db.author, "Alice");
-  ASSERT_STR_EQ(from_db.completed_at, "2026-02-07T12:00:00+00:00");
-  ASSERT_TRUE(fabs(from_db.cost - 2.5678) < 0.001);
-  ASSERT_EQ(from_db.tokens_in, 100000);
-  ASSERT_EQ(from_db.tokens_out, 20000);
-  ASSERT_EQ(from_db.iterations, 10);
-  ASSERT_STR_EQ(from_db.model, "test-model-v1");
-  ASSERT_EQ(from_db.retries, 2);
-  ASSERT_EQ(from_db.kill_count, 3);
-
-  /* second JSON should also contain all fields */
-  ASSERT_STR_CONTAINS(json_buf2, "\"author\":\"Alice\"");
-  ASSERT_STR_CONTAINS(json_buf2, "\"tokens_in\":100000");
-  ASSERT_STR_CONTAINS(json_buf2, "\"kill_count\":3");
-
-  tix_db_close(&db);
-  cleanup_env(tmpdir);
+  /* telemetry fields should NOT be in JSON (they're in ticket_meta now) */
+  ASSERT_TRUE(strstr(buf, "\"cost\"") == NULL);
+  ASSERT_TRUE(strstr(buf, "\"tokens_in\"") == NULL);
+  ASSERT_TRUE(strstr(buf, "\"tokens_out\"") == NULL);
+  ASSERT_TRUE(strstr(buf, "\"iterations\"") == NULL);
+  ASSERT_TRUE(strstr(buf, "\"model\"") == NULL);
+  ASSERT_TRUE(strstr(buf, "\"retries\"") == NULL);
+  ASSERT_TRUE(strstr(buf, "\"kill_count\"") == NULL);
 
   TIX_PASS();
 }
@@ -609,16 +551,53 @@ static void test_old_jsonl_compat(TIX_TEST_ARGS()) {
   ASSERT_STR_EQ(out.name, "Old task");
   ASSERT_EQ(out.status, TIX_STATUS_PENDING);
 
-  /* all telemetry fields should be zero/empty */
+  /* ticket fields should be zero/empty */
   ASSERT_STR_EQ(out.author, "");
   ASSERT_STR_EQ(out.completed_at, "");
-  ASSERT_TRUE(fabs(out.cost) < 0.0001);
-  ASSERT_EQ(out.tokens_in, 0);
-  ASSERT_EQ(out.tokens_out, 0);
-  ASSERT_EQ(out.iterations, 0);
-  ASSERT_STR_EQ(out.model, "");
-  ASSERT_EQ(out.retries, 0);
-  ASSERT_EQ(out.kill_count, 0);
+
+  /* no metadata should exist */
+  ASSERT_TRUE(fabs(get_meta_num(&db, "t-old01", "cost")) < 0.0001);
+  ASSERT_TRUE(fabs(get_meta_num(&db, "t-old01", "tokens_in")) < 0.0001);
+
+  tix_db_close(&db);
+  cleanup_env(tmpdir);
+
+  TIX_PASS();
+}
+
+/* ---- Metadata cleanup on ticket delete ---- */
+
+static void test_metadata_cleanup_on_delete(TIX_TEST_ARGS()) {
+  TIX_TEST();
+
+  char tmpdir[256], db_path[512];
+  if (setup_env(tmpdir, sizeof(tmpdir), db_path, sizeof(db_path)) != 0) {
+    TIX_FAIL_MSG("setup_env failed");
+    return;
+  }
+
+  tix_db_t db;
+  tix_db_open(&db, db_path);
+  tix_db_init_schema(&db);
+
+  /* create ticket + metadata */
+  tix_ticket_t t;
+  tix_ticket_init(&t);
+  t.type = TIX_TICKET_TASK;
+  snprintf(t.id, sizeof(t.id), "t-del01");
+  tix_ticket_set_name(&t, "Delete me");
+  tix_db_upsert_ticket(&db, &t);
+  tix_db_set_ticket_meta_num(&db, "t-del01", "cost", 5.0);
+  tix_db_set_ticket_meta_str(&db, "t-del01", "model", "test");
+
+  /* verify metadata exists */
+  ASSERT_TRUE(fabs(get_meta_num(&db, "t-del01", "cost") - 5.0) < 0.1);
+
+  /* delete ticket */
+  tix_db_delete_ticket(&db, "t-del01");
+
+  /* metadata should also be gone */
+  ASSERT_TRUE(fabs(get_meta_num(&db, "t-del01", "cost")) < 0.0001);
 
   tix_db_close(&db);
   cleanup_env(tmpdir);
@@ -640,17 +619,13 @@ int main(void) {
   tix_testsuite_add(&suite, "json_get_double_null_args",
                     test_json_get_double_null_args);
 
-  /* JSON telemetry roundtrip */
-  tix_testsuite_add(&suite, "telemetry_json_roundtrip",
-                    test_telemetry_json_roundtrip);
-  tix_testsuite_add(&suite, "telemetry_zero_skipped",
-                    test_telemetry_zero_skipped);
-
-  /* DB telemetry roundtrip */
-  tix_testsuite_add(&suite, "telemetry_db_roundtrip",
-                    test_telemetry_db_roundtrip);
-  tix_testsuite_add(&suite, "telemetry_replay",
-                    test_telemetry_replay);
+  /* metadata DB roundtrip */
+  tix_testsuite_add(&suite, "metadata_db_roundtrip",
+                    test_metadata_db_roundtrip);
+  tix_testsuite_add(&suite, "metadata_replay_legacy",
+                    test_metadata_replay_legacy);
+  tix_testsuite_add(&suite, "metadata_replay_nested",
+                    test_metadata_replay_nested);
 
   /* git user name */
   tix_testsuite_add(&suite, "git_user_name", test_git_user_name);
@@ -667,12 +642,16 @@ int main(void) {
   tix_testsuite_add(&suite, "schema_version_migration",
                     test_schema_version_migration);
 
-  /* full roundtrip */
-  tix_testsuite_add(&suite, "full_telemetry_roundtrip",
-                    test_full_telemetry_roundtrip);
+  /* JSON write */
+  tix_testsuite_add(&suite, "json_write_no_telemetry",
+                    test_json_write_no_telemetry);
 
   /* backward compat */
   tix_testsuite_add(&suite, "old_jsonl_compat", test_old_jsonl_compat);
+
+  /* metadata cleanup */
+  tix_testsuite_add(&suite, "metadata_cleanup_on_delete",
+                    test_metadata_cleanup_on_delete);
 
   int result = tix_testsuite_run(&suite);
   tix_testsuite_print(&suite);

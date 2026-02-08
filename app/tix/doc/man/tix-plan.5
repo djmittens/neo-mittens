@@ -25,8 +25,7 @@ via the
 .B plan_path
 setting.
 .PP
-Legacy projects may use
-.BR ralph/plan.jsonl ,
+Legacy projects may store plan.jsonl in an alternate location,
 which is auto\-detected by
 .BR "tix init" .
 .SH LINE TYPES
@@ -124,20 +123,33 @@ created_from_name|string|denormalized source name
 supersedes_name|string|denormalized superseded name
 supersedes_reason|string|denormalized superseded kill reason
 .TE
-.SS Agent telemetry fields
-.TS
-tab(|);
-lb lb lb
-l l l.
-Field|Type|Description
-cost|number|dollar cost
-tokens_in|number|input tokens
-tokens_out|number|output tokens
-iterations|number|loop iterations
-model|string|model name
-retries|number|retry count
-kill_count|number|kill count
-.TE
+.SS Metadata sub\-object
+Tickets may carry arbitrary key\-value metadata in a nested
+.B "meta"
+object:
+.PP
+.RS
+.nf
+{"t":"task","id":"T\-a1b2c3d4","name":"Fix bug","s":"d","meta":{"cost":1.23,"model":"gpt\-4o","tokens_in":500}}
+.fi
+.RE
+.PP
+Metadata keys are stored in the
+.B ticket_meta
+table during replay.
+Keys with string values are stored in
+.BR value_text ;
+keys with numeric values are stored in
+.BR value_num .
+Any key name is allowed; common keys include
+.BR cost ", " tokens_in ", " tokens_out ", " iterations ", " model ", " retries ", and " kill_count .
+.PP
+For backward compatibility, legacy JSONL lines with these fields as
+top\-level keys (e.g.,
+.BR "cost":1.23 )
+are also recognized and routed to the
+.B ticket_meta
+table during replay.
 .SS Tombstone fields
 .TS
 tab(|);

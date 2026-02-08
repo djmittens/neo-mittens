@@ -28,8 +28,7 @@ static const char *VALID_COLUMNS[] = {
   "done_at", "branch", "parent", "created_from", "supersedes",
   "kill_reason", "created_from_name", "supersedes_name",
   "supersedes_reason", "created_at", "updated_at", "author", "assigned",
-  "completed_at", "cost", "tokens_in", "tokens_out", "iterations",
-  "model", "retries", "kill_count", "commit_hash",
+  "completed_at", "commit_hash",
   "resolved_at", "compacted_at",
   NULL
 };
@@ -37,6 +36,8 @@ static const char *VALID_COLUMNS[] = {
 static int is_valid_column(const char *field) {
   /* Special pseudo-columns */
   if (strcmp(field, "label") == 0) { return 1; }
+  /* Metadata pseudo-columns: meta.* */
+  if (strncmp(field, "meta.", 5) == 0 && field[5] != '\0') { return 1; }
   for (int i = 0; VALID_COLUMNS[i] != NULL; i++) {
     if (strcmp(field, VALID_COLUMNS[i]) == 0) { return 1; }
   }
@@ -49,11 +50,13 @@ static void skip_ws(const char **p) {
   while (**p != '\0' && isspace((unsigned char)**p)) { (*p)++; }
 }
 
-/* Read a word (alphanumeric + underscore) into buf.
+/* Read a word (alphanumeric + underscore + dot) into buf.
+   The dot is needed for meta.* field references (e.g., meta.cost).
    Returns number of chars read. */
 static int read_word(const char *p, char *buf, sz buf_len) {
   sz i = 0;
-  while (p[i] != '\0' && (isalnum((unsigned char)p[i]) || p[i] == '_') &&
+  while (p[i] != '\0' &&
+         (isalnum((unsigned char)p[i]) || p[i] == '_' || p[i] == '.') &&
          i < buf_len - 1) {
     buf[i] = p[i];
     i++;
@@ -215,8 +218,9 @@ static tix_err_t parse_filter(const char *token, tql_filter_t *f,
 static int is_filter_token(const char *token) {
   /* skip leading negation prefix */
   if (*token == '!') { token++; }
-  /* skip leading word chars */
-  while (*token != '\0' && (isalnum((unsigned char)*token) || *token == '_')) {
+  /* skip leading word chars (including dot for meta.* fields) */
+  while (*token != '\0' &&
+         (isalnum((unsigned char)*token) || *token == '_' || *token == '.')) {
     token++;
   }
   return (*token == '=' || *token == '!' || *token == '>' ||

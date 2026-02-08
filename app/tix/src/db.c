@@ -15,7 +15,7 @@
 
 /* Bump this when the tickets table schema changes.
    On mismatch the cache is dropped and rebuilt from plan.jsonl. */
-#define TIX_SCHEMA_VERSION "5"
+#define TIX_SCHEMA_VERSION "6"
 
 static const char *SCHEMA_SQL =
   "CREATE TABLE IF NOT EXISTS tickets ("
@@ -42,13 +42,6 @@ static const char *SCHEMA_SQL =
   "  author TEXT,"
   "  assigned TEXT,"
   "  completed_at TEXT,"
-  "  cost REAL DEFAULT 0.0,"
-  "  tokens_in INTEGER DEFAULT 0,"
-  "  tokens_out INTEGER DEFAULT 0,"
-  "  iterations INTEGER DEFAULT 0,"
-  "  model TEXT,"
-  "  retries INTEGER DEFAULT 0,"
-  "  kill_count INTEGER DEFAULT 0,"
   "  resolved_at INTEGER DEFAULT 0,"
   "  compacted_at INTEGER DEFAULT 0"
   ");"
@@ -78,6 +71,14 @@ static const char *SCHEMA_SQL =
   "  PRIMARY KEY (ticket_id, keyword)"
   ");"
   "CREATE INDEX IF NOT EXISTS idx_keywords_keyword ON keywords(keyword);"
+  "CREATE TABLE IF NOT EXISTS ticket_meta ("
+  "  ticket_id TEXT NOT NULL,"
+  "  key TEXT NOT NULL,"
+  "  value_text TEXT,"
+  "  value_num REAL,"
+  "  PRIMARY KEY (ticket_id, key)"
+  ");"
+  "CREATE INDEX IF NOT EXISTS idx_ticket_meta_key ON ticket_meta(key);"
   "CREATE TABLE IF NOT EXISTS cache_meta ("
   "  key TEXT PRIMARY KEY,"
   "  value TEXT"
@@ -132,6 +133,8 @@ tix_err_t tix_db_init_schema(tix_db_t *db) {
     sqlite3_exec(db->handle, "DROP TABLE IF EXISTS tombstones",
                  NULL, NULL, NULL);
     sqlite3_exec(db->handle, "DROP TABLE IF EXISTS keywords", NULL, NULL, NULL);
+    sqlite3_exec(db->handle, "DROP TABLE IF EXISTS ticket_meta",
+                 NULL, NULL, NULL);
   }
 
   char *err_msg = NULL;
@@ -155,10 +158,9 @@ tix_err_t tix_db_upsert_ticket(tix_db_t *db, const tix_ticket_t *t) {
     "parent,created_from,supersedes,kill_reason,"
     "created_from_name,supersedes_name,supersedes_reason,"
     "created_at,updated_at,"
-    "author,assigned,completed_at,cost,tokens_in,tokens_out,"
-    "iterations,model,retries,kill_count,"
+    "author,assigned,completed_at,"
     "resolved_at,compacted_at) "
-    "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)";
+    "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)";
 
   sqlite3_stmt *stmt = NULL;
   int rc = sqlite3_prepare_v2(db->handle, sql, -1, &stmt, NULL);
@@ -186,15 +188,8 @@ tix_err_t tix_db_upsert_ticket(tix_db_t *db, const tix_ticket_t *t) {
   sqlite3_bind_text(stmt, 20, t->author, -1, SQLITE_STATIC);
   sqlite3_bind_text(stmt, 21, t->assigned, -1, SQLITE_STATIC);
   sqlite3_bind_text(stmt, 22, t->completed_at, -1, SQLITE_STATIC);
-  sqlite3_bind_double(stmt, 23, t->cost);
-  sqlite3_bind_int64(stmt, 24, t->tokens_in);
-  sqlite3_bind_int64(stmt, 25, t->tokens_out);
-  sqlite3_bind_int(stmt, 26, t->iterations);
-  sqlite3_bind_text(stmt, 27, t->model, -1, SQLITE_STATIC);
-  sqlite3_bind_int(stmt, 28, t->retries);
-  sqlite3_bind_int(stmt, 29, t->kill_count);
-  sqlite3_bind_int64(stmt, 30, t->resolved_at);
-  sqlite3_bind_int64(stmt, 31, t->compacted_at);
+  sqlite3_bind_int64(stmt, 23, t->resolved_at);
+  sqlite3_bind_int64(stmt, 24, t->compacted_at);
 
   rc = sqlite3_step(stmt);
   sqlite3_finalize(stmt);
@@ -284,6 +279,14 @@ tix_err_t tix_db_delete_ticket(tix_db_t *db, const char *id) {
     sqlite3_finalize(stmt);
   }
 
+  const char *del_meta = "DELETE FROM ticket_meta WHERE ticket_id=?";
+  rc = sqlite3_prepare_v2(db->handle, del_meta, -1, &stmt, NULL);
+  if (rc == SQLITE_OK) {
+    sqlite3_bind_text(stmt, 1, id, -1, SQLITE_STATIC);
+    sqlite3_step(stmt);
+    sqlite3_finalize(stmt);
+  }
+
   return TIX_OK;
 }
 
@@ -342,6 +345,60 @@ tix_err_t tix_db_list_tombstones(tix_db_t *db, int is_accept,
     t->timestamp = sqlite3_column_int64(stmt, 5);
     (*count)++;
   }
+  sqlite3_finalize(stmt);
+  return TIX_OK;
+}
+
+/* ---- Ticket metadata (generic key-value store per ticket) ---- */
+
+tix_err_t tix_db_set_ticket_meta(tix_db_t *db, const char *ticket_id,
+                                 const char *key, const char *value_text,
+                                 double value_num) {
+  if (db == NULL || ticket_id == NULL || key == NULL) {
+    return TIX_ERR_INVALID_ARG;
+  }
+
+  const char *sql =
+    "INSERT OR REPLACE INTO ticket_meta "
+    "(ticket_id,key,value_text,value_num) VALUES (?,?,?,?)";
+  sqlite3_stmt *stmt = NULL;
+  int rc = sqlite3_prepare_v2(db->handle, sql, -1, &stmt, NULL);
+  if (rc != SQLITE_OK) { return TIX_ERR_DB; }
+
+  sqlite3_bind_text(stmt, 1, ticket_id, -1, SQLITE_STATIC);
+  sqlite3_bind_text(stmt, 2, key, -1, SQLITE_STATIC);
+  if (value_text != NULL) {
+    sqlite3_bind_text(stmt, 3, value_text, -1, SQLITE_STATIC);
+  } else {
+    sqlite3_bind_null(stmt, 3);
+  }
+  sqlite3_bind_double(stmt, 4, value_num);
+
+  rc = sqlite3_step(stmt);
+  sqlite3_finalize(stmt);
+  return (rc == SQLITE_DONE) ? TIX_OK : TIX_ERR_DB;
+}
+
+tix_err_t tix_db_set_ticket_meta_num(tix_db_t *db, const char *ticket_id,
+                                     const char *key, double value) {
+  return tix_db_set_ticket_meta(db, ticket_id, key, NULL, value);
+}
+
+tix_err_t tix_db_set_ticket_meta_str(tix_db_t *db, const char *ticket_id,
+                                     const char *key, const char *value) {
+  return tix_db_set_ticket_meta(db, ticket_id, key, value, 0.0);
+}
+
+tix_err_t tix_db_delete_ticket_meta(tix_db_t *db, const char *ticket_id) {
+  if (db == NULL || ticket_id == NULL) { return TIX_ERR_INVALID_ARG; }
+
+  const char *sql = "DELETE FROM ticket_meta WHERE ticket_id=?";
+  sqlite3_stmt *stmt = NULL;
+  int rc = sqlite3_prepare_v2(db->handle, sql, -1, &stmt, NULL);
+  if (rc != SQLITE_OK) { return TIX_ERR_DB; }
+
+  sqlite3_bind_text(stmt, 1, ticket_id, -1, SQLITE_STATIC);
+  sqlite3_step(stmt);
   sqlite3_finalize(stmt);
   return TIX_OK;
 }

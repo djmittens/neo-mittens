@@ -47,13 +47,7 @@ static const tql_compile_enum_t PRIORITY_MAP[] = {
 
 static const char *INT_FIELDS[] = {
   "type", "status", "priority", "created_at", "updated_at",
-  "tokens_in", "tokens_out", "iterations", "retries", "kill_count",
   "resolved_at", "compacted_at",
-  NULL
-};
-
-static const char *DOUBLE_FIELDS[] = {
-  "cost",
   NULL
 };
 
@@ -65,10 +59,56 @@ static int is_int_field(const char *field) {
 }
 
 static int is_double_field(const char *field) {
-  for (int i = 0; DOUBLE_FIELDS[i] != NULL; i++) {
-    if (strcmp(field, DOUBLE_FIELDS[i]) == 0) { return 1; }
-  }
+  (void)field;
+  /* DOUBLE_FIELDS is currently empty (no double columns).
+     Return 0 directly to avoid clang-analyzer array-bound warning
+     on the NULL-only sentinel array. Re-add the loop if double
+     fields are introduced in the future. */
   return 0;
+}
+
+/* ---- Meta field helpers ---- */
+
+static int is_meta_field(const char *field) {
+  return (strncmp(field, "meta.", 5) == 0 && field[5] != '\0');
+}
+
+/* Extract key from "meta.key" -> "key". Returns pointer into field. */
+static const char *meta_key(const char *field) {
+  return field + 5;
+}
+
+/* Check if a string looks like a number (integer or decimal). */
+static int looks_numeric(const char *s) {
+  if (*s == '-') { s++; }
+  if (*s == '\0') { return 0; }
+  int has_digit = 0;
+  int has_dot = 0;
+  while (*s != '\0') {
+    if (*s >= '0' && *s <= '9') { has_digit = 1; }
+    else if (*s == '.' && !has_dot) { has_dot = 1; }
+    else { return 0; }
+    s++;
+  }
+  return has_digit;
+}
+
+/* Meta join tracking: unique meta keys and their aliases (m0, m1, ...) */
+typedef struct {
+  char keys[TQL_MAX_META_JOINS][TQL_MAX_FIELD_LEN];
+  u32 count;
+} meta_joins_t;
+
+/* Find or register a meta key. Returns the join index (0..count-1),
+   or -1 if the limit is exceeded. */
+static int meta_join_index(meta_joins_t *mj, const char *key) {
+  for (u32 i = 0; i < mj->count; i++) {
+    if (strcmp(mj->keys[i], key) == 0) { return (int)i; }
+  }
+  if (mj->count >= TQL_MAX_META_JOINS) { return -1; }
+  snprintf(mj->keys[mj->count], TQL_MAX_FIELD_LEN, "%s", key);
+  mj->count++;
+  return (int)(mj->count - 1);
 }
 
 static int translate_enum(const char *field, const char *value, int *out) {
@@ -86,6 +126,54 @@ static int translate_enum(const char *field, const char *value, int *out) {
     }
   }
   return 0;
+}
+
+/* ---- Meta column expression helpers ---- */
+
+/* Emit a meta column expression for SELECT or GROUP BY.
+   Uses COALESCE to return either the text or numeric value as text. */
+static int emit_meta_select(char *p, char *end, int join_idx) {
+  return snprintf(p, (sz)(end - p),
+    "COALESCE(m%d.value_text, CAST(m%d.value_num AS TEXT))",
+    join_idx, join_idx);
+}
+
+/* Emit a meta column for a numeric context (SUM, AVG, sort, numeric filter). */
+static int emit_meta_num(char *p, char *end, int join_idx) {
+  return snprintf(p, (sz)(end - p), "m%d.value_num", join_idx);
+}
+
+/* Collect all meta keys used in the pipeline and register them. */
+static void collect_meta_keys(const tql_pipeline_t *p, meta_joins_t *mj) {
+  mj->count = 0;
+  /* filters */
+  for (u32 i = 0; i < p->filter_count; i++) {
+    if (is_meta_field(p->filters[i].field)) {
+      meta_join_index(mj, meta_key(p->filters[i].field));
+    }
+  }
+  /* selects */
+  for (u32 i = 0; i < p->select_count; i++) {
+    if (is_meta_field(p->selects[i])) {
+      meta_join_index(mj, meta_key(p->selects[i]));
+    }
+  }
+  /* group by */
+  if (p->has_group && is_meta_field(p->group_by)) {
+    meta_join_index(mj, meta_key(p->group_by));
+  }
+  /* sorts */
+  for (u32 i = 0; i < p->sort_count; i++) {
+    if (is_meta_field(p->sorts[i].field)) {
+      meta_join_index(mj, meta_key(p->sorts[i].field));
+    }
+  }
+  /* aggregates */
+  for (u32 i = 0; i < p->agg_count; i++) {
+    if (is_meta_field(p->aggregates[i].field)) {
+      meta_join_index(mj, meta_key(p->aggregates[i].field));
+    }
+  }
 }
 
 /* ---- Compiler helpers ---- */
@@ -175,6 +263,8 @@ tix_err_t tql_compile(const tql_pipeline_t *p, tql_compiled_t *out,
   char *sql = out->sql;
   char *end = sql + sizeof(out->sql);
   int need_label_join = 0;
+  meta_joins_t mj;
+  collect_meta_keys(p, &mj);
 
   /* Check if any filter references "label" (non-negated) */
   for (u32 i = 0; i < p->filter_count; i++) {
@@ -204,6 +294,13 @@ tix_err_t tql_compile(const tql_pipeline_t *p, tql_compiled_t *out,
     if (p->has_group) {
       if (strcmp(p->group_by, "label") == 0) {
         TIX_BUF_PRINTF(sql, end, TIX_ERR_OVERFLOW, "tl.label");
+      } else if (is_meta_field(p->group_by)) {
+        int mi = meta_join_index(&mj, meta_key(p->group_by));
+        {
+          int mn = emit_meta_select(sql, end, mi);
+          if (mn < 0 || sql + mn >= end) { return TIX_ERR_OVERFLOW; }
+          sql += mn;
+        }
       } else {
         TIX_BUF_PRINTF(sql, end, TIX_ERR_OVERFLOW, "t.%s", p->group_by);
       }
@@ -223,8 +320,20 @@ tix_err_t tql_compile(const tql_pipeline_t *p, tql_compiled_t *out,
         snprintf(out->columns[out->column_count], TQL_MAX_FIELD_LEN,
                  "count");
       } else if (p->aggregates[i].func == TQL_AGG_COUNT_DISTINCT) {
-        TIX_BUF_PRINTF(sql, end, TIX_ERR_OVERFLOW,
-                        "COUNT(DISTINCT t.%s)", p->aggregates[i].field);
+        if (is_meta_field(p->aggregates[i].field)) {
+          int mi = meta_join_index(&mj, meta_key(p->aggregates[i].field));
+          TIX_BUF_PRINTF(sql, end, TIX_ERR_OVERFLOW,
+                          "COUNT(DISTINCT ");
+          {
+            int mn = emit_meta_select(sql, end, mi);
+            if (mn < 0 || sql + mn >= end) { return TIX_ERR_OVERFLOW; }
+            sql += mn;
+          }
+          TIX_BUF_PRINTF(sql, end, TIX_ERR_OVERFLOW, ")");
+        } else {
+          TIX_BUF_PRINTF(sql, end, TIX_ERR_OVERFLOW,
+                          "COUNT(DISTINCT t.%s)", p->aggregates[i].field);
+        }
         int cn = snprintf(out->columns[out->column_count],
                           TQL_MAX_FIELD_LEN, "count_distinct_%.50s",
                           p->aggregates[i].field);
@@ -233,8 +342,19 @@ tix_err_t tql_compile(const tql_pipeline_t *p, tql_compiled_t *out,
         }
       } else {
         const char *func = agg_to_sql(p->aggregates[i].func);
-        TIX_BUF_PRINTF(sql, end, TIX_ERR_OVERFLOW,
-                        "%s(t.%s)", func, p->aggregates[i].field);
+        if (is_meta_field(p->aggregates[i].field)) {
+          int mi = meta_join_index(&mj, meta_key(p->aggregates[i].field));
+          TIX_BUF_PRINTF(sql, end, TIX_ERR_OVERFLOW, "%s(", func);
+          {
+            int mn = emit_meta_num(sql, end, mi);
+            if (mn < 0 || sql + mn >= end) { return TIX_ERR_OVERFLOW; }
+            sql += mn;
+          }
+          TIX_BUF_PRINTF(sql, end, TIX_ERR_OVERFLOW, ")");
+        } else {
+          TIX_BUF_PRINTF(sql, end, TIX_ERR_OVERFLOW,
+                          "%s(t.%s)", func, p->aggregates[i].field);
+        }
         const char *fn_lower = "count";
         switch (p->aggregates[i].func) {
           case TQL_AGG_COUNT:          fn_lower = "count"; break;
@@ -258,6 +378,13 @@ tix_err_t tql_compile(const tql_pipeline_t *p, tql_compiled_t *out,
       if (i > 0) { TIX_BUF_PRINTF(sql, end, TIX_ERR_OVERFLOW, ", "); }
       if (strcmp(p->selects[i], "label") == 0) {
         TIX_BUF_PRINTF(sql, end, TIX_ERR_OVERFLOW, "tl.label");
+      } else if (is_meta_field(p->selects[i])) {
+        int mi = meta_join_index(&mj, meta_key(p->selects[i]));
+        {
+          int mn = emit_meta_select(sql, end, mi);
+          if (mn < 0 || sql + mn >= end) { return TIX_ERR_OVERFLOW; }
+          sql += mn;
+        }
       } else {
         TIX_BUF_PRINTF(sql, end, TIX_ERR_OVERFLOW, "t.%s", p->selects[i]);
       }
@@ -294,6 +421,15 @@ tix_err_t tql_compile(const tql_pipeline_t *p, tql_compiled_t *out,
     }
   }
 
+  /* Meta LEFT JOINs: one per unique meta key */
+  for (u32 mi = 0; mi < mj.count; mi++) {
+    TIX_BUF_PRINTF(sql, end, TIX_ERR_OVERFLOW,
+                    " LEFT JOIN ticket_meta m%u"
+                    " ON t.id = m%u.ticket_id AND m%u.key = ?",
+                    mi, mi, mi);
+    bind_string(out, mj.keys[mi]);
+  }
+
   /* WHERE clause */
   int has_where = 0;
 
@@ -328,8 +464,87 @@ tix_err_t tql_compile(const tql_pipeline_t *p, tql_compiled_t *out,
     const tql_filter_t *f = &p->filters[i];
     const char *conj = has_where ? " AND" : " WHERE";
     int is_label = (strcmp(f->field, "label") == 0);
+    int is_meta = is_meta_field(f->field);
     const char *cpfx = is_label ? "tl." : "t.";
     const char *cname = is_label ? "label" : f->field;
+
+    /* Meta field filter: uses LEFT JOINed ticket_meta alias */
+    if (is_meta) {
+      int mi = meta_join_index(&mj, meta_key(f->field));
+      if (f->op == TQL_OP_IS_NULL) {
+        if (f->negated) {
+          TIX_BUF_PRINTF(sql, end, TIX_ERR_OVERFLOW,
+                          "%s m%d.key IS NOT NULL", conj, mi);
+        } else {
+          TIX_BUF_PRINTF(sql, end, TIX_ERR_OVERFLOW,
+                          "%s m%d.key IS NULL", conj, mi);
+        }
+      } else if (f->op == TQL_OP_IS_NOT_NULL) {
+        if (f->negated) {
+          TIX_BUF_PRINTF(sql, end, TIX_ERR_OVERFLOW,
+                          "%s m%d.key IS NULL", conj, mi);
+        } else {
+          TIX_BUF_PRINTF(sql, end, TIX_ERR_OVERFLOW,
+                          "%s m%d.key IS NOT NULL", conj, mi);
+        }
+      } else if (f->op == TQL_OP_IN || f->op == TQL_OP_NOT_IN) {
+        int use_num = (f->or_count > 0 && looks_numeric(f->or_values[0]));
+        const char *col = use_num ? "value_num" : "value_text";
+        const char *kw = (f->op == TQL_OP_IN) ? "IN" : "NOT IN";
+        if (f->negated) {
+          kw = (f->op == TQL_OP_IN) ? "NOT IN" : "IN";
+        }
+        TIX_BUF_PRINTF(sql, end, TIX_ERR_OVERFLOW,
+                        "%s m%d.%s %s (", conj, mi, col, kw);
+        for (u32 v = 0; v < f->or_count; v++) {
+          if (v > 0) { TIX_BUF_PRINTF(sql, end, TIX_ERR_OVERFLOW, ","); }
+          TIX_BUF_PRINTF(sql, end, TIX_ERR_OVERFLOW, "?");
+          if (use_num) {
+            out->binds[out->bind_count].is_double = 1;
+            out->binds[out->bind_count].dval = strtod(f->or_values[v], NULL);
+            out->bind_count++;
+          } else {
+            bind_string(out, f->or_values[v]);
+          }
+        }
+        TIX_BUF_PRINTF(sql, end, TIX_ERR_OVERFLOW, ")");
+      } else if (f->op == TQL_OP_LIKE) {
+        const char *kw = f->negated ? "NOT LIKE" : "LIKE";
+        TIX_BUF_PRINTF(sql, end, TIX_ERR_OVERFLOW,
+                        "%s m%d.value_text %s ?", conj, mi, kw);
+        char pat[TQL_MAX_VALUE_LEN];
+        convert_like_pattern(f->value, pat, sizeof(pat));
+        bind_string(out, pat);
+      } else {
+        /* Standard comparison: numeric if value looks numeric */
+        int use_num = looks_numeric(f->value);
+        const char *op_str = op_to_sql(f->op);
+        if (f->negated) {
+          switch (f->op) {
+            case TQL_OP_EQ: op_str = "!="; break;
+            case TQL_OP_NE: op_str = "="; break;
+            case TQL_OP_GT: op_str = "<="; break;
+            case TQL_OP_LT: op_str = ">="; break;
+            case TQL_OP_GE: op_str = "<"; break;
+            case TQL_OP_LE: op_str = ">"; break;
+            default: break;
+          }
+        }
+        if (use_num) {
+          TIX_BUF_PRINTF(sql, end, TIX_ERR_OVERFLOW,
+                          "%s m%d.value_num %s ?", conj, mi, op_str);
+          out->binds[out->bind_count].is_double = 1;
+          out->binds[out->bind_count].dval = strtod(f->value, NULL);
+          out->bind_count++;
+        } else {
+          TIX_BUF_PRINTF(sql, end, TIX_ERR_OVERFLOW,
+                          "%s m%d.value_text %s ?", conj, mi, op_str);
+          bind_string(out, f->value);
+        }
+      }
+      has_where = 1;
+      continue;
+    }
 
     /* Negated label: NOT EXISTS subquery */
     if (is_label && f->negated) {
@@ -461,6 +676,14 @@ tix_err_t tql_compile(const tql_pipeline_t *p, tql_compiled_t *out,
   if (p->has_group) {
     if (strcmp(p->group_by, "label") == 0) {
       TIX_BUF_PRINTF(sql, end, TIX_ERR_OVERFLOW, " GROUP BY tl.label");
+    } else if (is_meta_field(p->group_by)) {
+      int mi = meta_join_index(&mj, meta_key(p->group_by));
+      TIX_BUF_PRINTF(sql, end, TIX_ERR_OVERFLOW, " GROUP BY ");
+      {
+        int mn = emit_meta_select(sql, end, mi);
+        if (mn < 0 || sql + mn >= end) { return TIX_ERR_OVERFLOW; }
+        sql += mn;
+      }
     } else {
       TIX_BUF_PRINTF(sql, end, TIX_ERR_OVERFLOW, " GROUP BY t.%s",
                       p->group_by);
@@ -508,7 +731,18 @@ tix_err_t tql_compile(const tql_pipeline_t *p, tql_compiled_t *out,
 
         if (strcmp(h->column, alias) == 0) {
           const char *func = agg_to_sql(p->aggregates[a].func);
-          if (p->aggregates[a].func == TQL_AGG_COUNT_DISTINCT) {
+          if (is_meta_field(p->aggregates[a].field)) {
+            int mi = meta_join_index(&mj, meta_key(p->aggregates[a].field));
+            if (p->aggregates[a].func == TQL_AGG_COUNT_DISTINCT) {
+              TIX_BUF_PRINTF(sql, end, TIX_ERR_OVERFLOW,
+                              "%s COUNT(DISTINCT m%d.value_num) %s ?",
+                              hconj, mi, op_to_sql(h->op));
+            } else {
+              TIX_BUF_PRINTF(sql, end, TIX_ERR_OVERFLOW,
+                              "%s %s(m%d.value_num) %s ?",
+                              hconj, func, mi, op_to_sql(h->op));
+            }
+          } else if (p->aggregates[a].func == TQL_AGG_COUNT_DISTINCT) {
             TIX_BUF_PRINTF(sql, end, TIX_ERR_OVERFLOW,
                             "%s COUNT(DISTINCT t.%s) %s ?",
                             hconj, p->aggregates[a].field,
@@ -567,6 +801,14 @@ tix_err_t tql_compile(const tql_pipeline_t *p, tql_compiled_t *out,
       if (!is_agg_alias) {
         if (strcmp(p->sorts[i].field, "label") == 0) {
           TIX_BUF_PRINTF(sql, end, TIX_ERR_OVERFLOW, "tl.label %s", dir);
+        } else if (is_meta_field(p->sorts[i].field)) {
+          int mi = meta_join_index(&mj, meta_key(p->sorts[i].field));
+          {
+            int mn = emit_meta_num(sql, end, mi);
+            if (mn < 0 || sql + mn >= end) { return TIX_ERR_OVERFLOW; }
+            sql += mn;
+          }
+          TIX_BUF_PRINTF(sql, end, TIX_ERR_OVERFLOW, " %s", dir);
         } else {
           TIX_BUF_PRINTF(sql, end, TIX_ERR_OVERFLOW, "t.%s %s",
                           p->sorts[i].field, dir);

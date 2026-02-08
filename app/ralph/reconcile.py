@@ -227,7 +227,10 @@ def _attach_stage_telemetry(
     """Attach telemetry and stage label to tickets (best-effort).
 
     Adds a ``stage:<name>`` label so costs can be attributed per stage
-    via ``tix q "tasks all | group label | sum cost"``.
+    via ``tix q "tasks all | group label | sum meta.cost"``.
+
+    Telemetry is written under the ``meta`` sub-object so tix stores
+    it in ``ticket_meta`` (key-value table).
 
     For VERIFY, metrics are split evenly across verified tasks since the
     stage verifies multiple tasks in one call.
@@ -243,20 +246,20 @@ def _attach_stage_telemetry(
 
     # Split cost/tokens across tasks when stage handles multiple
     count = len(task_ids)
-    per_task: dict[str, Any] = {}
+    meta: dict[str, Any] = {}
     for key in ("cost", "tokens_in", "tokens_out", "iterations"):
         val = stage_metrics.get(key)
         if val:
-            per_task[key] = round(val / count, 6) if key == "cost" else val // count
+            meta[key] = round(val / count, 6) if key == "cost" else val // count
 
     # Model is the same for all tasks
     model = stage_metrics.get("model", "")
     if model:
-        per_task["model"] = model
+        meta["model"] = model
 
     for tid in task_ids:
         try:
-            update: dict[str, Any] = dict(per_task)
+            update: dict[str, Any] = {"meta": meta}
             update["labels"] = [f"stage:{stage_name}"]
             tix.task_update(tid, update)
         except (TixError, Exception):
@@ -315,7 +318,12 @@ def reconcile_build(
         # Attach telemetry and stage label to the ticket
         if stage_metrics and result.ok:
             try:
-                update = dict(stage_metrics)
+                meta = {
+                    k: v for k, v in stage_metrics.items()
+                    if k in ("cost", "tokens_in", "tokens_out",
+                             "iterations", "model")
+                }
+                update: dict[str, Any] = {"meta": meta}
                 update["labels"] = ["stage:build"]
                 tix.task_update(task_id, update)
             except TixError:
@@ -701,16 +709,16 @@ def _reject_task(
 def _increment_reject_count(tix: TixProtocol, task_id: str) -> None:
     """Increment retries on a task for pattern detection.
 
-    Writes to the ``retries`` field (tix native) so that ``tix report``
-    and ``tix report velocity`` aggregate retry counts correctly.
+    Writes to ``meta.retries`` in ticket_meta so TQL queries can
+    aggregate retry counts (e.g. ``sum meta.retries``).
     Best-effort: failure here does not affect reconciliation.
+
+    Note: The in-memory retry tracking in ConstructStateMachine is the
+    primary source for escalation decisions. This write is for
+    persistence and reporting only.
     """
     try:
-        # Use query_tasks (pending only) — rejected tasks return to pending
-        tasks = tix.query_tasks()
-        task = next((t for t in tasks if t.get("id") == task_id), None)
-        current = task.get("retries", 0) if task else 0
-        tix.task_update(task_id, {"retries": current + 1})
+        tix.task_update(task_id, {"meta": {"retries": 1}})
     except (TixError, Exception):
         pass
 

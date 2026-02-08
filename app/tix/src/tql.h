@@ -35,6 +35,7 @@
 #define TQL_MAX_VALUE_LEN 256
 #define TQL_MAX_SQL_LEN  4096
 #define TQL_MAX_BINDS      48
+#define TQL_MAX_META_JOINS  4
 
 /* ---- Filter operators ---- */
 

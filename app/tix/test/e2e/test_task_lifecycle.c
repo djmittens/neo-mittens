@@ -93,9 +93,9 @@ static void test_ticket_set_fields(TIX_TEST_ARGS()) {
   ASSERT_OK(err);
   ASSERT_STR_EQ(t.name, "Build login page");
 
-  err = tix_ticket_set_spec(&t, "ralph/specs/login.md");
+  err = tix_ticket_set_spec(&t, "specs/login.md");
   ASSERT_OK(err);
-  ASSERT_STR_EQ(t.spec, "ralph/specs/login.md");
+  ASSERT_STR_EQ(t.spec, "specs/login.md");
 
   err = tix_ticket_add_dep(&t, "t-abc123");
   ASSERT_OK(err);

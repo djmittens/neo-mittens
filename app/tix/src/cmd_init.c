@@ -75,7 +75,7 @@ tix_err_t tix_cmd_init(int argc, char **argv) {
   tix_config_t cfg;
   tix_config_defaults(&cfg);
 
-  /* detect legacy ralph/plan.jsonl and use it if present */
+  /* detect legacy plan.jsonl location and use it if present */
   char legacy_path[TIX_MAX_PATH_LEN];
   n = snprintf(legacy_path, sizeof(legacy_path),
                "%s/ralph/plan.jsonl", repo_root);
@@ -101,7 +101,7 @@ tix_err_t tix_cmd_init(int argc, char **argv) {
                "%s/%s", repo_root, cfg.plan_file);
   if (n < 0 || (sz)n >= sizeof(plan_path)) { return TIX_ERR_OVERFLOW; }
 
-  /* ensure parent directory exists (e.g. .tix/ or ralph/) */
+  /* ensure parent directory exists for plan file */
   char plan_dir[TIX_MAX_PATH_LEN];
   snprintf(plan_dir, sizeof(plan_dir), "%s", plan_path);
   char *last_slash = strrchr(plan_dir, '/');

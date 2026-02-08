@@ -1,40 +1,17 @@
 # TIX - Git-Based Ticketing & Workflow System
 
-## Status: IN PROGRESS
+## Status: IMPLEMENTED
 
-### What's Done
-- [x] Directory structure: `app/tix/src/`, `app/tix/test/e2e/`
-- [x] Core headers started: `src/types.h`, `src/common.h`, `src/log.h`
-- [ ] CMakeLists.txt
-- [ ] Makefile
-- [ ] log.c implementation
-- [ ] ticket.h / ticket.c (data model)
-- [ ] git.h / git.c (git integration)
-- [ ] db.h / db.c (SQLite cache)
-- [ ] config.h / config.c (TOML config)
-- [ ] search.h / search.c (keyword cloud / LLM search)
-- [ ] tree.h / tree.c (dependency tree visualization)
-- [ ] report.h / report.c (progress reporting)
-- [ ] validate.h / validate.c (history validation)
-- [ ] batch.h / batch.c (batch operations)
-- [ ] cmd_*.c (CLI command handlers)
-- [ ] main.c (entry point + CLI dispatch)
-- [ ] test/e2e/ (E2E tests with real git)
-- [ ] test/testing.h / testing.c (test framework)
-- [ ] .clang-tidy
-- [ ] .gitignore updates
-- [x] bootstrap.sh updates
-- [ ] opencode skill + tool
-- [ ] claude commands
-- [ ] AGENTS.md
+All core modules, CLI commands, test framework, and build system are complete.
+Schema version 6 with generic `ticket_meta` key-value metadata subsystem.
 
 ---
 
 ## 1. Overview
 
 **tix** is a high-performance, zero-malloc C tool for git-based ticket management.
-It replaces `app/ralph`'s ticket system (tasks, issues, notes) with a compiled binary
-that uses SQLite for caching and leverages git's immutability for commit-based state.
+It manages tasks, issues, and notes as a compiled binary that uses SQLite for caching
+and leverages git's immutability for commit-based state.
 
 ### Design Principles
 - **No dynamic allocation**: All buffers are stack-allocated with fixed maximums (NASA coding rules)
@@ -47,64 +24,34 @@ that uses SQLite for caching and leverages git's immutability for commit-based s
 
 ---
 
-## 2. Relationship to Ralph
+## 2. Integration Model
 
-tix replaces Ralph's ticket functionality defined in:
-- `app/ralph/models.py` - Task, Issue, Tombstone, RalphPlanConfig
-- `app/ralph/state.py` - RalphState, load_state, save_state (plan.jsonl)
-- `app/ralph/commands/task.py` - Task CRUD
-- `app/ralph/commands/issue.py` - Issue CRUD
-- `app/ralph/commands/query.py` - State querying
-- `app/ralph/commands/status.py` - Status dashboard
-- `app/ralph/commands/log.py` - History from git
-- `app/ralph/git.py` - Git operations
-- `app/ralph/validation.py` - Task validation
-- `app/ralph/analysis.py` - Rejection pattern analysis
+tix is a standalone CLI tool designed to be consumed by external orchestrators.
+It owns the ticket data model (tasks, issues, notes) and provides a JSON-based
+interface for programmatic consumption. External tools can add their own record
+types to plan.jsonl (e.g. config, spec, stage records) — tix preserves these
+during compaction without interpreting them.
 
-### Ralph Data Model (reference)
-```
-Task:
-  id: str              # "t-k5x9ab" (prefix + timestamp_base36 + random)
-  name: str            # Short description
-  spec: str            # Spec file this belongs to
-  notes: str?          # Implementation details
-  accept: str?         # Acceptance criteria
-  deps: [str]?         # Dependency task IDs
-  status: "p"|"d"|"a"  # pending, done, accepted
-  done_at: str?        # Git commit hash when marked done
-  priority: str?       # "high", "medium", "low"
-  parent: str?         # Decomposed from task ID
-  created_from: str?   # Created from issue ID
-  supersedes: str?     # Replaces task ID
-  kill_reason: str?    # "timeout" or "context"
-
-Issue:
-  id: str              # "i-7g8h"
-  desc: str            # Description
-  spec: str            # Related spec
-  priority: str?
-
-Tombstone:
-  id: str              # Original task ID
-  done_at: str         # Commit hash
-  reason: str          # Accept/reject reason
-  tombstone_type: str  # "accept" or "reject"
-  name: str
-  timestamp: str?
-  changed_files: [str]?
-  log_file: str?
-```
-
-### Ralph File Format: plan.jsonl
+### plan.jsonl File Format
 ```jsonl
-{"t": "config", "timeout_ms": 900000, "max_iterations": 10}
-{"t": "spec", "spec": "coverage.md"}
-{"t": "stage", "stage": "BUILD", ...}
 {"t": "task", "id": "t-1a2b", "spec": "coverage.md", "name": "...", "s": "p"}
+{"t": "task", "id": "t-3c4d", "name": "...", "s": "d", "meta": {"cost": 1.23, "model": "gpt-4o"}}
 {"t": "issue", "id": "i-7g8h", "spec": "coverage.md", "desc": "..."}
 {"t": "accept", "id": "t-1a2b", "done_at": "abc123", "reason": ""}
 {"t": "reject", "id": "t-3c4d", "done_at": "def456", "reason": "..."}
 {"t": "delete", "id": "t-1a2b"}
+```
+
+Tickets may carry arbitrary key-value metadata in a nested `"meta":{...}` object.
+During replay, metadata keys are stored in the `ticket_meta` table. For backward
+compatibility, legacy JSONL with telemetry fields as top-level keys (e.g.
+`"cost":1.23`) is also recognized and routed to `ticket_meta` during replay.
+
+External orchestrators may also write their own record types:
+```jsonl
+{"t": "config", "timeout_ms": 900000, "max_iterations": 10}
+{"t": "spec", "spec": "coverage.md"}
+{"t": "stage", "stage": "BUILD", ...}
 ```
 
 The file is **append-only** during normal operations. Mutations (status changes,
@@ -214,6 +161,8 @@ typedef enum {
   TIX_STATUS_PENDING  = 0,   // "p"
   TIX_STATUS_DONE     = 1,   // "d"
   TIX_STATUS_ACCEPTED = 2,   // "a"
+  TIX_STATUS_REJECTED = 3,   // "r"
+  TIX_STATUS_DELETED  = 4,   // "x"
 } tix_status_e;
 
 typedef enum {
@@ -239,9 +188,19 @@ typedef struct {
   char supersedes[TIX_MAX_ID_LEN];      // replaces
   char deps[TIX_MAX_DEPS][TIX_MAX_ID_LEN];
   u32 dep_count;
+  char labels[TIX_MAX_LABELS][TIX_MAX_KEYWORD_LEN];
+  u32 label_count;
   char kill_reason[TIX_MAX_KEYWORD_LEN]; // "timeout" or "context"
+  char created_from_name[TIX_MAX_NAME_LEN];   // denormalized at compact
+  char supersedes_name[TIX_MAX_NAME_LEN];     // denormalized at compact
+  char supersedes_reason[TIX_MAX_KEYWORD_LEN]; // denormalized at compact
   i64 created_at;                         // unix timestamp
   i64 updated_at;                         // unix timestamp
+  char author[TIX_MAX_NAME_LEN];
+  char assigned[TIX_MAX_NAME_LEN];       // who should work on this
+  char completed_at[64];                  // ISO 8601 completion time
+  i64 resolved_at;                        // when reached terminal state
+  i64 compacted_at;                       // when removed from plan.jsonl
 } tix_ticket_t;
 
 typedef struct {
@@ -275,7 +234,7 @@ Format: `{prefix}-{hex8}` where hex8 = lower 32 bits of (microsecond timestamp X
 ```toml
 [repo]
 main_branch = "main"
-plan_file = ".tix/plan.jsonl"    # default; set to "ralph/plan.jsonl" for legacy repos
+plan_file = ".tix/plan.jsonl"    # default; configurable for legacy repos
 
 [display]
 color = true
@@ -290,7 +249,7 @@ auto_rebuild = true
 CREATE TABLE tickets (
   id TEXT PRIMARY KEY,
   type INTEGER NOT NULL,        -- 0=task, 1=issue, 2=note
-  status INTEGER NOT NULL,      -- 0=pending, 1=done, 2=accepted
+  status INTEGER NOT NULL,      -- 0=pending, 1=done, 2=accepted, 3=rejected, 4=deleted
   priority INTEGER DEFAULT 0,
   name TEXT NOT NULL,
   spec TEXT,
@@ -302,9 +261,26 @@ CREATE TABLE tickets (
   created_from TEXT,
   supersedes TEXT,
   kill_reason TEXT,
+  author TEXT,
+  assigned TEXT,
+  completed_at TEXT,
+  created_from_name TEXT,
+  supersedes_name TEXT,
+  supersedes_reason TEXT,
   created_at INTEGER,
   updated_at INTEGER,
+  resolved_at INTEGER,
+  compacted_at INTEGER,
   commit_hash TEXT              -- git commit this state was read from
+);
+
+-- Generic key-value metadata for tickets (agent telemetry, etc.)
+CREATE TABLE ticket_meta (
+  ticket_id TEXT NOT NULL,
+  key TEXT NOT NULL,
+  value_text TEXT,              -- for string values
+  value_num REAL,               -- for numeric values
+  PRIMARY KEY (ticket_id, key)
 );
 
 CREATE TABLE ticket_deps (
@@ -344,7 +320,7 @@ CREATE TABLE cache_meta (
   key TEXT PRIMARY KEY,
   value TEXT
 );
--- Stores: last_commit, last_rebuild_time, schema_version
+-- Stores: last_commit, last_rebuild_time, schema_version (currently "6")
 ```
 
 ### Commit-Based Cache Strategy
@@ -580,7 +556,7 @@ No `make install` step needed — local development just uses `make build` and t
 wrapper always picks up the latest binary from `app/tix/build/tix`.
 
 ### OpenCode Tool (.opencode/tools/tix-status.ts)
-Mirror `ralph-status.ts` pattern - read `.tix/cache.db` or shell out to `tix query`.
+Read `.tix/cache.db` or shell out to `tix query`.
 
 ### OpenCode Skill (.opencode/skills/tix/SKILL.md)
 Skill for LLMs to understand tix workflow and commands.
@@ -685,8 +661,7 @@ tix_err_t tix_toml_parse(const char *path, tix_toml_entry_t *entries,
 
 ## 16. plan.jsonl Compatibility
 
-tix reads/writes the same `plan.jsonl` format as Ralph for backwards compatibility.
-tix just uses SQLite as a read cache, not as primary storage.
+tix uses `plan.jsonl` as its source of truth, with SQLite as a read cache.
 Primary storage remains the JSONL file committed to git.
 
 ### Append-Only Model
@@ -738,8 +713,8 @@ cache, but leave the file uncommitted. The caller decides when to commit.
 
 ### Default Location
 
-The default plan file location is `.tix/plan.jsonl`. For repos with an existing
-`ralph/plan.jsonl`, tix falls back to that location automatically.
+The default plan file location is `.tix/plan.jsonl`. tix also supports a
+legacy fallback to `ralph/plan.jsonl` for repos that store their plan file there.
 
 | `.tix/plan.jsonl` | `ralph/plan.jsonl` | Result |
 |---|---|---|
@@ -751,14 +726,6 @@ The default plan file location is `.tix/plan.jsonl`. For repos with an existing
 The location can be overridden via `plan_file` in `config.toml` (under `[repo]`).
 On `tix init`, if `ralph/plan.jsonl` exists, the config is set to point there
 for legacy compatibility.
-
-### Migration Path
-1. tix detects existing `ralph/plan.jsonl` and uses it transparently
-2. tix commands write back in the same JSONL format
-3. Ralph Python code still works alongside tix during transition
-4. Once tix is complete, Ralph ticket commands are deprecated
-5. To migrate: copy `ralph/plan.jsonl` to `.tix/plan.jsonl` and remove
-   `plan_file` override from config (or set it to `.tix/plan.jsonl`)
 
 ---
 
@@ -794,7 +761,7 @@ Compile with: `-DSQLITE_THREADSAFE=0 -DSQLITE_OMIT_LOAD_EXTENSION`
 ## 19. Future Extensions
 
 - Integration with GitHub Issues API (import/export)
-- Integration with spec files (ralph/specs/*.md)
+- Integration with spec files
 - Construct mode orchestration (INVESTIGATE/BUILD/VERIFY loop)
 - Multi-repo support
 - Conflict resolution for concurrent edits

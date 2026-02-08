@@ -3,14 +3,14 @@
 ## Overview
 
 tix is a high-performance C CLI tool for git-based ticket management.
-It replaces Ralph's Python-based ticket system with a zero-allocation C implementation.
+It is a standalone, zero-allocation C implementation designed to be leveraged by external orchestrators.
 
 ## Architecture
 
 - **C11 standard** (not C23), gcc + clang compatible, Linux + macOS
 - **No dynamic allocation** - all stack buffers with TIX_MAX_* bounds
 - **SQLite cache** (vendored amalgamation) in `.tix/cache.db` (gitignored)
-- **plan.jsonl** compatibility with Ralph's existing format
+- **plan.jsonl** as the source-of-truth file format (append-only JSONL)
 - All output is JSON on stdout (except `status` and `report`)
 
 ## Coding Rules (NASA Power of 10 inspired)

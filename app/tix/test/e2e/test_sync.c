@@ -524,7 +524,7 @@ static void test_legacy_desc_field(TIX_TEST_ARGS()) {
     return;
   }
 
-  /* old ralph-style issue with "desc" instead of "name" */
+  /* legacy issue with "desc" instead of "name" */
   const char *content =
     "{\"t\":\"issue\",\"id\":\"i-legacy01\",\"desc\":\"API returns 500\",\"s\":\"p\"}\n";
 

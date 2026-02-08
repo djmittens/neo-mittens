@@ -61,14 +61,6 @@ typedef struct {
   i64 resolved_at;     /* when ticket reached terminal state (accepted/rejected/deleted) */
   i64 compacted_at;    /* when ticket was physically removed from plan.jsonl by compact */
 
-  /* agent telemetry (populated by orchestrator at task completion) */
-  double cost;            /* total dollar cost, 0.0 = not set */
-  i64 tokens_in;          /* total input tokens */
-  i64 tokens_out;         /* total output tokens */
-  i32 iterations;         /* construct loop iterations */
-  char model[TIX_MAX_NAME_LEN]; /* model used, e.g. "claude-sonnet-4-20250514" */
-  i32 retries;            /* retries after failure before success */
-  i32 kill_count;         /* times iteration was killed before success */
 } tix_ticket_t;
 
 typedef struct {

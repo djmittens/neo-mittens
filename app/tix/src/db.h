@@ -53,6 +53,16 @@ tix_err_t tix_db_set_meta(tix_db_t *db, const char *key, const char *value);
 tix_err_t tix_db_get_meta(tix_db_t *db, const char *key,
                           char *value, sz value_len);
 
+/* ---- Per-ticket metadata (generic key-value store) ---- */
+tix_err_t tix_db_set_ticket_meta(tix_db_t *db, const char *ticket_id,
+                                 const char *key, const char *value_text,
+                                 double value_num);
+tix_err_t tix_db_set_ticket_meta_num(tix_db_t *db, const char *ticket_id,
+                                     const char *key, double value);
+tix_err_t tix_db_set_ticket_meta_str(tix_db_t *db, const char *ticket_id,
+                                     const char *key, const char *value);
+tix_err_t tix_db_delete_ticket_meta(tix_db_t *db, const char *ticket_id);
+
 tix_err_t tix_db_is_stale(tix_db_t *db, int *is_stale);
 tix_err_t tix_db_rebuild_from_jsonl(tix_db_t *db, const char *jsonl_path);
 

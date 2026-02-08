@@ -7,7 +7,7 @@
  *   - DB roundtrip: assigned survives upsert and get
  *   - Replay: assigned field parsed from JSONL
  *   - Replay without assigned leaves it empty
- *   - TQL parse/compile/exec for assigned=ralph, assigned=, assigned!=ralph
+ *   - TQL parse/compile/exec for assigned=alice, assigned=, assigned!=alice
  *   - Full roundtrip JSON -> DB -> JSON
  */
 
@@ -57,7 +57,7 @@ static void test_json_roundtrip_assigned(TIX_TEST_ARGS()) {
   t.status = TIX_STATUS_PENDING;
   snprintf(t.id, sizeof(t.id), "t-aabbccdd");
   snprintf(t.name, sizeof(t.name), "test task");
-  snprintf(t.assigned, sizeof(t.assigned), "ralph");
+  snprintf(t.assigned, sizeof(t.assigned), "alice");
 
   char buf[TIX_MAX_LINE_LEN];
   sz len = tix_json_write_ticket(&t, buf, sizeof(buf));
@@ -69,7 +69,7 @@ static void test_json_roundtrip_assigned(TIX_TEST_ARGS()) {
 
   const char *assigned = tix_json_get_str(&obj, "assigned");
   ASSERT_NOT_NULL(assigned);
-  ASSERT_STR_EQ(assigned, "ralph");
+  ASSERT_STR_EQ(assigned, "alice");
 
   TIX_PASS();
 }
@@ -121,13 +121,13 @@ static void test_db_roundtrip_assigned(TIX_TEST_ARGS()) {
   t.status = TIX_STATUS_PENDING;
   snprintf(t.id, sizeof(t.id), "t-aabbccdd");
   snprintf(t.name, sizeof(t.name), "test task");
-  snprintf(t.assigned, sizeof(t.assigned), "ralph");
+  snprintf(t.assigned, sizeof(t.assigned), "alice");
 
   ASSERT_EQ(tix_db_upsert_ticket(&db, &t), TIX_OK);
 
   tix_ticket_t out;
   ASSERT_EQ(tix_db_get_ticket(&db, "t-aabbccdd", &out), TIX_OK);
-  ASSERT_STR_EQ(out.assigned, "ralph");
+  ASSERT_STR_EQ(out.assigned, "alice");
 
   tix_db_close(&db);
   rmrf(tmpdir);
@@ -152,12 +152,12 @@ static void test_replay_assigned(TIX_TEST_ARGS()) {
 
   const char *content =
     "{\"t\":\"task\",\"id\":\"t-11111111\",\"name\":\"do stuff\","
-    "\"s\":\"p\",\"assigned\":\"ralph\"}\n";
+    "\"s\":\"p\",\"assigned\":\"alice\"}\n";
   ASSERT_EQ(tix_db_replay_content(&db, content), TIX_OK);
 
   tix_ticket_t out;
   ASSERT_EQ(tix_db_get_ticket(&db, "t-11111111", &out), TIX_OK);
-  ASSERT_STR_EQ(out.assigned, "ralph");
+  ASSERT_STR_EQ(out.assigned, "alice");
 
   tix_db_close(&db);
   rmrf(tmpdir);
@@ -201,16 +201,16 @@ static void test_tql_filter_assigned(TIX_TEST_ARGS()) {
   tql_pipeline_t p;
   char err[256];
 
-  ASSERT_EQ(tql_parse("tasks | assigned=ralph", &p, err, sizeof(err)), TIX_OK);
+  ASSERT_EQ(tql_parse("tasks | assigned=alice", &p, err, sizeof(err)), TIX_OK);
   ASSERT_EQ(p.filter_count, 1u);
   ASSERT_STR_EQ(p.filters[0].field, "assigned");
-  ASSERT_STR_EQ(p.filters[0].value, "ralph");
+  ASSERT_STR_EQ(p.filters[0].value, "alice");
   ASSERT_EQ(p.filters[0].op, TQL_OP_EQ);
 
   TIX_PASS();
 }
 
-/* --- test: TQL compile assigned=ralph --- */
+/* --- test: TQL compile assigned=alice --- */
 
 static void test_tql_compile_assigned(TIX_TEST_ARGS()) {
   TIX_TEST();
@@ -218,7 +218,7 @@ static void test_tql_compile_assigned(TIX_TEST_ARGS()) {
   tql_compiled_t compiled;
   char err[256];
 
-  ASSERT_EQ(tql_prepare("tasks | assigned=ralph", &compiled, err, sizeof(err)),
+  ASSERT_EQ(tql_prepare("tasks | assigned=alice", &compiled, err, sizeof(err)),
             TIX_OK);
 
   /* SQL should contain "t.assigned" */
@@ -244,7 +244,7 @@ static void test_tql_filter_unassigned(TIX_TEST_ARGS()) {
   TIX_PASS();
 }
 
-/* --- test: TQL filter assigned!=ralph --- */
+/* --- test: TQL filter assigned!=alice --- */
 
 static void test_tql_filter_not_assigned(TIX_TEST_ARGS()) {
   TIX_TEST();
@@ -252,7 +252,7 @@ static void test_tql_filter_not_assigned(TIX_TEST_ARGS()) {
   tql_compiled_t compiled;
   char err[256];
 
-  ASSERT_EQ(tql_prepare("tasks | assigned!=ralph", &compiled, err, sizeof(err)),
+  ASSERT_EQ(tql_prepare("tasks | assigned!=alice", &compiled, err, sizeof(err)),
             TIX_OK);
 
   ASSERT_NOT_NULL(strstr(compiled.sql, "t.assigned"));
@@ -276,14 +276,14 @@ static void test_tql_exec_assigned(TIX_TEST_ARGS()) {
     TIX_FAIL_MSG("setup_db failed"); rmrf(tmpdir); return;
   }
 
-  /* Insert two tasks: one assigned to ralph, one to human */
+  /* Insert two tasks: one assigned to alice, one to bob */
   tix_ticket_t t1;
   tix_ticket_init(&t1);
   t1.type = TIX_TICKET_TASK;
   t1.status = TIX_STATUS_PENDING;
   snprintf(t1.id, sizeof(t1.id), "t-aaaaaaaa");
-  snprintf(t1.name, sizeof(t1.name), "ralph task");
-  snprintf(t1.assigned, sizeof(t1.assigned), "ralph");
+  snprintf(t1.name, sizeof(t1.name), "alice task");
+  snprintf(t1.assigned, sizeof(t1.assigned), "alice");
   ASSERT_EQ(tix_db_upsert_ticket(&db, &t1), TIX_OK);
 
   tix_ticket_t t2;
@@ -291,8 +291,8 @@ static void test_tql_exec_assigned(TIX_TEST_ARGS()) {
   t2.type = TIX_TICKET_TASK;
   t2.status = TIX_STATUS_PENDING;
   snprintf(t2.id, sizeof(t2.id), "t-bbbbbbbb");
-  snprintf(t2.name, sizeof(t2.name), "human task");
-  snprintf(t2.assigned, sizeof(t2.assigned), "human");
+  snprintf(t2.name, sizeof(t2.name), "bob task");
+  snprintf(t2.assigned, sizeof(t2.assigned), "bob");
   ASSERT_EQ(tix_db_upsert_ticket(&db, &t2), TIX_OK);
 
   tix_ticket_t t3;
@@ -304,10 +304,10 @@ static void test_tql_exec_assigned(TIX_TEST_ARGS()) {
   /* no assigned */
   ASSERT_EQ(tix_db_upsert_ticket(&db, &t3), TIX_OK);
 
-  /* Query: assigned=ralph - should get exactly 1 */
+  /* Query: assigned=alice - should get exactly 1 */
   tql_compiled_t compiled;
   char err[256];
-  ASSERT_EQ(tql_prepare("tasks | assigned=ralph", &compiled, err, sizeof(err)),
+  ASSERT_EQ(tql_prepare("tasks | assigned=alice", &compiled, err, sizeof(err)),
             TIX_OK);
 
   sqlite3_stmt *stmt = NULL;
