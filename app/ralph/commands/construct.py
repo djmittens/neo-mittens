@@ -117,7 +117,7 @@ def _pick_best_task(tasks: list[dict]) -> dict:
     Priority ordering:
       0. Dependency readiness: tasks with unmet deps sort last
       1. Priority field: high > medium > low > unset
-      2. Reject count: prefer fresher tasks (lower reject_count)
+      2. Retry count: prefer fresher tasks (lower retries)
       3. Original order preserved as tiebreaker
 
     A dep is "unmet" if its ID is still in the pending task list.
@@ -136,8 +136,8 @@ def _pick_best_task(tasks: list[dict]) -> dict:
         prio = _PRIORITY_ORDER.get(
             task.get("priority", ""), 3
         )
-        reject_count = task.get("reject_count", 0)
-        return (unmet, prio, reject_count)
+        retries = task.get("retries", 0) or task.get("reject_count", 0)
+        return (unmet, prio, retries)
 
     return min(tasks, key=sort_key)
 
@@ -232,21 +232,24 @@ def _reconcile_stage(
     Returns:
         ReconcileResult summarizing what was done.
     """
+    sm = meta.get("stage_metrics")
     if stage == Stage.BUILD:
         return reconcile_build(
             tix, agent_output, meta.get("task_id", ""),
-            stage_metrics=meta.get("stage_metrics"),
+            stage_metrics=sm,
         )
     elif stage == Stage.VERIFY:
-        return reconcile_verify(tix, agent_output)
+        return reconcile_verify(tix, agent_output, stage_metrics=sm)
     elif stage == Stage.INVESTIGATE:
         return reconcile_investigate(
-            tix, agent_output, meta.get("batch_issue_ids")
+            tix, agent_output, meta.get("batch_issue_ids"),
+            stage_metrics=sm,
         )
     elif stage == Stage.DECOMPOSE:
         return reconcile_decompose(
             tix, agent_output, meta.get("task_id", ""),
             parent_depth=meta.get("parent_depth", 0),
+            stage_metrics=sm,
         )
     else:
         return ReconcileResult(ok=False, errors=[f"Unknown stage: {stage}"])
@@ -345,6 +348,7 @@ def _run_stage(
 
     if timed_out:
         metrics.kills_timeout += 1
+        metrics.last_kill_reason = "timeout"
         return _make_result(
             stage, StageOutcome.FAILURE,
             time.time() - start_time,
@@ -362,6 +366,7 @@ def _run_stage(
         usage_pct = (tokens_in / ctx_window) * 100
         if usage_pct >= kill_pct:
             metrics.kills_context += 1
+            metrics.last_kill_reason = "context_pressure"
             print(f"  Context pressure: {usage_pct:.0f}% (kill threshold: {kill_pct}%)")
         elif usage_pct >= compact_pct:
             print(f"  Context pressure: {usage_pct:.0f}% (compact threshold: {compact_pct}%)")
@@ -386,6 +391,9 @@ def _run_stage(
     if reconcile_result.errors:
         for err in reconcile_result.errors:
             print(f"  Error: {err}", file=sys.stderr)
+
+    # Count accepted tasks for session metrics
+    metrics.tasks_completed += len(reconcile_result.tasks_accepted)
 
     if return_code == 0 and reconcile_result.ok:
         return _make_result(
@@ -612,6 +620,7 @@ def _create_stage_wrapper(
         if stage == Stage.VERIFY:
             accepted = _run_acceptance_precheck(tix_instance, repo_root)
             if accepted > 0:
+                met.tasks_completed += accepted
                 print(f"  Pre-check: {accepted} task(s) auto-accepted")
                 # Check if there are still done tasks needing agent review
                 try:
@@ -633,6 +642,7 @@ def _create_stage_wrapper(
         if stage == Stage.BUILD and result.outcome == StageOutcome.SUCCESS:
             post_accepted = _run_acceptance_precheck(tix_instance, repo_root)
             if post_accepted > 0:
+                met.tasks_completed += post_accepted
                 print(f"  Post-BUILD pre-check: {post_accepted} task(s) auto-accepted")
 
         return result
@@ -646,8 +656,13 @@ def _emit_session_summary(
     spec: str,
     config: GlobalConfig,
     log_dir: Path,
+    tix: Optional[Tix] = None,
 ) -> None:
-    """Write session summary JSON to log directory."""
+    """Write session summary JSON to log directory.
+
+    Enriches the summary with per-model and per-stage breakdowns from
+    tix, so the JSON is useful for cross-session analysis.
+    """
     if not getattr(config, "emit_session_summary", True):
         return
 
@@ -661,11 +676,24 @@ def _emit_session_summary(
         ended_at=ended_at,
     )
 
+    summary_dict = summary.to_dict()
+
+    # Enrich with tix-sourced breakdowns
+    if tix:
+        try:
+            summary_dict["models"] = tix.report_models()
+        except Exception:
+            pass
+        try:
+            summary_dict["labels"] = tix.report_labels()
+        except Exception:
+            pass
+
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     summary_file = log_dir / f"session_{timestamp}.json"
     try:
         with open(summary_file, "w") as f:
-            json.dump(summary.to_dict(), f, indent=2)
+            json.dump(summary_dict, f, indent=2)
         print(f"{Colors.CYAN}Session summary: {summary_file}{Colors.NC}")
     except OSError as e:
         print(f"{Colors.YELLOW}Failed to write session summary: {e}{Colors.NC}")
@@ -678,42 +706,55 @@ def _print_final_report(
     state: RalphState,
     tix: Optional[Tix] = None,
 ) -> None:
-    """Print final construct session report."""
+    """Print final construct session report.
+
+    Uses ``tix report`` for the summary (completion %, avg cost, cycle
+    time, retries, kills, top model) and ``tix report models`` for
+    per-model breakdown when multiple models were used.
+    Falls back to basic Python metrics if tix report is unavailable.
+    """
     print()
-    if exit_reason == "complete":
-        print(f"{Colors.GREEN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━{Colors.NC}")
-        print(f"{Colors.GREEN}SPEC COMPLETE: {state.spec}{Colors.NC}")
-    elif exit_reason == "circuit_breaker":
-        print(f"{Colors.RED}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━{Colors.NC}")
-        print(f"{Colors.RED}CIRCUIT BREAKER TRIPPED{Colors.NC}")
-    elif exit_reason == "cost_limit":
-        print(f"{Colors.YELLOW}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━{Colors.NC}")
-        print(f"{Colors.YELLOW}COST LIMIT REACHED{Colors.NC}")
-    elif exit_reason == "max_iterations":
-        print(f"{Colors.YELLOW}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━{Colors.NC}")
-        print(f"{Colors.YELLOW}MAX ITERATIONS REACHED{Colors.NC}")
-    else:
-        print(f"{Colors.BLUE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━{Colors.NC}")
-
-    print(f"Total cost:     ${metrics.total_cost:.4f}")
+    _exit_colors = {
+        "complete": Colors.GREEN,
+        "circuit_breaker": Colors.RED,
+        "cost_limit": Colors.YELLOW,
+        "max_iterations": Colors.YELLOW,
+    }
+    _exit_labels = {
+        "complete": f"SPEC COMPLETE: {state.spec}",
+        "circuit_breaker": "CIRCUIT BREAKER TRIPPED",
+        "cost_limit": "COST LIMIT REACHED",
+        "max_iterations": "MAX ITERATIONS REACHED",
+    }
+    color = _exit_colors.get(exit_reason, Colors.BLUE)
+    label = _exit_labels.get(exit_reason, exit_reason.upper())
+    print(f"{color}{'━' * 40}{Colors.NC}")
+    print(f"{color}{label}{Colors.NC}")
     print(f"Iterations:     {iterations}")
-    print(f"Tokens used:    {metrics.tokens_used:,}")
 
+    # Use tix report for the authoritative summary
+    tix_report_shown = False
     if tix:
         try:
-            pending = tix.query_tasks()
-            done = tix.query_done_tasks()
-            issues = tix.query_issues()
-            if pending:
-                print(f"Pending tasks:  {len(pending)}")
-            if done:
-                print(f"Done tasks:     {len(done)}")
-            if issues:
-                print(f"Open issues:    {len(issues)}")
+            report_text = tix.report()
+            if report_text.strip():
+                print()
+                print(report_text)
+                tix_report_shown = True
+            # Show per-model breakdown if multiple models used
+            models_text = tix.report("models")
+            if models_text.strip() and "Model" in models_text:
+                print()
+                print(models_text)
         except Exception:
             pass
 
-    print(f"{Colors.BLUE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━{Colors.NC}")
+    # Fallback to basic metrics if tix report unavailable
+    if not tix_report_shown:
+        print(f"Total cost:     ${metrics.total_cost:.4f}")
+        print(f"Tokens used:    {metrics.tokens_used:,}")
+
+    print(f"{Colors.BLUE}{'━' * 40}{Colors.NC}")
 
 
 def _get_spec_from_args(args: argparse.Namespace) -> Optional[str]:
@@ -901,11 +942,13 @@ def cmd_construct(
                     cwd=cwd,
                     capture_output=True,
                 )
-                subprocess.run(
+                commit_result = subprocess.run(
                     ["git", "commit", "-m", f"ralph: iteration {iteration}"],
                     cwd=cwd,
                     capture_output=True,
                 )
+                if commit_result.returncode == 0:
+                    metrics.commits_made += 1
             
             # Push changes with retry
             if not push_with_retry(branch, retries=2, plan_file=plan_file, cwd=cwd):
@@ -924,6 +967,9 @@ def cmd_construct(
         
         # Emit session summary
         log_dir = Path(global_config.log_dir)
-        _emit_session_summary(metrics, exit_reason, state.spec or "", global_config, log_dir)
+        _emit_session_summary(
+            metrics, exit_reason, state.spec or "", global_config, log_dir,
+            tix=tix_instance,
+        )
     
     return 0 if exit_reason in ("complete", "no_work", "max_iterations") else 1

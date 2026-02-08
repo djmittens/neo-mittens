@@ -221,7 +221,9 @@ tix_err_t tix_plan_compact(const char *plan_path, tix_db_t *db) {
 
   /* write only live tickets (pending + done) sorted by ID.
      Resolved tickets (accepted/rejected/deleted) stay in the cache
-     but are not written to the compacted plan.jsonl. */
+     but are not written to the compacted plan.jsonl.
+     Exception: resolved tickets that have never been committed are
+     preserved to prevent data loss (populated by cmd_compact.c). */
   const char *sql =
     "SELECT id FROM tickets WHERE status < 2 ORDER BY id ASC";
   sqlite3_stmt *stmt = NULL;
@@ -235,6 +237,72 @@ tix_err_t tix_plan_compact(const char *plan_path, tix_db_t *db) {
       char buf[TIX_MAX_LINE_LEN];
       sz len = tix_json_write_ticket(&ticket, buf, sizeof(buf));
       if (len > 0) { fprintf(fp, "%s\n", buf); }
+    }
+    sqlite3_finalize(stmt);
+  }
+
+  /* write uncommitted-resolved tickets and their tombstones.
+     The _compact_uncommitted temp table is populated by cmd_compact.c
+     before calling this function. If the table doesn't exist (e.g.
+     tix_plan_compact called directly), this is a no-op. */
+  const char *uncommitted_sql =
+    "SELECT id FROM _compact_uncommitted ORDER BY id ASC";
+  stmt = NULL;
+  rc = sqlite3_prepare_v2(db->handle, uncommitted_sql, -1, &stmt, NULL);
+  if (rc == SQLITE_OK) {
+    while (sqlite3_step(stmt) == SQLITE_ROW) {
+      const char *id = (const char *)sqlite3_column_text(stmt, 0);
+      if (id == NULL) { continue; }
+
+      /* write the ticket line (with its current resolved status) */
+      tix_ticket_t ticket;
+      if (tix_db_get_ticket(db, id, &ticket) != TIX_OK) { continue; }
+      char buf[TIX_MAX_LINE_LEN];
+      sz len = tix_json_write_ticket(&ticket, buf, sizeof(buf));
+      if (len > 0) { fprintf(fp, "%s\n", buf); }
+
+      /* write the corresponding tombstone (accept/reject) if it exists */
+      tix_tombstone_t ts;
+      memset(&ts, 0, sizeof(ts));
+      const char *ts_sql =
+        "SELECT id, done_at, reason, name, is_accept, timestamp "
+        "FROM tombstones WHERE id=?";
+      sqlite3_stmt *ts_stmt = NULL;
+      int trc = sqlite3_prepare_v2(db->handle, ts_sql, -1, &ts_stmt, NULL);
+      if (trc == SQLITE_OK) {
+        sqlite3_bind_text(ts_stmt, 1, id, -1, SQLITE_STATIC);
+        if (sqlite3_step(ts_stmt) == SQLITE_ROW) {
+          const char *ts_id = (const char *)sqlite3_column_text(ts_stmt, 0);
+          const char *ts_done = (const char *)sqlite3_column_text(ts_stmt, 1);
+          const char *ts_reason = (const char *)sqlite3_column_text(ts_stmt, 2);
+          const char *ts_name = (const char *)sqlite3_column_text(ts_stmt, 3);
+          int ts_is_accept = sqlite3_column_int(ts_stmt, 4);
+          if (ts_id != NULL) {
+            snprintf(ts.id, TIX_MAX_ID_LEN, "%s", ts_id);
+          }
+          if (ts_done != NULL) {
+            snprintf(ts.done_at, TIX_MAX_HASH_LEN, "%s", ts_done);
+          }
+          if (ts_reason != NULL) {
+            snprintf(ts.reason, TIX_MAX_DESC_LEN, "%s", ts_reason);
+          }
+          if (ts_name != NULL) {
+            snprintf(ts.name, TIX_MAX_NAME_LEN, "%s", ts_name);
+          }
+          ts.is_accept = ts_is_accept;
+          ts.timestamp = sqlite3_column_int64(ts_stmt, 5);
+
+          char ts_buf[TIX_MAX_LINE_LEN];
+          sz ts_len = tix_json_write_tombstone(&ts, ts_buf, sizeof(ts_buf));
+          if (ts_len > 0) { fprintf(fp, "%s\n", ts_buf); }
+        }
+        sqlite3_finalize(ts_stmt);
+      }
+
+      /* for deleted tickets (no tombstone), write a delete marker */
+      if (ticket.status == TIX_STATUS_DELETED) {
+        fprintf(fp, "{\"t\":\"delete\",\"id\":\"%s\"}\n", id);
+      }
     }
     sqlite3_finalize(stmt);
   }

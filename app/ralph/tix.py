@@ -158,6 +158,64 @@ class Tix:
         result = self._run("query")
         return result.data if isinstance(result.data, dict) else {}
 
+    def query_tql(self, tql: str) -> list[dict]:
+        """Run a TQL pipeline query and return results as list of dicts.
+
+        TQL is tix's query language supporting filters, aggregation, sorting.
+        Examples:
+            "tasks | group model | count | sum cost | sort sum_cost desc"
+            "tasks all | status=accepted | select id,name,cost,model"
+            "tasks | label=stage:build | avg cost"
+
+        Args:
+            tql: TQL pipeline string.
+
+        Returns:
+            List of result dicts (rows).
+        """
+        result = self._run("q", tql)
+        if isinstance(result.data, list):
+            return result.data
+        if isinstance(result.data, dict):
+            return [result.data]
+        return []
+
+    def report(self, kind: str = "") -> str:
+        """Run a tix report and return the human-readable output.
+
+        Args:
+            kind: Report type - "" (summary), "velocity", "actors", "models".
+
+        Returns:
+            Report text output.
+        """
+        args = ["report"]
+        if kind:
+            args.append(kind)
+        result = self._run(*args, parse_json=False)
+        return result.raw
+
+    def report_models(self) -> list[dict]:
+        """Get per-model performance breakdown via TQL.
+
+        Returns list of dicts with model, count, total_cost, avg_cost,
+        tokens_in, tokens_out, avg_iterations — suitable for programmatic
+        analysis and routing decisions.
+        """
+        return self.query_tql(
+            "tasks all | model!= | group model"
+            " | count | sum cost | avg cost"
+            " | sum tokens_in | sum tokens_out"
+            " | avg iterations | sort sum_cost desc"
+        )
+
+    def report_labels(self) -> list[dict]:
+        """Get per-label task count and cost breakdown via TQL."""
+        return self.query_tql(
+            "tasks all | group label"
+            " | count | sum cost | avg cost | sort count desc"
+        )
+
     def query_tombstones(self) -> dict:
         """Get accepted and rejected tombstones.
 

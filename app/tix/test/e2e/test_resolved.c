@@ -619,6 +619,265 @@ static void test_tql_or_new_statuses(TIX_TEST_ARGS()) {
   TIX_PASS();
 }
 
+/* --- test: compact preserves uncommitted resolved tickets --- */
+
+static void test_compact_preserves_uncommitted(TIX_TEST_ARGS()) {
+  TIX_TEST();
+
+  char tmpdir[256];
+  if (make_tmpdir(tmpdir, sizeof(tmpdir)) != 0) {
+    TIX_FAIL_MSG("mkdtemp failed"); return;
+  }
+
+  char db_path[512];
+  tix_db_t db;
+  if (setup_db(tmpdir, db_path, sizeof(db_path), &db) != 0) {
+    TIX_FAIL_MSG("setup_db failed"); rmrf(tmpdir); return;
+  }
+
+  /* insert a pending task */
+  tix_ticket_t t1;
+  tix_ticket_init(&t1);
+  t1.type = TIX_TICKET_TASK;
+  snprintf(t1.id, sizeof(t1.id), "t-cp100001");
+  snprintf(t1.name, sizeof(t1.name), "Still pending");
+  tix_db_upsert_ticket(&db, &t1);
+
+  /* insert an accepted task (resolved but never committed) */
+  tix_ticket_t t2;
+  tix_ticket_init(&t2);
+  t2.type = TIX_TICKET_TASK;
+  t2.status = TIX_STATUS_ACCEPTED;
+  snprintf(t2.id, sizeof(t2.id), "t-cp100002");
+  snprintf(t2.name, sizeof(t2.name), "Accepted uncommitted");
+  snprintf(t2.done_at, sizeof(t2.done_at), "abc123");
+  t2.resolved_at = 1700000100;
+  tix_db_upsert_ticket(&db, &t2);
+
+  /* insert the corresponding tombstone */
+  tix_tombstone_t ts;
+  memset(&ts, 0, sizeof(ts));
+  snprintf(ts.id, sizeof(ts.id), "t-cp100002");
+  snprintf(ts.done_at, sizeof(ts.done_at), "abc123");
+  snprintf(ts.name, sizeof(ts.name), "Accepted uncommitted");
+  ts.is_accept = 1;
+  ts.timestamp = 1700000100;
+  tix_db_upsert_tombstone(&db, &ts);
+
+  /* insert a deleted task (also uncommitted) */
+  tix_ticket_t t3;
+  tix_ticket_init(&t3);
+  t3.type = TIX_TICKET_TASK;
+  t3.status = TIX_STATUS_DELETED;
+  snprintf(t3.id, sizeof(t3.id), "t-cp100003");
+  snprintf(t3.name, sizeof(t3.name), "Deleted uncommitted");
+  t3.resolved_at = 1700000200;
+  tix_db_upsert_ticket(&db, &t3);
+
+  /* create plan.jsonl with all three */
+  char plan_path[512];
+  snprintf(plan_path, sizeof(plan_path), "%s/plan.jsonl", tmpdir);
+  FILE *fp = fopen(plan_path, "w");
+  ASSERT_NOT_NULL(fp);
+  fprintf(fp,
+    "{\"t\":\"task\",\"id\":\"t-cp100001\",\"name\":\"Still pending\",\"s\":\"p\"}\n"
+    "{\"t\":\"task\",\"id\":\"t-cp100002\",\"name\":\"Accepted uncommitted\","
+    "\"s\":\"d\",\"done_at\":\"abc123\"}\n"
+    "{\"t\":\"accept\",\"id\":\"t-cp100002\",\"done_at\":\"abc123\","
+    "\"name\":\"Accepted uncommitted\"}\n"
+    "{\"t\":\"task\",\"id\":\"t-cp100003\",\"name\":\"Deleted uncommitted\",\"s\":\"p\"}\n"
+    "{\"t\":\"delete\",\"id\":\"t-cp100003\"}\n");
+  fclose(fp);
+
+  /* simulate mark_uncommitted_resolved: protect the resolved tickets */
+  sqlite3_exec(db.handle,
+    "CREATE TEMP TABLE _compact_uncommitted(id TEXT PRIMARY KEY)",
+    NULL, NULL, NULL);
+  sqlite3_exec(db.handle,
+    "INSERT INTO _compact_uncommitted VALUES('t-cp100002')",
+    NULL, NULL, NULL);
+  sqlite3_exec(db.handle,
+    "INSERT INTO _compact_uncommitted VALUES('t-cp100003')",
+    NULL, NULL, NULL);
+
+  /* run compact */
+  tix_err_t err = tix_plan_compact(plan_path, &db);
+  ASSERT_OK(err);
+
+  /* read back plan.jsonl and verify content */
+  fp = fopen(plan_path, "r");
+  ASSERT_NOT_NULL(fp);
+  char content[4096];
+  size_t nread = fread(content, 1, sizeof(content) - 1, fp);
+  content[nread] = '\0';
+  fclose(fp);
+
+  /* pending task should be present */
+  ASSERT_STR_CONTAINS(content, "t-cp100001");
+  ASSERT_STR_CONTAINS(content, "Still pending");
+
+  /* accepted task should be preserved (uncommitted) */
+  ASSERT_STR_CONTAINS(content, "t-cp100002");
+  ASSERT_STR_CONTAINS(content, "Accepted uncommitted");
+
+  /* accept tombstone should also be preserved */
+  ASSERT_STR_CONTAINS(content, "\"t\":\"accept\"");
+
+  /* deleted task should be preserved (uncommitted) */
+  ASSERT_STR_CONTAINS(content, "t-cp100003");
+
+  /* delete marker should be preserved */
+  ASSERT_STR_CONTAINS(content, "\"t\":\"delete\"");
+
+  sqlite3_exec(db.handle,
+    "DROP TABLE IF EXISTS _compact_uncommitted", NULL, NULL, NULL);
+  tix_db_close(&db);
+  rmrf(tmpdir);
+  TIX_PASS();
+}
+
+/* --- test: compact removes committed resolved tickets normally --- */
+
+static void test_compact_removes_committed(TIX_TEST_ARGS()) {
+  TIX_TEST();
+
+  char tmpdir[256];
+  if (make_tmpdir(tmpdir, sizeof(tmpdir)) != 0) {
+    TIX_FAIL_MSG("mkdtemp failed"); return;
+  }
+
+  char db_path[512];
+  tix_db_t db;
+  if (setup_db(tmpdir, db_path, sizeof(db_path), &db) != 0) {
+    TIX_FAIL_MSG("setup_db failed"); rmrf(tmpdir); return;
+  }
+
+  /* insert a pending task */
+  tix_ticket_t t1;
+  tix_ticket_init(&t1);
+  t1.type = TIX_TICKET_TASK;
+  snprintf(t1.id, sizeof(t1.id), "t-cr200001");
+  snprintf(t1.name, sizeof(t1.name), "Still pending");
+  tix_db_upsert_ticket(&db, &t1);
+
+  /* insert an accepted task (already committed) */
+  tix_ticket_t t2;
+  tix_ticket_init(&t2);
+  t2.type = TIX_TICKET_TASK;
+  t2.status = TIX_STATUS_ACCEPTED;
+  snprintf(t2.id, sizeof(t2.id), "t-cr200002");
+  snprintf(t2.name, sizeof(t2.name), "Accepted committed");
+  t2.resolved_at = 1700000300;
+  tix_db_upsert_ticket(&db, &t2);
+
+  char plan_path[512];
+  snprintf(plan_path, sizeof(plan_path), "%s/plan.jsonl", tmpdir);
+  FILE *fp = fopen(plan_path, "w");
+  ASSERT_NOT_NULL(fp);
+  fprintf(fp,
+    "{\"t\":\"task\",\"id\":\"t-cr200001\",\"name\":\"Still pending\",\"s\":\"p\"}\n"
+    "{\"t\":\"task\",\"id\":\"t-cr200002\",\"name\":\"Accepted committed\","
+    "\"s\":\"d\",\"done_at\":\"def456\"}\n"
+    "{\"t\":\"accept\",\"id\":\"t-cr200002\",\"done_at\":\"def456\","
+    "\"name\":\"Accepted committed\"}\n");
+  fclose(fp);
+
+  /* empty _compact_uncommitted = nothing protected, all committed */
+  sqlite3_exec(db.handle,
+    "CREATE TEMP TABLE _compact_uncommitted(id TEXT PRIMARY KEY)",
+    NULL, NULL, NULL);
+
+  tix_err_t err = tix_plan_compact(plan_path, &db);
+  ASSERT_OK(err);
+
+  /* read back */
+  fp = fopen(plan_path, "r");
+  ASSERT_NOT_NULL(fp);
+  char content[4096];
+  size_t nread = fread(content, 1, sizeof(content) - 1, fp);
+  content[nread] = '\0';
+  fclose(fp);
+
+  /* pending task should be present */
+  ASSERT_STR_CONTAINS(content, "t-cr200001");
+
+  /* accepted task should be REMOVED (it was committed) */
+  ASSERT_TRUE(strstr(content, "t-cr200002") == NULL);
+  ASSERT_TRUE(strstr(content, "Accepted committed") == NULL);
+
+  sqlite3_exec(db.handle,
+    "DROP TABLE IF EXISTS _compact_uncommitted", NULL, NULL, NULL);
+  tix_db_close(&db);
+  rmrf(tmpdir);
+  TIX_PASS();
+}
+
+/* --- test: compact without temp table (backwards compat) --- */
+
+static void test_compact_no_temp_table(TIX_TEST_ARGS()) {
+  TIX_TEST();
+
+  char tmpdir[256];
+  if (make_tmpdir(tmpdir, sizeof(tmpdir)) != 0) {
+    TIX_FAIL_MSG("mkdtemp failed"); return;
+  }
+
+  char db_path[512];
+  tix_db_t db;
+  if (setup_db(tmpdir, db_path, sizeof(db_path), &db) != 0) {
+    TIX_FAIL_MSG("setup_db failed"); rmrf(tmpdir); return;
+  }
+
+  /* insert a pending task and an accepted task */
+  tix_ticket_t t1;
+  tix_ticket_init(&t1);
+  t1.type = TIX_TICKET_TASK;
+  snprintf(t1.id, sizeof(t1.id), "t-nt300001");
+  snprintf(t1.name, sizeof(t1.name), "Pending");
+  tix_db_upsert_ticket(&db, &t1);
+
+  tix_ticket_t t2;
+  tix_ticket_init(&t2);
+  t2.type = TIX_TICKET_TASK;
+  t2.status = TIX_STATUS_ACCEPTED;
+  snprintf(t2.id, sizeof(t2.id), "t-nt300002");
+  snprintf(t2.name, sizeof(t2.name), "Accepted");
+  tix_db_upsert_ticket(&db, &t2);
+
+  char plan_path[512];
+  snprintf(plan_path, sizeof(plan_path), "%s/plan.jsonl", tmpdir);
+  FILE *fp = fopen(plan_path, "w");
+  ASSERT_NOT_NULL(fp);
+  fprintf(fp,
+    "{\"t\":\"task\",\"id\":\"t-nt300001\",\"name\":\"Pending\",\"s\":\"p\"}\n"
+    "{\"t\":\"task\",\"id\":\"t-nt300002\",\"name\":\"Accepted\",\"s\":\"a\"}\n");
+  fclose(fp);
+
+  /* do NOT create _compact_uncommitted - test backwards compat.
+     Without the temp table, resolved tickets should still be removed
+     (the SELECT from _compact_uncommitted will fail, so no uncommitted
+     tickets are written). */
+  tix_err_t err = tix_plan_compact(plan_path, &db);
+  ASSERT_OK(err);
+
+  fp = fopen(plan_path, "r");
+  ASSERT_NOT_NULL(fp);
+  char content[4096];
+  size_t nread = fread(content, 1, sizeof(content) - 1, fp);
+  content[nread] = '\0';
+  fclose(fp);
+
+  /* pending should be present */
+  ASSERT_STR_CONTAINS(content, "t-nt300001");
+
+  /* accepted should be removed (no protection table) */
+  ASSERT_TRUE(strstr(content, "t-nt300002") == NULL);
+
+  tix_db_close(&db);
+  rmrf(tmpdir);
+  TIX_PASS();
+}
+
 /* --- main --- */
 
 int main(void) {
@@ -653,6 +912,12 @@ int main(void) {
                     test_tql_all_with_filters);
   tix_testsuite_add(&suite, "tql_or_new_statuses",
                     test_tql_or_new_statuses);
+  tix_testsuite_add(&suite, "compact_preserves_uncommitted",
+                    test_compact_preserves_uncommitted);
+  tix_testsuite_add(&suite, "compact_removes_committed",
+                    test_compact_removes_committed);
+  tix_testsuite_add(&suite, "compact_no_temp_table",
+                    test_compact_no_temp_table);
 
   int result = tix_testsuite_run(&suite);
   tix_testsuite_print(&suite);

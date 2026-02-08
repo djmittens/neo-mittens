@@ -123,17 +123,15 @@ class TestReconcileVerify:
         assert len(result.tasks_accepted) == 2
 
     def test_mixed_results(self, mock_tix):
-        mock_tix.query_full.return_value = {
-            "tasks": {"pending": [], "done": [{"id": "t-2", "reject_count": 0}]},
-        }
+        mock_tix.query_tasks.return_value = [{"id": "t-2", "retries": 0}]
         mock_tix.task_update.return_value = {"id": "t-2", "status": "updated"}
         output = '[RALPH_OUTPUT]\n{"results": [{"task_id": "t-1", "passed": true}, {"task_id": "t-2", "passed": false, "reason": "test fails"}]}\n[/RALPH_OUTPUT]'
         result = reconcile_verify(mock_tix, output)
         assert len(result.tasks_accepted) == 1
         assert len(result.tasks_rejected) == 1
         mock_tix.task_reject.assert_called_once_with("t-2", "test fails")
-        # reject_count should be incremented
-        mock_tix.task_update.assert_called_once_with("t-2", {"reject_count": 1})
+        # retries should be incremented (tix native field for report aggregation)
+        mock_tix.task_update.assert_called_once_with("t-2", {"retries": 1})
 
     def test_with_new_tasks(self, mock_tix):
         output = '[RALPH_OUTPUT]\n{"results": [], "new_tasks": [{"name": "Fix X", "notes": "...", "accept": "..."}]}\n[/RALPH_OUTPUT]'

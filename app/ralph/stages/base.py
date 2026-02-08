@@ -164,9 +164,12 @@ class ConstructStateMachine:
     def _escalate_stuck_tasks(self) -> int:
         """Detect tasks stuck in reject loops and escalate them.
 
-        A task with reject_count >= max_retries_per_task is stuck.
+        A task with retries >= max_retries_per_task is stuck.
         Creates an issue describing the pattern and rejects the task
         so the next INVESTIGATE stage can address the root cause.
+
+        Reads the ``retries`` field (tix native) written by
+        ``_increment_reject_count`` in reconcile.py.
 
         Returns:
             Number of tasks escalated.
@@ -179,8 +182,9 @@ class ConstructStateMachine:
 
         escalated = 0
         for task in tasks:
-            reject_count = task.get("reject_count", 0)
-            if reject_count < max_retries:
+            # Check both tix-native "retries" and legacy "reject_count"
+            retry_count = task.get("retries", 0) or task.get("reject_count", 0)
+            if retry_count < max_retries:
                 continue
 
             task_id = task.get("id", "")
@@ -188,16 +192,16 @@ class ConstructStateMachine:
             reason = task.get("reject", "unknown")
             logger.warning(
                 "Task %s rejected %d times — escalating to issue",
-                task_id, reject_count,
+                task_id, retry_count,
             )
             try:
                 self.tix.issue_add(
                     f"Task '{task_name}' ({task_id}) has been rejected "
-                    f"{reject_count} times. Last reason: {reason}"
+                    f"{retry_count} times. Last reason: {reason}"
                 )
                 self.tix.task_reject(
                     task_id,
-                    f"escalated: rejected {reject_count} times",
+                    f"escalated: rejected {retry_count} times",
                 )
             except Exception:
                 pass
@@ -521,6 +525,7 @@ class ConstructStateMachine:
             output_repr = self._loop_fingerprint(stage)
             if self.loop_detector.check_output(output_repr):
                 self.metrics.kills_loop += 1
+                self.metrics.last_kill_reason = "loop_detected"
                 return StageResult(
                     stage=stage,
                     outcome=StageOutcome.FAILURE,
@@ -531,7 +536,10 @@ class ConstructStateMachine:
                 )
 
         if result.outcome == StageOutcome.SUCCESS:
+            self.metrics.successes += 1
             self.metrics.record_progress()
+        elif result.outcome == StageOutcome.FAILURE:
+            self.metrics.failures += 1
 
         return result
 
@@ -578,7 +586,7 @@ class ConstructStateMachine:
             log_path=result.kill_log,
         )
 
-        # Reset task status to pending via tix
+        # Reset task status to pending via tix and record kill telemetry
         if result.task_id and self.tix:
             try:
                 self.tix.task_reject(
@@ -587,6 +595,8 @@ class ConstructStateMachine:
                 )
             except Exception:
                 pass  # Best-effort
+            # Write kill_count and kill_reason to tix so reports aggregate them
+            self._record_kill(result.task_id, reason)
 
         self.save_state(state)
 
@@ -603,6 +613,32 @@ class ConstructStateMachine:
             (t for t in all_tasks if t.get("id") == task_id), None
         )
         return task.get("decompose_depth", 0) if task else 0
+
+    def _record_kill(self, task_id: str, reason: str) -> None:
+        """Increment kill_count and set kill_reason on a ticket.
+
+        Writes to tix native fields so ``tix report velocity`` aggregates
+        total kills and ``tix report models`` can correlate kills per model.
+        Best-effort: failure does not affect state machine flow.
+        """
+        if not self.tix or task_id == "__stage_failure__":
+            return
+        try:
+            full = self._get_cached_full()
+            all_tasks = (
+                full.get("tasks", {}).get("pending", [])
+                + full.get("tasks", {}).get("done", [])
+            )
+            task = next(
+                (t for t in all_tasks if t.get("id") == task_id), None
+            )
+            current = task.get("kill_count", 0) if task else 0
+            self.tix.task_update(
+                task_id,
+                {"kill_count": current + 1, "kill_reason": reason},
+            )
+        except Exception:
+            pass
 
     def _handle_batch_failure(
         self,
@@ -718,5 +754,6 @@ class ConstructStateMachine:
                     self.tix.task_reject(
                         task_id, f"verify batch failed: {reason}"
                     )
+                    self._record_kill(task_id, reason)
         except Exception as e:
             logger.warning("Failed to skip batch items: %s", e)

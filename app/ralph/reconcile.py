@@ -218,6 +218,51 @@ def _extract_and_repair(
     return repaired, repairs
 
 
+def _attach_stage_telemetry(
+    tix: TixProtocol,
+    task_ids: list[str],
+    stage_metrics: dict[str, Any],
+    stage_name: str,
+) -> None:
+    """Attach telemetry and stage label to tickets (best-effort).
+
+    Adds a ``stage:<name>`` label so costs can be attributed per stage
+    via ``tix q "tasks all | group label | sum cost"``.
+
+    For VERIFY, metrics are split evenly across verified tasks since the
+    stage verifies multiple tasks in one call.
+
+    Args:
+        tix: Tix harness instance.
+        task_ids: Ticket IDs to update.
+        stage_metrics: Dict with cost, tokens_in, tokens_out, etc.
+        stage_name: Stage name for labeling (build, verify, etc.).
+    """
+    if not task_ids:
+        return
+
+    # Split cost/tokens across tasks when stage handles multiple
+    count = len(task_ids)
+    per_task: dict[str, Any] = {}
+    for key in ("cost", "tokens_in", "tokens_out", "iterations"):
+        val = stage_metrics.get(key)
+        if val:
+            per_task[key] = round(val / count, 6) if key == "cost" else val // count
+
+    # Model is the same for all tasks
+    model = stage_metrics.get("model", "")
+    if model:
+        per_task["model"] = model
+
+    for tid in task_ids:
+        try:
+            update: dict[str, Any] = dict(per_task)
+            update["labels"] = [f"stage:{stage_name}"]
+            tix.task_update(tid, update)
+        except (TixError, Exception):
+            pass  # best-effort
+
+
 def reconcile_build(
     tix: TixProtocol,
     agent_output: str,
@@ -267,10 +312,12 @@ def reconcile_build(
             result.errors.append(f"Failed to mark task done: {e}")
             result.ok = False
 
-        # Attach telemetry to the ticket if available
+        # Attach telemetry and stage label to the ticket
         if stage_metrics and result.ok:
             try:
-                tix.task_update(task_id, stage_metrics)
+                update = dict(stage_metrics)
+                update["labels"] = ["stage:build"]
+                tix.task_update(task_id, update)
             except TixError:
                 pass  # best-effort; don't fail the build over telemetry
 
@@ -293,6 +340,7 @@ def reconcile_build(
 def reconcile_verify(
     tix: TixProtocol,
     agent_output: str,
+    stage_metrics: Optional[dict[str, Any]] = None,
 ) -> ReconcileResult:
     """Reconcile VERIFY stage output.
 
@@ -314,6 +362,7 @@ def reconcile_verify(
     Args:
         tix: Tix harness instance.
         agent_output: Full agent stdout.
+        stage_metrics: Optional telemetry dict (cost, tokens, model, etc.).
 
     Returns:
         ReconcileResult with accept/reject actions taken.
@@ -345,6 +394,12 @@ def reconcile_verify(
             reason = item.get("reason", "Failed verification")
             _reject_task(tix, task_id, reason, result)
 
+    # Attach verify-stage telemetry to each verified task (best-effort).
+    # This accumulates with BUILD telemetry already on the ticket.
+    if stage_metrics:
+        verified_ids = result.tasks_accepted + result.tasks_rejected
+        _attach_stage_telemetry(tix, verified_ids, stage_metrics, "verify")
+
     # Process cross-cutting issues surfaced by VERIFY
     _add_issues(tix, data.get("issues", []), result)
 
@@ -359,6 +414,7 @@ def reconcile_investigate(
     tix: TixProtocol,
     agent_output: str,
     batch_issue_ids: Optional[list[str]] = None,
+    stage_metrics: Optional[dict[str, Any]] = None,
 ) -> ReconcileResult:
     """Reconcile INVESTIGATE stage output.
 
@@ -381,6 +437,7 @@ def reconcile_investigate(
         agent_output: Full agent stdout.
         batch_issue_ids: Issue IDs in the current batch to clear.
             If None, clears all issues (legacy fallback).
+        stage_metrics: Optional telemetry dict (cost, tokens, model, etc.).
 
     Returns:
         ReconcileResult with tasks added and issues cleared.
@@ -400,6 +457,10 @@ def reconcile_investigate(
     # Add all investigation tasks
     for task_data in data.get("tasks", []):
         _add_task(tix, task_data, result)
+
+    # Attach investigate-stage telemetry to newly created tasks (best-effort).
+    if stage_metrics and result.tasks_added:
+        _attach_stage_telemetry(tix, result.tasks_added, stage_metrics, "investigate")
 
     # Clear only the batch's issues (or all if no batch specified)
     try:
@@ -423,6 +484,7 @@ def reconcile_decompose(
     agent_output: str,
     original_task_id: str,
     parent_depth: int = 0,
+    stage_metrics: Optional[dict[str, Any]] = None,
 ) -> ReconcileResult:
     """Reconcile DECOMPOSE stage output.
 
@@ -442,6 +504,7 @@ def reconcile_decompose(
         agent_output: Full agent stdout.
         original_task_id: The task being decomposed.
         parent_depth: Decompose depth of the parent task.
+        stage_metrics: Optional telemetry dict (cost, tokens, model, etc.).
 
     Returns:
         ReconcileResult with subtasks added and original deleted.
@@ -470,6 +533,10 @@ def reconcile_decompose(
         task_data["parent"] = original_task_id
         task_data["decompose_depth"] = child_depth
         _add_task(tix, task_data, result)
+
+    # Attach decompose-stage telemetry to subtasks (best-effort).
+    if stage_metrics and result.tasks_added:
+        _attach_stage_telemetry(tix, result.tasks_added, stage_metrics, "decompose")
 
     # Delete original task (only if subtasks were added)
     if result.tasks_added:
@@ -632,17 +699,18 @@ def _reject_task(
 
 
 def _increment_reject_count(tix: TixProtocol, task_id: str) -> None:
-    """Increment reject_count on a task for pattern detection.
+    """Increment retries on a task for pattern detection.
 
-    Uses targeted query for the single task instead of fetching all tasks.
+    Writes to the ``retries`` field (tix native) so that ``tix report``
+    and ``tix report velocity`` aggregate retry counts correctly.
     Best-effort: failure here does not affect reconciliation.
     """
     try:
         # Use query_tasks (pending only) — rejected tasks return to pending
         tasks = tix.query_tasks()
         task = next((t for t in tasks if t.get("id") == task_id), None)
-        current = task.get("reject_count", 0) if task else 0
-        tix.task_update(task_id, {"reject_count": current + 1})
+        current = task.get("retries", 0) if task else 0
+        tix.task_update(task_id, {"retries": current + 1})
     except (TixError, Exception):
         pass
 
