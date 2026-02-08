@@ -177,7 +177,8 @@ class TestConstructWithMockOpencode:
 
     def test_mock_opencode_json_output_parsing(self, tmp_path: Path):
         """Test that mocked opencode JSON output is correctly parsed."""
-        from ralph.opencode import parse_json_stream, extract_metrics
+        from ralph.opencode import parse_json_stream, _process_event
+        from ralph.context import Metrics
 
         mock_output = (
             '{"type": "step_start", "step": 1}\n'
@@ -197,10 +198,15 @@ class TestConstructWithMockOpencode:
         assert parsed_events[1]["type"] == "step_finish"
         assert parsed_events[3]["type"] == "run_complete"
 
-        metrics = extract_metrics(mock_output)
+        # Process step_finish events through _process_event
+        metrics = Metrics()
+        for event in parsed_events:
+            if event.get("type") == "step_finish":
+                _process_event(event, metrics)
 
         assert metrics.total_cost == pytest.approx(0.08, rel=0.01)
-        assert metrics.total_tokens_in == 2100
+        assert metrics.total_tokens_in == 1800  # 1000+800 (cache reads split out)
+        assert metrics.total_tokens_cached == 300  # 200+100 (cache reads)
         assert metrics.total_tokens_out == 800
         assert metrics.total_iterations == 2
 # Split from original file

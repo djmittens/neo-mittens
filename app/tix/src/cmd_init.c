@@ -75,17 +75,6 @@ tix_err_t tix_cmd_init(int argc, char **argv) {
   tix_config_t cfg;
   tix_config_defaults(&cfg);
 
-  /* detect legacy plan.jsonl location and use it if present */
-  char legacy_path[TIX_MAX_PATH_LEN];
-  n = snprintf(legacy_path, sizeof(legacy_path),
-               "%s/ralph/plan.jsonl", repo_root);
-  if (n < 0 || (sz)n >= sizeof(legacy_path)) { return TIX_ERR_OVERFLOW; }
-
-  if (stat(legacy_path, &st) == 0) {
-    snprintf(cfg.plan_file, sizeof(cfg.plan_file), "ralph/plan.jsonl");
-    printf("found legacy %s, using it\n", legacy_path);
-  }
-
   if (stat(config_path, &st) != 0) {
     err = tix_config_save(&cfg, config_path);
     if (err != TIX_OK) {

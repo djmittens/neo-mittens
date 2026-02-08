@@ -18,17 +18,34 @@ import sys
 import time
 from datetime import datetime
 from pathlib import Path
-from typing import Optional, Tuple, Callable
+from typing import Any, Optional, Tuple, Callable
 
 from ..config import GlobalConfig
 from ..context import Metrics, LoopDetector, SessionSummary, context_pressure
 from ..git import (
     get_current_branch,
+    get_current_commit,
     has_uncommitted_tix,
     push_with_retry,
     sync_with_remote,
 )
-from ..opencode import spawn_opencode, stream_and_collect
+from ..ledger import (
+    RunRecord,
+    IterationRecord,
+    StageBreakdown,
+    TokenBreakdown,
+    config_snapshot,
+    write_iteration,
+    write_run,
+    _generate_run_id,
+    _get_worktree_root,
+)
+from ..opencode import (
+    spawn_opencode,
+    spawn_opencode_continue,
+    stream_and_collect,
+    SessionResult,
+)
 from ..prompts import (
     find_project_rules,
     build_prompt_with_rules,
@@ -57,6 +74,11 @@ from ..commands.init import cmd_init
 from ..utils import Colors
 
 __all__ = ["cmd_construct"]
+
+# Mutable container for passing reconcile result from _run_stage to wrapper.
+# Set by _run_stage after reconciliation, read by the stage wrapper for
+# IterationRecord. Reset each iteration.
+_last_reconcile_result: dict[str, Optional[ReconcileResult]] = {"result": None}
 
 # Default values
 DEFAULT_MAX_FAILURES = 3
@@ -270,6 +292,7 @@ def _make_result(
     kill_reason: Optional[str] = None,
     cost: float = 0.0,
     tokens_used: int = 0,
+    task_id: Optional[str] = None,
 ) -> StageResult:
     """Create a StageResult with the given parameters."""
     return StageResult(
@@ -281,6 +304,7 @@ def _make_result(
         kill_reason=kill_reason,
         cost=cost,
         tokens_used=tokens_used,
+        task_id=task_id,
     )
 
 
@@ -291,24 +315,37 @@ def _execute_opencode(
     stage_timeout_ms: int,
     print_output: bool = True,
     stage_name: str = "",
-) -> Tuple[int, str, bool, float, int, int, int]:
+    session_id: Optional[str] = None,
+) -> Tuple[int, str, bool, float, int, int, int, int, Optional[str]]:
     """Execute opencode with real-time streaming output.
-    
+
+    Args:
+        session_id: If provided, continues an existing session instead
+            of starting a new one. Reuses cached context.
+
     Returns:
         Tuple of (return_code, output, timed_out, cost, tokens_in,
-                  tokens_out, iterations).
+                  tokens_cached, tokens_out, iterations, session_id).
     """
     model = config.model_for_stage(stage_name) if stage_name else config.model
-    proc = spawn_opencode(prompt, cwd=repo_root, timeout=stage_timeout_ms, model=model)
-    
+
+    if session_id:
+        proc = spawn_opencode_continue(
+            session_id, prompt, cwd=repo_root, model=model
+        )
+    else:
+        proc = spawn_opencode(
+            prompt, cwd=repo_root, timeout=stage_timeout_ms, model=model
+        )
+
     timeout_seconds = stage_timeout_ms // 1000
-    return_code, stdout_output, timed_out, metrics = stream_and_collect(
-        proc, timeout_seconds, print_output=print_output
-    )
-    
-    return (return_code, stdout_output, timed_out, metrics.total_cost,
-            metrics.total_tokens_in, metrics.total_tokens_out,
-            metrics.total_iterations)
+    result = stream_and_collect(proc, timeout_seconds, print_output=print_output)
+
+    return (result.return_code, result.raw_output, result.timed_out,
+            result.metrics.total_cost, result.metrics.total_tokens_in,
+            result.metrics.total_tokens_cached,
+            result.metrics.total_tokens_out, result.metrics.total_iterations,
+            result.session_id)
 
 
 def _run_stage(
@@ -323,6 +360,7 @@ def _run_stage(
     print_output: bool,
     tix: TixProtocol,
     start_time: float,
+    run_id: str = "",
 ) -> StageResult:
     """Run a stage using tix for ticket data and reconcile after."""
     prompt, meta = _build_stage_prompt_tix(
@@ -334,9 +372,12 @@ def _run_stage(
             error=f"No prompt for {stage.name}",
         )
 
+    stage_task_id = meta.get("task_id", "") or None
+
     try:
         (return_code, stdout_output, timed_out, cost,
-         tokens_in, tokens_out, stage_iters) = _execute_opencode(
+         tokens_in, tokens_cached, tokens_out, stage_iters,
+         session_id) = _execute_opencode(
             config, prompt, repo_root, stage_timeout_ms,
             print_output=print_output,
             stage_name=stage.name.lower(),
@@ -345,11 +386,13 @@ def _run_stage(
         return _make_result(
             stage, StageOutcome.FAILURE,
             time.time() - start_time, error=str(e),
+            task_id=stage_task_id,
         )
 
     tokens = tokens_in + tokens_out
     metrics.total_cost += cost
     metrics.total_tokens_in += tokens_in
+    metrics.total_tokens_cached += tokens_cached
     metrics.total_tokens_out += tokens_out
 
     if timed_out:
@@ -361,6 +404,7 @@ def _run_stage(
             error="Stage timed out",
             kill_reason="timeout",
             cost=cost, tokens_used=tokens,
+            task_id=stage_task_id,
         )
 
     # Detect context pressure — if the stage used most of the context window,
@@ -379,24 +423,91 @@ def _run_stage(
 
     # Build per-task telemetry for reconciliation
     stage_model = config.model_for_stage(stage.name.lower())
-    stage_metrics = {
+    stage_metrics: dict[str, Any] = {
         "cost": round(cost, 6),
         "tokens_in": tokens_in,
+        "tokens_cached": tokens_cached,
         "tokens_out": tokens_out,
         "iterations": stage_iters,
         "model": stage_model or "",
     }
+    if run_id:
+        stage_metrics["run_id"] = run_id
     meta["stage_metrics"] = stage_metrics
 
     # Reconcile agent output through tix
     reconcile_result = _reconcile_stage(stage, tix, stdout_output, meta)
-    duration = time.time() - start_time
+    _last_reconcile_result["result"] = reconcile_result
 
     # Log reconciliation summary
     print(f"  Reconcile: {reconcile_result.summary}")
     if reconcile_result.errors:
         for err in reconcile_result.errors:
             print(f"  Error: {err}", file=sys.stderr)
+
+    # Validation retry loop: if tasks were rejected by the harness
+    # (not by the LLM), continue the same session with error feedback.
+    # This reuses cached tokens instead of tearing down the session.
+    max_retries = 2
+    validation_errors = [
+        e for e in reconcile_result.errors
+        if "rejected by validation" in e
+    ]
+    retry = 0
+    while validation_errors and session_id and retry < max_retries:
+        retry += 1
+        print(f"\n  {Colors.YELLOW}Validation retry {retry}/{max_retries} "
+              f"— {len(validation_errors)} task(s) failed validation, "
+              f"continuing session{Colors.NC}")
+
+        feedback = _build_validation_feedback(validation_errors)
+        try:
+            (rc2, out2, to2, c2, ti2, tc2, to_out2, si2,
+             session_id) = _execute_opencode(
+                config, feedback, repo_root, stage_timeout_ms,
+                print_output=print_output,
+                stage_name=stage.name.lower(),
+                session_id=session_id,
+            )
+        except Exception:
+            break
+
+        # Accumulate metrics from retry
+        metrics.validation_retries += 1
+        cost += c2
+        tokens_in += ti2
+        tokens_cached += tc2
+        tokens_out += to_out2
+        tokens = tokens_in + tokens_out
+        stage_iters += si2
+        metrics.total_cost += c2
+        metrics.total_tokens_in += ti2
+        metrics.total_tokens_cached += tc2
+        metrics.total_tokens_out += to_out2
+
+        if to2:
+            break  # Timed out on retry, stop
+
+        # Update meta and re-reconcile
+        meta["stage_metrics"]["cost"] = round(cost, 6)
+        meta["stage_metrics"]["tokens_in"] = tokens_in
+        meta["stage_metrics"]["tokens_cached"] = tokens_cached
+        meta["stage_metrics"]["tokens_out"] = tokens_out
+        meta["stage_metrics"]["iterations"] = stage_iters
+        reconcile_result = _reconcile_stage(stage, tix, out2, meta)
+        _last_reconcile_result["result"] = reconcile_result
+
+        print(f"  Reconcile (retry {retry}): {reconcile_result.summary}")
+        if reconcile_result.errors:
+            for err in reconcile_result.errors:
+                print(f"  Error: {err}", file=sys.stderr)
+
+        validation_errors = [
+            e for e in reconcile_result.errors
+            if "rejected by validation" in e
+        ]
+
+    duration = time.time() - start_time
 
     # Count accepted tasks for session metrics
     metrics.tasks_completed += len(reconcile_result.tasks_accepted)
@@ -405,6 +516,7 @@ def _run_stage(
         return _make_result(
             stage, StageOutcome.SUCCESS, duration,
             cost=cost, tokens_used=tokens,
+            task_id=stage_task_id,
         )
 
     error_msg = f"Stage exited {return_code}"
@@ -414,7 +526,42 @@ def _run_stage(
     return _make_result(
         stage, StageOutcome.FAILURE, duration, return_code,
         error=error_msg, cost=cost, tokens_used=tokens,
+        task_id=stage_task_id,
     )
+
+
+def _build_validation_feedback(validation_errors: list[str]) -> str:
+    """Build a follow-up prompt with validation error feedback.
+
+    Tells the LLM which tasks failed validation and why, so it can
+    fix them in the same session (reusing cached context).
+    """
+    error_list = "\n".join(f"- {e}" for e in validation_errors)
+    return f"""The harness rejected some of your tasks because they failed validation.
+
+## Validation Errors
+
+{error_list}
+
+## What to fix
+
+Your acceptance criteria MUST be a **specific, runnable shell command** targeting
+the exact files/tests for this task. The harness auto-executes these commands to
+verify tasks — vague or untargeted criteria cannot be auto-verified.
+
+**Bad** (will be rejected):
+- `make test`, `pytest`, `npm test` (runs entire suite, not specific to task)
+- `works correctly`, `is implemented` (not a command)
+- `tests pass` (which tests?)
+
+**Good** (will be accepted):
+- `pytest tests/unit/test_config.py -v` (specific test file)
+- `test -f src/foo.py && python3 -c "from foo import Bar"` (file exists + import works)
+- `grep -c "class GlobalConfig" app/ralph/config.py` returns 1 (specific pattern in specific file)
+
+Please output a corrected [RALPH_OUTPUT] block with the fixed tasks.
+Only include the tasks that failed — do not repeat tasks that already passed.
+"""
 
 
 def _validate_config(
@@ -507,6 +654,16 @@ def _print_construct_header(
     print(f"Max failures:   {max_failures} (circuit breaker)")
     print(f"Timeout:        {stage_timeout_ms}ms per stage")
     print(f"Context:        {context_limit:,} tokens (warn: {soft_limit:,}, compact: {compact_limit:,}, kill: {hard_limit:,})")
+    # Guard limits
+    guard_parts = []
+    if config.max_tokens > 0:
+        guard_parts.append(f"tokens: {config.max_tokens:,}")
+    if config.max_wall_time_s > 0:
+        guard_parts.append(f"wall: {config.max_wall_time_s}s")
+    if config.max_api_calls > 0:
+        guard_parts.append(f"api: {config.max_api_calls}")
+    if guard_parts:
+        print(f"Guards:         {', '.join(guard_parts)}")
     print(f"Pending tasks:  {pending_count}")
     print(f"Open issues:    {issue_count}")
     print(f"{Colors.BLUE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━{Colors.NC}")
@@ -607,10 +764,19 @@ def _create_stage_wrapper(
     ralph_dir: Path,
     project_rules: Optional[str] = None,
     tix_instance: Optional[Tix] = None,
+    run_id: str = "",
+    log_dir: Optional[Path] = None,
 ) -> Callable:
     """Create a stage wrapper function for the state machine."""
     if tix_instance is None:
         raise RuntimeError("Tix is required for construct mode")
+
+    # Mutable container for stage breakdown accumulation
+    _stage_breakdowns: dict[str, StageBreakdown] = {}
+
+    def get_stage_breakdowns() -> dict[str, StageBreakdown]:
+        """Return accumulated stage breakdowns (for run record)."""
+        return _stage_breakdowns
 
     def run_stage_wrapper(
         cfg: GlobalConfig,
@@ -622,11 +788,18 @@ def _create_stage_wrapper(
     ) -> StageResult:
         print(f"\n{Colors.CYAN}[{stage.name}]{Colors.NC}")
 
+        # Track API call type before execution
+        stage_name_lower = stage.name.lower()
+        is_local = cfg.is_stage_local(stage_name_lower)
+        stage_model = cfg.model_for_stage(stage_name_lower)
+
         # Pre-check: auto-accept done tasks whose acceptance criteria pass
+        precheck_accepted = 0
         if stage == Stage.VERIFY:
             accepted = _run_acceptance_precheck(tix_instance, repo_root)
             if accepted > 0:
                 met.tasks_completed += accepted
+                precheck_accepted = accepted
                 print(f"  Pre-check: {accepted} task(s) auto-accepted")
                 # Check if there are still done tasks needing agent review
                 try:
@@ -637,22 +810,97 @@ def _create_stage_wrapper(
                 except TixError:
                     pass
 
+        iter_start = time.time()
+        cost_before = met.total_cost
+        tokens_in_before = met.total_tokens_in
+        tokens_cached_before = met.total_tokens_cached
+        tokens_out_before = met.total_tokens_out
+        validation_retries_before = met.validation_retries
+
         result = _run_stage(
             cfg, stage, st, met, timeout_ms,
             repo_root, ralph_dir, project_rules,
-            True, tix_instance, time.time(),
+            True, tix_instance, iter_start,
+            run_id=run_id,
         )
 
+        iter_duration = time.time() - iter_start
+
+        # Track API call
+        if is_local:
+            met.api_calls_local += 1
+        else:
+            met.api_calls_remote += 1
+
         # Post-BUILD: try auto-accepting the task immediately
-        # Saves a full VERIFY round trip if acceptance criteria are runnable
+        post_accepted = 0
         if stage == Stage.BUILD and result.outcome == StageOutcome.SUCCESS:
             post_accepted = _run_acceptance_precheck(tix_instance, repo_root)
             if post_accepted > 0:
                 met.tasks_completed += post_accepted
+                precheck_accepted += post_accepted
                 print(f"  Post-BUILD pre-check: {post_accepted} task(s) auto-accepted")
+
+        # Calculate deltas for this iteration
+        cost_delta = met.total_cost - cost_before
+        tokens_in_delta = met.total_tokens_in - tokens_in_before
+        tokens_cached_delta = met.total_tokens_cached - tokens_cached_before
+        tokens_out_delta = met.total_tokens_out - tokens_out_before
+
+        # Capture reconcile result for iteration record
+        reconcile = _last_reconcile_result.get("result")
+        _last_reconcile_result["result"] = None  # Reset for next iteration
+
+        # Emit iteration record to ledger
+        validation_retries_delta = met.validation_retries - validation_retries_before
+        if run_id and log_dir:
+            iter_record = IterationRecord(
+                run_id=run_id,
+                iteration=met.total_iterations,
+                stage=stage.name,
+                model=stage_model or "",
+                is_local=is_local,
+                task_id=result.task_id or "",
+                cost=cost_delta,
+                tokens=TokenBreakdown(
+                    input=tokens_in_delta,
+                    cached=tokens_cached_delta,
+                    output=tokens_out_delta,
+                ),
+                duration_s=iter_duration,
+                outcome=result.outcome.name.lower(),
+                precheck_accepted=precheck_accepted > 0,
+                validation_retries=validation_retries_delta,
+                kill_reason=getattr(result, "kill_reason", None),
+                tasks_added=len(reconcile.tasks_added) if reconcile else 0,
+                tasks_accepted=(
+                    len(reconcile.tasks_accepted) + precheck_accepted
+                    if reconcile else precheck_accepted
+                ),
+                tasks_rejected=len(reconcile.tasks_rejected) if reconcile else 0,
+                issues_added=len(reconcile.issues_added) if reconcile else 0,
+            )
+            try:
+                write_iteration(log_dir, iter_record)
+            except OSError:
+                pass  # Don't crash on ledger write failure
+
+        # Accumulate stage breakdown
+        sname = stage.name
+        if sname not in _stage_breakdowns:
+            _stage_breakdowns[sname] = StageBreakdown()
+        bd = _stage_breakdowns[sname]
+        bd.count += 1
+        bd.cost += cost_delta
+        if is_local:
+            bd.api_calls_local += 1
+        else:
+            bd.api_calls_remote += 1
 
         return result
 
+    # Attach accessor as attribute
+    run_stage_wrapper.get_stage_breakdowns = get_stage_breakdowns  # type: ignore[attr-defined]
     return run_stage_wrapper
 
 
@@ -705,6 +953,67 @@ def _emit_session_summary(
         print(f"{Colors.YELLOW}Failed to write session summary: {e}{Colors.NC}")
 
 
+def _build_iteration_header(
+    metrics: Metrics,
+    max_cost: float,
+    config: GlobalConfig,
+    session_start_time: float,
+) -> str:
+    """Build the status suffix for iteration header lines.
+
+    Shows cost, API calls, and elapsed wall time alongside each
+    iteration banner.
+
+    Args:
+        metrics: Current session metrics.
+        max_cost: Cost cap (0 = unlimited).
+        config: Global config with guard limits.
+        session_start_time: Unix timestamp of session start.
+
+    Returns:
+        Formatted string like " | Cost: $0.12 | API: 5r/2l | 12m30s"
+    """
+    parts = []
+
+    # Cost
+    if max_cost > 0:
+        parts.append(f"Cost: ${metrics.total_cost:.4f}/${max_cost}")
+    else:
+        parts.append(f"Cost: ${metrics.total_cost:.4f}")
+
+    # API calls (only if any have been made)
+    total_api = metrics.api_calls_remote + metrics.api_calls_local
+    if total_api > 0:
+        parts.append(f"API: {metrics.api_calls_remote}r/{metrics.api_calls_local}l")
+
+    # Wall time
+    elapsed = time.time() - session_start_time
+    minutes = int(elapsed // 60)
+    seconds = int(elapsed % 60)
+    parts.append(f"{minutes}m{seconds:02d}s")
+
+    return " | " + " | ".join(parts)
+
+
+def _print_extended_metrics(metrics: Metrics) -> None:
+    """Print API call and token breakdown details.
+
+    Shows remote vs local API calls, cached token ratio,
+    and wall time when available.
+    """
+    total_api = metrics.api_calls_remote + metrics.api_calls_local
+    if total_api > 0:
+        print(f"API calls:      {total_api} "
+              f"({metrics.api_calls_remote} remote, "
+              f"{metrics.api_calls_local} local)")
+    if metrics.total_tokens_cached > 0:
+        cache_pct = (metrics.total_tokens_cached /
+                     max(metrics.tokens_used, 1)) * 100
+        print(f"Token split:    {metrics.total_tokens_in:,} in / "
+              f"{metrics.total_tokens_cached:,} cached ({cache_pct:.0f}%) / "
+              f"{metrics.total_tokens_out:,} out")
+
+
 def _print_final_report(
     metrics: Metrics,
     exit_reason: str,
@@ -725,12 +1034,28 @@ def _print_final_report(
         "circuit_breaker": Colors.RED,
         "cost_limit": Colors.YELLOW,
         "max_iterations": Colors.YELLOW,
+        "token_limit": Colors.YELLOW,
+        "wall_time_limit": Colors.YELLOW,
+        "api_call_limit": Colors.YELLOW,
+        "progress_stall": Colors.RED,
+        "loop_detected": Colors.RED,
+        "no_work": Colors.GREEN,
+        "git_conflict": Colors.RED,
+        "interrupted": Colors.YELLOW,
     }
     _exit_labels = {
         "complete": f"SPEC COMPLETE: {state.spec}",
         "circuit_breaker": "CIRCUIT BREAKER TRIPPED",
         "cost_limit": "COST LIMIT REACHED",
         "max_iterations": "MAX ITERATIONS REACHED",
+        "token_limit": "TOKEN BUDGET EXHAUSTED",
+        "wall_time_limit": "WALL TIME LIMIT REACHED",
+        "api_call_limit": "API CALL LIMIT REACHED",
+        "progress_stall": "PROGRESS STALLED — ABORTING",
+        "loop_detected": "LOOP DETECTED — ABORTING",
+        "no_work": "NO REMAINING WORK",
+        "git_conflict": "GIT CONFLICT DETECTED",
+        "interrupted": "INTERRUPTED BY USER",
     }
     color = _exit_colors.get(exit_reason, Colors.BLUE)
     label = _exit_labels.get(exit_reason, exit_reason.upper())
@@ -795,7 +1120,113 @@ def _print_final_report(
         print(f"Total cost:     ${metrics.total_cost:.4f}")
         print(f"Tokens used:    {metrics.tokens_used:,}")
 
+    # Always show API calls and token breakdown
+    _print_extended_metrics(metrics)
+
     print(f"{Colors.BLUE}{'━' * 40}{Colors.NC}")
+
+
+def _write_run_record(
+    run_id: str,
+    log_dir: Path,
+    cwd: Path,
+    state: RalphState,
+    branch: str,
+    global_config: GlobalConfig,
+    metrics: Metrics,
+    exit_reason: str,
+    iteration: int,
+    git_sha_start: str,
+    session_start_time: float,
+    stage_wrapper: Callable,
+    tix: Optional[TixProtocol] = None,
+) -> None:
+    """Build and write a RunRecord to the ledger.
+
+    Args:
+        run_id: Unique run identifier.
+        log_dir: Directory for ledger files.
+        cwd: Current working directory.
+        state: Current Ralph state.
+        branch: Git branch name.
+        global_config: Global config for snapshot.
+        metrics: Session metrics.
+        exit_reason: Why the session ended.
+        iteration: Final iteration count.
+        git_sha_start: Commit hash at session start.
+        session_start_time: Unix timestamp of session start.
+        stage_wrapper: Wrapper function with get_stage_breakdowns attribute.
+        tix: Optional tix instance for task count queries.
+    """
+    git_sha_end = get_current_commit(cwd)
+    worktree = _get_worktree_root(cwd)
+    duration = time.time() - session_start_time
+
+    # Get stage breakdowns from wrapper
+    breakdowns: dict[str, StageBreakdown] = {}
+    get_bd = getattr(stage_wrapper, "get_stage_breakdowns", None)
+    if callable(get_bd):
+        result = get_bd()
+        if isinstance(result, dict):
+            breakdowns = result
+
+    # Query tix for task counts (best-effort)
+    tasks_total = 0
+    tasks_failed = 0
+    retries_task = 0
+    if tix:
+        try:
+            full = tix.query_full()
+            pending = full.get("tasks", {}).get("pending", [])
+            done = full.get("tasks", {}).get("done", [])
+            tombstones = full.get("tombstones", {})
+            accepted = tombstones.get("accepted", [])
+            rejected = tombstones.get("rejected", [])
+            tasks_total = len(pending) + len(done) + len(accepted) + len(rejected)
+            tasks_failed = len(rejected)
+        except Exception:
+            pass
+
+    # Sum retries from module-level reject counter
+    from ..reconcile import _reject_counts
+    retries_task = sum(_reject_counts.values())
+
+    run_record = RunRecord(
+        run_id=run_id,
+        spec=state.spec or "",
+        branch=branch,
+        git_sha_start=git_sha_start,
+        git_sha_end=git_sha_end,
+        worktree=worktree,
+        profile=getattr(global_config, "profile", "default"),
+        config_snapshot=config_snapshot(global_config),
+        started_at=metrics.started_at or "",
+        ended_at=datetime.now().isoformat(),
+        duration_s=duration,
+        exit_reason=exit_reason,
+        iterations=iteration,
+        tasks_total=tasks_total,
+        tasks_completed=metrics.tasks_completed,
+        tasks_failed=tasks_failed,
+        cost=metrics.total_cost,
+        tokens=TokenBreakdown(
+            input=metrics.total_tokens_in,
+            cached=metrics.total_tokens_cached,
+            output=metrics.total_tokens_out,
+        ),
+        api_calls_remote=metrics.api_calls_remote,
+        api_calls_local=metrics.api_calls_local,
+        kills_timeout=metrics.kills_timeout,
+        kills_context=metrics.kills_context,
+        kills_loop=metrics.kills_loop,
+        retries_validation=metrics.validation_retries,
+        retries_task=retries_task,
+        stages=breakdowns,
+    )
+    try:
+        write_run(log_dir, run_record)
+    except OSError:
+        pass  # Don't crash on ledger write failure
 
 
 def _get_spec_from_args(args: argparse.Namespace) -> Optional[str]:
@@ -896,15 +1327,23 @@ def cmd_construct(
     loop_threshold = getattr(global_config, "loop_detection_threshold", 3)
     loop_detector = LoopDetector(threshold=loop_threshold) if loop_threshold > 0 else None
 
+    # Ledger setup — must be before state machine so wrapper can emit records
+    run_id = _generate_run_id()
+    log_dir = Path(global_config.log_dir)
+    git_sha_start = get_current_commit(cwd)
+    session_start_time = time.time()
+
     # Create state machine
+    stage_wrapper = _create_stage_wrapper(
+        repo_root, ralph_dir, project_rules, tix_instance,
+        run_id=run_id, log_dir=log_dir,
+    )
     state_machine = ConstructStateMachine(
         config=global_config,
         metrics=metrics,
         stage_timeout_ms=stage_timeout_ms,
         context_limit=context_limit,
-        run_stage_fn=_create_stage_wrapper(
-            repo_root, ralph_dir, project_rules, tix_instance
-        ),
+        run_stage_fn=stage_wrapper,
         load_state_fn=lambda: load_state(repo_root),
         save_state_fn=lambda st: save_state(st, repo_root),
         tix=tix_instance,
@@ -926,6 +1365,34 @@ def cmd_construct(
             if max_cost > 0 and metrics.total_cost >= max_cost:
                 exit_reason = "cost_limit"
                 break
+
+            # Check token budget
+            max_tokens = getattr(global_config, "max_tokens", 0)
+            if max_tokens > 0 and metrics.tokens_used >= max_tokens:
+                exit_reason = "token_limit"
+                break
+
+            # Check wall clock limit
+            max_wall = getattr(global_config, "max_wall_time_s", 3600)
+            if max_wall > 0:
+                elapsed = time.time() - session_start_time
+                if elapsed >= max_wall:
+                    exit_reason = "wall_time_limit"
+                    break
+
+            # Check API call limit
+            max_api = getattr(global_config, "max_api_calls", 0)
+            if max_api > 0 and metrics.api_calls_remote >= max_api:
+                exit_reason = "api_call_limit"
+                break
+
+            # Check progress stall (hard abort)
+            stall_abort = getattr(global_config, "progress_stall_abort_s", 1200)
+            if stall_abort > 0 and metrics.last_progress_time > 0:
+                stall = metrics.seconds_since_progress()
+                if stall >= stall_abort:
+                    exit_reason = "progress_stall"
+                    break
             
             iteration += 1
             metrics.total_iterations = iteration
@@ -945,14 +1412,13 @@ def cmd_construct(
                 state = load_state(repo_root)
             
             # Print iteration header
-            if max_cost > 0:
-                cost_display = f" | Cost: ${metrics.total_cost:.4f}/${max_cost}"
-            else:
-                cost_display = f" | Cost: ${metrics.total_cost:.4f}"
+            header_parts = _build_iteration_header(
+                metrics, max_cost, global_config, session_start_time,
+            )
             
             print()
             print(f"{Colors.GREEN}╔═══════════════════════════════════════════════════════════════╗{Colors.NC}")
-            print(f"{Colors.GREEN}║  ITERATION {iteration} - {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}{cost_display}{Colors.NC}")
+            print(f"{Colors.GREEN}║  ITERATION {iteration} - {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}{header_parts}{Colors.NC}")
             print(f"{Colors.GREEN}╚═══════════════════════════════════════════════════════════════╝{Colors.NC}")
             
             # Run one iteration
@@ -1007,10 +1473,16 @@ def cmd_construct(
         _print_final_report(metrics, exit_reason, iteration, state, tix_instance)
         
         # Emit session summary
-        log_dir = Path(global_config.log_dir)
         _emit_session_summary(
             metrics, exit_reason, state.spec or "", global_config, log_dir,
             tix=tix_instance,
+        )
+
+        # Write run record to ledger
+        _write_run_record(
+            run_id, log_dir, cwd, state, branch, global_config,
+            metrics, exit_reason, iteration, git_sha_start,
+            session_start_time, stage_wrapper, tix=tix_instance,
         )
     
     return 0 if exit_reason in ("complete", "no_work", "max_iterations") else 1

@@ -19,7 +19,6 @@ static void print_usage(void) {
     "  note <sub> [args]     Note operations (add|list|done)\n"
     "  q \"<tql>\"              TQL pipeline query (e.g. \"tasks | count\")\n"
     "  q sql \"<sql>\"          Raw SQL query (SELECT/WITH only)\n"
-    "  query [sub] [args]    Legacy query (tasks|issues|full + --flags)\n"
     "  status                Human-readable dashboard\n"
     "  log                   Git history of plan changes\n"
     "  tree [id]             Dependency tree visualization\n"

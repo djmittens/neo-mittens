@@ -26,7 +26,12 @@ from typing import Optional, Tuple
 from ..config import GlobalConfig
 from ..context import Metrics
 from ..git import get_current_branch, has_uncommitted_plan, push_with_retry
-from ..opencode import spawn_opencode, extract_metrics
+from ..opencode import (
+    spawn_opencode,
+    spawn_opencode_continue,
+    stream_and_collect,
+    SessionResult,
+)
 from ..prompts import (
     load_and_inject, build_plan_context, build_prompt_with_rules, find_project_rules,
 )
@@ -134,82 +139,51 @@ def _build_plan_prompt(
     return prompt
 
 
-def _run_opencode(config: GlobalConfig, prompt: str, cwd: Path) -> Tuple[Optional[str], Metrics]:
+def _run_opencode(
+    config: GlobalConfig,
+    prompt: str,
+    cwd: Path,
+    session_id: Optional[str] = None,
+) -> Tuple[Optional[str], Metrics, Optional[str]]:
     """Spawn OpenCode and stream output in real-time.
 
     Args:
         config: Ralph configuration.
         prompt: Prompt to send to OpenCode.
         cwd: Working directory.
+        session_id: If provided, continues an existing session.
 
     Returns:
-        Tuple of (output string or None on failure, metrics).
+        Tuple of (output string or None on failure, metrics, session_id).
     """
-    metrics = Metrics()
-    output_lines = []
     timeout = max(config.timeout_ms, MIN_PLAN_TIMEOUT_MS)
-    
-    process = spawn_opencode(
-        prompt=prompt,
-        cwd=cwd,
-        timeout=timeout,
-        model=config.model,  # Use main model for planning (reasoning task)
-    )
-    
+    timeout_seconds = timeout // 1000
+
+    if session_id:
+        proc = spawn_opencode_continue(
+            session_id, prompt, cwd=cwd, model=config.model
+        )
+    else:
+        proc = spawn_opencode(
+            prompt=prompt, cwd=cwd, timeout=timeout, model=config.model,
+        )
+
     try:
-        # Stream output in real-time
-        while True:
-            retcode = process.poll()
-            
-            if process.stdout:
-                ready, _, _ = select.select([process.stdout], [], [], 0.1)
-                if ready:
-                    line = process.stdout.readline()
-                    if line:
-                        line_str = line.decode("utf-8", errors="replace")
-                        output_lines.append(line_str)
-                        
-                        try:
-                            event = json.loads(line_str.strip())
-                            _display_event(event)
-                        except json.JSONDecodeError:
-                            print(line_str, end="", flush=True)
-            
-            if retcode is not None:
-                if process.stdout:
-                    remaining = process.stdout.read()
-                    if remaining:
-                        for line in remaining.decode("utf-8", errors="replace").splitlines(keepends=True):
-                            output_lines.append(line)
-                            try:
-                                event = json.loads(line.strip())
-                                _display_event(event)
-                            except json.JSONDecodeError:
-                                print(line, end="", flush=True)
-                break
-        
-        output = "".join(output_lines)
-        
-        try:
-            metrics = extract_metrics(output)
-        except Exception:
-            pass
-        
-        metrics.total_iterations = 1
-        
-        return output, metrics
-        
-    except subprocess.TimeoutExpired:
-        process.kill()
-        print(f"{Colors.RED}OpenCode process timed out{Colors.NC}")
-        return None, metrics
+        result = stream_and_collect(proc, timeout_seconds, print_output=True)
+
+        if result.timed_out:
+            print(f"{Colors.RED}OpenCode process timed out{Colors.NC}")
+            return None, result.metrics, result.session_id
+
+        return result.raw_output, result.metrics, result.session_id
+
     except KeyboardInterrupt:
-        process.kill()
+        proc.kill()
         print(f"\n{Colors.YELLOW}Interrupted.{Colors.NC}")
-        return None, metrics
+        return None, Metrics(), None
     except Exception as e:
         print(f"{Colors.RED}Error during OpenCode execution: {e}{Colors.NC}")
-        return None, metrics
+        return None, Metrics(), None
 
 
 def _display_event(event: dict) -> None:
@@ -551,12 +525,13 @@ def cmd_plan(config: GlobalConfig, spec_file: str, args) -> int:
 
     print(f"\n{Colors.CYAN}Running plan generation...{Colors.NC}\n")
 
-    output_str, metrics = _run_opencode(config, prompt_content, cwd)
+    output_str, metrics, session_id = _run_opencode(config, prompt_content, cwd)
     if output_str is None:
         return 1
 
     return _finalize_plan(
-        tix, output_str, metrics, spec_name, branch, cwd
+        tix, output_str, metrics, spec_name, branch, cwd,
+        config=config, session_id=session_id,
     )
 
 
@@ -590,6 +565,38 @@ def _find_rules_source(cwd: Path, project_rules: Optional[str]) -> Optional[str]
     return None
 
 
+def _build_plan_validation_feedback(validation_errors: list[str]) -> str:
+    """Build follow-up prompt for PLAN validation failures."""
+    error_list = "\n".join(f"- {e}" for e in validation_errors)
+    return f"""The harness rejected some of your planned tasks because they failed validation.
+
+## Validation Errors
+
+{error_list}
+
+## What to fix
+
+Your acceptance criteria MUST be a **specific, runnable shell command** targeting
+the exact files/tests for this task. The harness auto-executes these commands to
+verify tasks — vague or untargeted criteria cannot be auto-verified.
+
+**Bad** (will be rejected):
+- `make test`, `pytest`, `npm test` (runs entire suite, not specific to task)
+- `works correctly`, `is implemented` (not a command)
+- `tests pass` (which tests?)
+
+**Good** (will be accepted):
+- `pytest tests/unit/test_config.py -v` (specific test file)
+- `test -f src/foo.py && python3 -c "from foo import Bar"` (file exists + import works)
+- `grep -c "class GlobalConfig" app/ralph/config.py` returns 1
+
+Also ensure task notes are >= 50 characters with specific file paths and line numbers.
+
+Please output a corrected [RALPH_OUTPUT] block with ONLY the fixed tasks.
+Do not repeat tasks that already passed validation.
+"""
+
+
 def _finalize_plan(
     tix: Tix,
     output_str: str,
@@ -597,10 +604,45 @@ def _finalize_plan(
     spec_name: str,
     branch: str,
     cwd: Path,
+    config: Optional[GlobalConfig] = None,
+    session_id: Optional[str] = None,
 ) -> int:
     """Reconcile agent output, prioritize, commit, and report."""
     # Reconcile — parse [RALPH_OUTPUT], add new tasks, drop obsolete ones
     recon = reconcile_plan(tix, output_str, spec_name)
+
+    # Validation retry loop: if tasks were rejected by the harness,
+    # continue the same session with error feedback (reuses cached tokens).
+    max_retries = 2
+    validation_errors = [
+        e for e in recon.errors if "rejected by validation" in e
+    ]
+    retry = 0
+    while (validation_errors and session_id and config
+           and retry < max_retries):
+        retry += 1
+        print(f"\n{Colors.YELLOW}PLAN validation retry {retry}/{max_retries} "
+              f"— {len(validation_errors)} task(s) failed, "
+              f"continuing session{Colors.NC}")
+
+        feedback = _build_plan_validation_feedback(validation_errors)
+        retry_output, retry_metrics, session_id = _run_opencode(
+            config, feedback, cwd, session_id=session_id
+        )
+        if retry_output is None:
+            break
+
+        metrics.total_cost += retry_metrics.total_cost
+        metrics.total_tokens_in += retry_metrics.total_tokens_in
+        metrics.total_tokens_out += retry_metrics.total_tokens_out
+
+        recon = reconcile_plan(tix, retry_output, spec_name)
+        if recon.tasks_added:
+            print(f"  Retry {retry}: added {len(recon.tasks_added)} tasks")
+
+        validation_errors = [
+            e for e in recon.errors if "rejected by validation" in e
+        ]
 
     # A valid incremental plan may have adds, drops, or both
     if not recon.tasks_added and not recon.tasks_deleted:

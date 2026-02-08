@@ -219,57 +219,7 @@ static void test_metadata_db_roundtrip(TIX_TEST_ARGS()) {
   TIX_PASS();
 }
 
-/* ---- replay_one_line picks up telemetry from legacy JSONL ---- */
 
-static void test_metadata_replay_legacy(TIX_TEST_ARGS()) {
-  TIX_TEST();
-
-  char tmpdir[256], db_path[512];
-  if (setup_env(tmpdir, sizeof(tmpdir), db_path, sizeof(db_path)) != 0) {
-    TIX_FAIL_MSG("setup_env failed");
-    return;
-  }
-
-  tix_db_t db;
-  tix_db_open(&db, db_path);
-  tix_db_init_schema(&db);
-
-  /* simulate a legacy JSONL line with inline telemetry */
-  const char *jsonl =
-    "{\"t\":\"task\",\"id\":\"t-replay1\",\"name\":\"Replay test\","
-    "\"s\":\"d\",\"author\":\"ReplayBot\","
-    "\"completed_at\":\"2026-01-15T09:00:00-05:00\","
-    "\"cost\":0.42,\"tokens_in\":20000,\"tokens_out\":5000,"
-    "\"iterations\":3,\"model\":\"gpt-5\",\"retries\":2,\"kill_count\":0}";
-
-  tix_err_t err = tix_db_replay_content(&db, jsonl);
-  ASSERT_OK(err);
-
-  tix_ticket_t out;
-  err = tix_db_get_ticket(&db, "t-replay1", &out);
-  ASSERT_OK(err);
-
-  ASSERT_STR_EQ(out.author, "ReplayBot");
-  ASSERT_STR_EQ(out.completed_at, "2026-01-15T09:00:00-05:00");
-  ASSERT_EQ(out.status, TIX_STATUS_DONE);
-
-  /* telemetry should be in ticket_meta, not struct fields */
-  ASSERT_TRUE(fabs(get_meta_num(&db, "t-replay1", "cost") - 0.42) < 0.01);
-  ASSERT_TRUE(fabs(get_meta_num(&db, "t-replay1", "tokens_in") - 20000.0) < 1.0);
-  ASSERT_TRUE(fabs(get_meta_num(&db, "t-replay1", "tokens_out") - 5000.0) < 1.0);
-  ASSERT_TRUE(fabs(get_meta_num(&db, "t-replay1", "iterations") - 3.0) < 0.1);
-  ASSERT_TRUE(fabs(get_meta_num(&db, "t-replay1", "retries") - 2.0) < 0.1);
-  /* kill_count=0 should NOT be stored (we skip zero values) */
-
-  char model_buf[256];
-  get_meta_str_buf(&db, "t-replay1", "model", model_buf, sizeof(model_buf));
-  ASSERT_STR_EQ(model_buf, "gpt-5");
-
-  tix_db_close(&db);
-  cleanup_env(tmpdir);
-
-  TIX_PASS();
-}
 
 /* ---- replay with new meta:{} nested object format ---- */
 
@@ -522,48 +472,7 @@ static void test_json_write_no_telemetry(TIX_TEST_ARGS()) {
   TIX_PASS();
 }
 
-/* ---- Backward compat: old JSONL without telemetry ---- */
 
-static void test_old_jsonl_compat(TIX_TEST_ARGS()) {
-  TIX_TEST();
-
-  char tmpdir[256], db_path[512];
-  if (setup_env(tmpdir, sizeof(tmpdir), db_path, sizeof(db_path)) != 0) {
-    TIX_FAIL_MSG("setup_env failed");
-    return;
-  }
-
-  tix_db_t db;
-  tix_db_open(&db, db_path);
-  tix_db_init_schema(&db);
-
-  /* old-style JSONL with no telemetry fields */
-  const char *old_jsonl =
-    "{\"t\":\"task\",\"id\":\"t-old01\",\"name\":\"Old task\",\"s\":\"p\"}";
-
-  tix_err_t err = tix_db_replay_content(&db, old_jsonl);
-  ASSERT_OK(err);
-
-  tix_ticket_t out;
-  err = tix_db_get_ticket(&db, "t-old01", &out);
-  ASSERT_OK(err);
-
-  ASSERT_STR_EQ(out.name, "Old task");
-  ASSERT_EQ(out.status, TIX_STATUS_PENDING);
-
-  /* ticket fields should be zero/empty */
-  ASSERT_STR_EQ(out.author, "");
-  ASSERT_STR_EQ(out.completed_at, "");
-
-  /* no metadata should exist */
-  ASSERT_TRUE(fabs(get_meta_num(&db, "t-old01", "cost")) < 0.0001);
-  ASSERT_TRUE(fabs(get_meta_num(&db, "t-old01", "tokens_in")) < 0.0001);
-
-  tix_db_close(&db);
-  cleanup_env(tmpdir);
-
-  TIX_PASS();
-}
 
 /* ---- Metadata cleanup on ticket delete ---- */
 
@@ -622,8 +531,6 @@ int main(void) {
   /* metadata DB roundtrip */
   tix_testsuite_add(&suite, "metadata_db_roundtrip",
                     test_metadata_db_roundtrip);
-  tix_testsuite_add(&suite, "metadata_replay_legacy",
-                    test_metadata_replay_legacy);
   tix_testsuite_add(&suite, "metadata_replay_nested",
                     test_metadata_replay_nested);
 
@@ -645,9 +552,6 @@ int main(void) {
   /* JSON write */
   tix_testsuite_add(&suite, "json_write_no_telemetry",
                     test_json_write_no_telemetry);
-
-  /* backward compat */
-  tix_testsuite_add(&suite, "old_jsonl_compat", test_old_jsonl_compat);
 
   /* metadata cleanup */
   tix_testsuite_add(&suite, "metadata_cleanup_on_delete",

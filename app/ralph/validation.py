@@ -85,44 +85,129 @@ def _is_vague_acceptance(text: str) -> bool:
 
     Returns True if the criteria uses weak/vague language without
     specific commands or measurable conditions.
+
+    Also catches untargeted commands that run the entire test suite
+    or build without specifying what to check — these are meaningless
+    for verifying a single task completed correctly.
     """
-    vague_patterns = [
+    text_lower = text.lower().strip()
+
+    # Prose vagueness: no command at all
+    prose_patterns = [
         r"^works?\s+(correctly|properly|as expected)",
         r"^is\s+(implemented|complete|done)",
         r"^should\s+work",
         r"^functions?\s+(correctly|properly)",
         r"^tests?\s+pass$",  # Just "tests pass" without specifying which
+        r"^all\s+tests?\s+pass",
+        r"^builds?\s+(successfully|correctly|without errors?)",
+        r"^compiles?\s+(successfully|correctly|without errors?)",
+        r"^no\s+(errors?|warnings?|failures?)",
+        r"^everything\s+(works|passes|compiles|builds)",
+        r"^feature\s+(is|works|functions)",
+        r"^code\s+(is|works|compiles)",
+        r"^implementation\s+(is|works)",
     ]
-    text_lower = text.lower().strip()
-    for pattern in vague_patterns:
+    for pattern in prose_patterns:
         if re.match(pattern, text_lower):
             return True
+
+    return False
+
+
+def _is_untargeted_command(text: str) -> bool:
+    """Check if acceptance criteria is a command that lacks a specific target.
+
+    Catches commands like:
+    - "make test" / "make" / "make all"
+    - "pytest" (no path)
+    - "npm test" / "npm run test" (no specific script target)
+    - "cargo test" (no specific test)
+    - "go test ./..." (runs everything)
+
+    These are bad because:
+    1. They run the entire suite, not the task's specific change
+    2. Pre-existing failures mask whether THIS task's work is correct
+    3. They're slow and waste context on irrelevant output
+    4. A failure gives no signal about what the task actually broke
+
+    Good alternatives:
+    - "pytest tests/unit/test_config.py -v"
+    - "python3 -c 'from ralph.config import GlobalConfig'"
+    - "test -f app/ralph/foo.py && grep -c 'class Foo' app/ralph/foo.py"
+    - "make test-unit TEST=test_config"
+    """
+    text_lower = text.lower().strip()
+    first_line = text_lower.split("\n")[0].strip()
+
+    # Bare make / make with generic targets
+    untargeted_make = [
+        r"^make\s*$",
+        r"^make\s+(test|tests|check|all|build|clean|lint|format)\s*$",
+        r"^make\s+-j\s*\d*\s*$",
+    ]
+    for pattern in untargeted_make:
+        if re.match(pattern, first_line):
+            return True
+
+    # Bare pytest / pytest with only flags (no path)
+    # "pytest" / "pytest -v" / "pytest --verbose" but NOT "pytest tests/foo.py"
+    if re.match(r"^pytest(\s+-[a-zA-Z-]+)*\s*$", first_line):
+        return True
+
+    # Bare npm/yarn test
+    if re.match(r"^(npm|yarn)\s+(test|run\s+test)\s*$", first_line):
+        return True
+
+    # Bare cargo test (no specific test name/path)
+    if re.match(r"^cargo\s+test\s*$", first_line):
+        return True
+
+    # go test ./... (runs everything)
+    if re.match(r"^go\s+test\s+\./\.\.\.\s*$", first_line):
+        return True
+
     return False
 
 
 def _has_measurable_command(text: str) -> bool:
-    """Check if acceptance criteria contains a measurable command.
+    """Check if acceptance criteria contains a specific, targeted command.
 
-    Good criteria include specific commands like:
-    - pytest path/to/test.py
-    - python -c "from foo import bar"
-    - grep -c 'pattern' file
-    - test -f path/to/file
+    Good criteria include commands with SPECIFIC targets:
+    - pytest tests/unit/test_config.py  (specific test file)
+    - python -c "from foo import bar"   (specific import check)
+    - grep -c 'pattern' file.py         (specific file + pattern)
+    - test -f path/to/file              (specific file existence)
+
+    Bare commands without targets (pytest, make test) do NOT qualify.
     """
-    command_patterns = [
-        r"pytest\s+",
-        r"python3?\s+-[cm]",
-        r"npm\s+(test|run)",
-        r"grep\s+-",
-        r"test\s+-[fde]",
-        r"exits?\s+0",
-        r"returns?\s+\d+",
-        r"outputs?\s+",
-        r"contains?\s+",
+    # Commands that need a path/target argument to be meaningful
+    targeted_patterns = [
+        r"pytest\s+\S*[/.]",              # pytest with a path (has / or .)
+        r"python3?\s+-c\s+['\"]",         # python -c "..." (inline code)
+        r"python3?\s+-m\s+\S+",           # python -m module
+        r"grep\s+-\S*\s+['\"]?\S+['\"]?\s+\S+",  # grep with pattern AND file
+        r"test\s+-[fde]\s+\S+",           # test -f path
+        r"\./\S+",                         # ./script (specific script)
+        r"bash\s+\S+",                     # bash script.sh
+        r"sh\s+\S+",                       # sh script.sh
     ]
-    for pattern in command_patterns:
+    for pattern in targeted_patterns:
         if re.search(pattern, text, re.IGNORECASE):
             return True
+
+    # Shell pipelines and compound commands with specific content
+    # e.g., "test -f foo.py && python -c 'import foo'"
+    if "&&" in text or "|" in text:
+        # At least one side must have a file reference
+        if _has_file_reference(text):
+            return True
+
+    # "exits 0" or "returns N" combined with a file reference
+    if re.search(r"(exits?\s+0|returns?\s+\d+)", text, re.IGNORECASE):
+        if _has_file_reference(text):
+            return True
+
     return False
 
 
@@ -182,8 +267,12 @@ def validate_acceptance_criteria(accept: Optional[str]) -> list[ValidationError]
 
     Rules:
     1. Accept criteria must be provided
-    2. Accept criteria must not be vague
-    3. Accept criteria should include measurable commands
+    2. Accept criteria must not be vague prose
+    3. Accept criteria must not be an untargeted command (make test, pytest, etc.)
+    4. Accept criteria must include a specific, targeted measurable command
+
+    The goal is to ensure every task has acceptance criteria that can be
+    auto-executed by the pre-check harness, avoiding expensive VERIFY calls.
 
     Args:
         accept: The acceptance criteria content
@@ -217,12 +306,23 @@ def validate_acceptance_criteria(accept: Optional[str]) -> list[ValidationError]
                     "Use specific commands with expected outputs."
         ))
 
+    if _is_untargeted_command(accept):
+        errors.append(ValidationError(
+            field="accept",
+            code="ACCEPT_UNTARGETED",
+            message="Acceptance criteria must target specific files or tests, not the entire suite. "
+                    "Bad: 'make test', 'pytest', 'npm test'. "
+                    "Good: 'pytest tests/unit/test_foo.py', 'test -f src/foo.py && python -c \"from foo import Bar\"'"
+        ))
+
     if not _has_measurable_command(accept):
         errors.append(ValidationError(
             field="accept",
             code="ACCEPT_NOT_MEASURABLE",
-            message="Acceptance criteria should include a measurable command "
-                    "(e.g., 'pytest X passes', 'grep -c pattern file returns 1')."
+            message="Acceptance criteria must be a specific shell command with a target. "
+                    "Include file paths: 'pytest tests/unit/test_config.py passes', "
+                    "'grep -c \"class Foo\" src/foo.py returns 1', "
+                    "'test -f src/foo.py && python3 -c \"from foo import Foo\" exits 0'"
         ))
 
     return errors

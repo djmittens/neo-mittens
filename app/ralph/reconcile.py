@@ -247,15 +247,18 @@ def _attach_stage_telemetry(
     # Split cost/tokens across tasks when stage handles multiple
     count = len(task_ids)
     meta: dict[str, Any] = {}
-    for key in ("cost", "tokens_in", "tokens_out", "iterations"):
+    for key in ("cost", "tokens_in", "tokens_cached", "tokens_out", "iterations"):
         val = stage_metrics.get(key)
         if val:
             meta[key] = round(val / count, 6) if key == "cost" else val // count
 
-    # Model is the same for all tasks
+    # Model and run_id are the same for all tasks (not split)
     model = stage_metrics.get("model", "")
     if model:
         meta["model"] = model
+    run_id = stage_metrics.get("run_id", "")
+    if run_id:
+        meta["run_id"] = run_id
 
     for tid in task_ids:
         try:
@@ -320,8 +323,8 @@ def reconcile_build(
             try:
                 meta = {
                     k: v for k, v in stage_metrics.items()
-                    if k in ("cost", "tokens_in", "tokens_out",
-                             "iterations", "model")
+                    if k in ("cost", "tokens_in", "tokens_cached",
+                             "tokens_out", "iterations", "model", "run_id")
                 }
                 update: dict[str, Any] = {"meta": meta}
                 update["labels"] = ["stage:build"]
@@ -616,12 +619,27 @@ def reconcile_plan(
         result.ok = False
         return result
 
-    # Inject spec name into all new tasks
+    # Validate and filter tasks before adding.
+    # PLAN runs on the expensive reasoning model — bad tasks waste
+    # downstream BUILD and VERIFY calls. Strict validation here ensures
+    # every task has targeted acceptance criteria that the pre-check
+    # harness can auto-execute, avoiding expensive VERIFY agent calls.
     tasks_to_add = []
     for task_data in raw_tasks:
         if not task_data.get("name"):
             result.errors.append("Task missing name field")
             continue
+
+        name = task_data.get("name", "")
+        notes = task_data.get("notes", "")
+        accept = task_data.get("accept", "")
+
+        vr = validate_task(name, notes, accept, is_modification=True, strict=True)
+        if not vr.valid:
+            reasons = "; ".join(e.message for e in vr.errors)
+            result.errors.append(f"PLAN task '{name}' rejected by validation: {reasons}")
+            continue
+
         task_data["spec"] = spec_name
         task_data.setdefault("assigned", "ralph")
         tasks_to_add.append(task_data)
@@ -706,19 +724,24 @@ def _reject_task(
     _increment_reject_count(tix, task_id)
 
 
+# Module-level reject counter for the current session.
+# Persists to tix meta so TQL queries can aggregate retry counts.
+# Reset per-process; the ConstructStateMachine's _retry_counts is
+# the authoritative source for escalation decisions.
+_reject_counts: dict[str, int] = {}
+
+
 def _increment_reject_count(tix: TixProtocol, task_id: str) -> None:
     """Increment retries on a task for pattern detection.
 
-    Writes to ``meta.retries`` in ticket_meta so TQL queries can
-    aggregate retry counts (e.g. ``sum meta.retries``).
+    Writes the accumulated count to ``meta.retries`` in ticket_meta
+    so TQL queries can aggregate retry counts (``sum meta.retries``).
     Best-effort: failure here does not affect reconciliation.
-
-    Note: The in-memory retry tracking in ConstructStateMachine is the
-    primary source for escalation decisions. This write is for
-    persistence and reporting only.
     """
+    current = _reject_counts.get(task_id, 0) + 1
+    _reject_counts[task_id] = current
     try:
-        tix.task_update(task_id, {"meta": {"retries": 1}})
+        tix.task_update(task_id, {"meta": {"retries": current}})
     except (TixError, Exception):
         pass
 

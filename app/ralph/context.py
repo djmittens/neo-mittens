@@ -18,6 +18,7 @@ class Metrics:
     total_cost: float = 0.0
     total_iterations: int = 0
     total_tokens_in: int = 0
+    total_tokens_cached: int = 0  # Cache reads (separate from input)
     total_tokens_out: int = 0
     failures: int = 0
     successes: int = 0
@@ -26,17 +27,27 @@ class Metrics:
     kills_loop: int = 0  # New: killed due to loop detection
     started_at: Optional[str] = None
     last_kill_reason: str = ""
-    last_kill_activity: str = ""
 
     # Progress tracking
     last_progress_time: float = 0.0  # Unix timestamp of last progress
     tasks_completed: int = 0
     commits_made: int = 0
 
+    # API call tracking (for Max plan quota management)
+    api_calls_remote: int = 0  # Calls to cloud providers (cost quota)
+    api_calls_local: int = 0  # Calls to local models (free)
+
+    # Validation retry tracking
+    validation_retries: int = 0
+
+    # Model/finish tracking from opencode step_finish events
+    last_model: str = ""  # Actual model that served the last request
+    last_finish_reason: str = ""  # "stop", "length", "tool_use"
+
     @property
     def tokens_used(self) -> int:
-        """Total tokens used (in + out)."""
-        return self.total_tokens_in + self.total_tokens_out
+        """Total tokens used (in + cached + out)."""
+        return self.total_tokens_in + self.total_tokens_cached + self.total_tokens_out
 
     @property
     def cost(self) -> float:
@@ -257,6 +268,7 @@ class SessionSummary:
     tasks_completed: int
     commits_made: int
     total_tokens_in: int
+    total_tokens_cached: int
     total_tokens_out: int
     total_cost: float
     failures: int
@@ -264,6 +276,8 @@ class SessionSummary:
     kills_timeout: int
     kills_context: int
     kills_loop: int
+    api_calls_remote: int
+    api_calls_local: int
     exit_reason: str  # "complete", "max_iterations", "interrupted", "loop_detected", etc.
     spec: str
     profile: str
@@ -279,10 +293,15 @@ class SessionSummary:
             "commits_made": self.commits_made,
             "tokens": {
                 "input": self.total_tokens_in,
+                "cached": self.total_tokens_cached,
                 "output": self.total_tokens_out,
-                "total": self.total_tokens_in + self.total_tokens_out,
+                "total": self.total_tokens_in + self.total_tokens_cached + self.total_tokens_out,
             },
             "cost": self.total_cost,
+            "api_calls": {
+                "remote": self.api_calls_remote,
+                "local": self.api_calls_local,
+            },
             "outcomes": {
                 "successes": self.successes,
                 "failures": self.failures,
@@ -327,6 +346,7 @@ class SessionSummary:
             tasks_completed=metrics.tasks_completed,
             commits_made=metrics.commits_made,
             total_tokens_in=metrics.total_tokens_in,
+            total_tokens_cached=metrics.total_tokens_cached,
             total_tokens_out=metrics.total_tokens_out,
             total_cost=metrics.total_cost,
             failures=metrics.failures,
@@ -334,6 +354,8 @@ class SessionSummary:
             kills_timeout=metrics.kills_timeout,
             kills_context=metrics.kills_context,
             kills_loop=metrics.kills_loop,
+            api_calls_remote=metrics.api_calls_remote,
+            api_calls_local=metrics.api_calls_local,
             exit_reason=exit_reason,
             spec=spec,
             profile=profile,

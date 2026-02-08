@@ -505,42 +505,6 @@ static void test_denormalized_fields(TIX_TEST_ARGS()) {
   TIX_PASS();
 }
 
-/* --- test: legacy desc field is still parsed --- */
-
-static void test_legacy_desc_field(TIX_TEST_ARGS()) {
-  TIX_TEST();
-
-  char tmpdir[256];
-  if (make_tmpdir(tmpdir, sizeof(tmpdir)) != 0) {
-    TIX_FAIL_MSG("mkdtemp failed");
-    return;
-  }
-
-  char db_path[512];
-  tix_db_t db;
-  if (setup_db(tmpdir, db_path, sizeof(db_path), &db) != 0) {
-    TIX_FAIL_MSG("setup_db failed");
-    rmrf(tmpdir);
-    return;
-  }
-
-  /* legacy issue with "desc" instead of "name" */
-  const char *content =
-    "{\"t\":\"issue\",\"id\":\"i-legacy01\",\"desc\":\"API returns 500\",\"s\":\"p\"}\n";
-
-  tix_db_replay_content(&db, content);
-
-  tix_ticket_t t;
-  tix_err_t err = tix_db_get_ticket(&db, "i-legacy01", &t);
-  ASSERT_OK(err);
-  ASSERT_STR_EQ(t.name, "API returns 500");
-  ASSERT_EQ(t.type, TIX_TICKET_ISSUE);
-
-  tix_db_close(&db);
-  rmrf(tmpdir);
-  TIX_PASS();
-}
-
 /* --- main --- */
 
 int main(void) {
@@ -557,7 +521,7 @@ int main(void) {
   tix_testsuite_add(&suite, "clear_tickets", test_clear_tickets);
   tix_testsuite_add(&suite, "replay_jsonl_file", test_replay_jsonl_file);
   tix_testsuite_add(&suite, "denormalized_fields", test_denormalized_fields);
-  tix_testsuite_add(&suite, "legacy_desc_field", test_legacy_desc_field);
+
 
   int result = tix_testsuite_run(&suite);
   tix_testsuite_print(&suite);

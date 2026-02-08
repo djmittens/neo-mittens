@@ -5,6 +5,8 @@ import pytest
 from unittest.mock import MagicMock, patch
 
 from ralph.reconcile import (
+    _attach_stage_telemetry,
+    _reject_counts,
     extract_structured_output,
     reconcile_build,
     reconcile_verify,
@@ -14,6 +16,14 @@ from ralph.reconcile import (
     ReconcileResult,
 )
 from ralph.tix import TixError
+
+
+@pytest.fixture(autouse=True)
+def _reset_reject_counts():
+    """Reset module-level _reject_counts between tests."""
+    _reject_counts.clear()
+    yield
+    _reject_counts.clear()
 
 
 @pytest.fixture
@@ -249,7 +259,20 @@ class TestReconcileDecompose:
 
 class TestReconcilePlan:
     def test_creates_tasks(self, mock_tix):
-        output = '[RALPH_OUTPUT]\n{"tasks": [{"name": "Task 1", "notes": "...", "accept": "..."}, {"name": "Task 2", "notes": "...", "accept": "..."}]}\n[/RALPH_OUTPUT]'
+        # Tasks must pass strict validation: notes >= 50 chars with file refs
+        # and line numbers, accept must be a targeted shell command
+        task1 = {
+            "name": "Extract config module",
+            "notes": "Source: src/config.py lines 1-50. Extract GlobalConfig class to separate module.",
+            "accept": "pytest tests/unit/test_config.py passes"
+        }
+        task2 = {
+            "name": "Add validation functions",
+            "notes": "Source: src/validation.py lines 10-80. Create validate_task and validate_issue functions.",
+            "accept": "test -f src/validation.py && python3 -c 'from validation import validate_task' exits 0"
+        }
+        import json
+        output = f'[RALPH_OUTPUT]\n{json.dumps({"tasks": [task1, task2]})}\n[/RALPH_OUTPUT]'
         result = reconcile_plan(mock_tix, output, "my-spec.md")
         assert result.ok
         assert len(result.tasks_added) == 2
@@ -257,6 +280,21 @@ class TestReconcilePlan:
         batch_call = mock_tix.task_batch_add.call_args[0][0]
         for task_data in batch_call:
             assert task_data["spec"] == "my-spec.md"
+
+    def test_rejects_vague_tasks(self, mock_tix):
+        """Tasks with vague acceptance criteria are rejected by strict validation."""
+        task = {
+            "name": "Fix the bug",
+            "notes": "...",
+            "accept": "make test"
+        }
+        import json
+        output = f'[RALPH_OUTPUT]\n{json.dumps({"tasks": [task]})}\n[/RALPH_OUTPUT]'
+        result = reconcile_plan(mock_tix, output, "my-spec.md")
+        # No tasks should be added
+        assert len(result.tasks_added) == 0
+        # Should have validation errors
+        assert any("rejected by validation" in e for e in result.errors)
 
 
 # =============================================================================
@@ -278,3 +316,198 @@ class TestReconcileResult:
         assert "2 tasks added" in r.summary
         assert "1 accepted" in r.summary
         assert "1 errors" in r.summary
+
+
+# =============================================================================
+# run_id telemetry tracking
+# =============================================================================
+
+
+class TestRunIdTelemetry:
+    """Verify run_id flows from stage_metrics into tix task meta."""
+
+    def test_build_attaches_run_id(self, mock_tix):
+        """reconcile_build writes run_id to task meta when present."""
+        output = '[RALPH_OUTPUT]\n{"verdict": "done"}\n[/RALPH_OUTPUT]'
+        metrics = {
+            "cost": 0.5, "tokens_in": 1000, "tokens_out": 200,
+            "iterations": 1, "model": "opus", "run_id": "20260208_120000_abc123",
+        }
+        result = reconcile_build(mock_tix, output, "t-abc", stage_metrics=metrics)
+        assert result.ok
+        # task_update should include run_id in meta
+        mock_tix.task_update.assert_called_once()
+        call_args = mock_tix.task_update.call_args[0]
+        assert call_args[0] == "t-abc"
+        meta = call_args[1]["meta"]
+        assert meta["run_id"] == "20260208_120000_abc123"
+
+    def test_build_without_run_id(self, mock_tix):
+        """reconcile_build works fine when run_id is absent."""
+        output = '[RALPH_OUTPUT]\n{"verdict": "done"}\n[/RALPH_OUTPUT]'
+        metrics = {
+            "cost": 0.5, "tokens_in": 1000, "tokens_out": 200,
+            "iterations": 1, "model": "opus",
+        }
+        result = reconcile_build(mock_tix, output, "t-abc", stage_metrics=metrics)
+        assert result.ok
+        call_args = mock_tix.task_update.call_args[0]
+        meta = call_args[1]["meta"]
+        assert "run_id" not in meta
+
+    def test_attach_stage_telemetry_includes_run_id(self, mock_tix):
+        """_attach_stage_telemetry writes run_id to each task's meta."""
+        metrics = {
+            "cost": 1.0, "tokens_in": 2000, "tokens_out": 500,
+            "iterations": 2, "model": "sonnet",
+            "run_id": "20260208_130000_def456",
+        }
+        _attach_stage_telemetry(mock_tix, ["t-1", "t-2"], metrics, "verify")
+        assert mock_tix.task_update.call_count == 2
+        for call in mock_tix.task_update.call_args_list:
+            meta = call[0][1]["meta"]
+            assert meta["run_id"] == "20260208_130000_def456"
+
+    def test_attach_stage_telemetry_without_run_id(self, mock_tix):
+        """_attach_stage_telemetry omits run_id when not in metrics."""
+        metrics = {
+            "cost": 1.0, "tokens_in": 2000, "tokens_out": 500,
+            "iterations": 2, "model": "sonnet",
+        }
+        _attach_stage_telemetry(mock_tix, ["t-1"], metrics, "build")
+        meta = mock_tix.task_update.call_args[0][1]["meta"]
+        assert "run_id" not in meta
+
+    def test_attach_stage_telemetry_empty_task_list(self, mock_tix):
+        """_attach_stage_telemetry is a no-op with empty task list."""
+        metrics = {"cost": 1.0, "run_id": "20260208_140000_ghi789"}
+        _attach_stage_telemetry(mock_tix, [], metrics, "verify")
+        mock_tix.task_update.assert_not_called()
+
+    def test_verify_attaches_run_id_to_verified_tasks(self, mock_tix):
+        """reconcile_verify passes run_id through to verified tasks."""
+        mock_tix.task_update.return_value = {}
+        output = '[RALPH_OUTPUT]\n{"results": [{"task_id": "t-1", "passed": true}]}\n[/RALPH_OUTPUT]'
+        metrics = {
+            "cost": 0.3, "tokens_in": 500, "tokens_out": 100,
+            "iterations": 1, "model": "opus",
+            "run_id": "20260208_150000_jkl012",
+        }
+        result = reconcile_verify(mock_tix, output, stage_metrics=metrics)
+        assert result.ok
+        # Find the _attach_stage_telemetry call (not the retries call)
+        update_calls = mock_tix.task_update.call_args_list
+        telemetry_call = [c for c in update_calls if "run_id" in c[0][1].get("meta", {})]
+        assert len(telemetry_call) == 1
+        assert telemetry_call[0][0][1]["meta"]["run_id"] == "20260208_150000_jkl012"
+
+
+# =============================================================================
+# _reject_counts accumulation
+# =============================================================================
+
+
+class TestRejectCounts:
+    """Verify _reject_counts module-level dict accumulates correctly."""
+
+    def test_single_rejection_sets_retries_to_one(self, mock_tix):
+        """First rejection of a task writes retries=1 to meta."""
+        mock_tix.task_update.return_value = {}
+        output = '[RALPH_OUTPUT]\n{"results": [{"task_id": "t-1", "passed": false, "reason": "test fails"}]}\n[/RALPH_OUTPUT]'
+        reconcile_verify(mock_tix, output)
+        # _reject_counts should have t-1 -> 1
+        assert _reject_counts.get("t-1") == 1
+        # task_update for retries should write 1
+        retries_calls = [
+            c for c in mock_tix.task_update.call_args_list
+            if c[0][1].get("meta", {}).get("retries") is not None
+        ]
+        assert len(retries_calls) == 1
+        assert retries_calls[0][0][1]["meta"]["retries"] == 1
+
+    def test_double_rejection_increments_retries(self, mock_tix):
+        """Rejecting the same task twice writes retries=2 on second call."""
+        mock_tix.task_update.return_value = {}
+        output = '[RALPH_OUTPUT]\n{"results": [{"task_id": "t-1", "passed": false, "reason": "still fails"}]}\n[/RALPH_OUTPUT]'
+        reconcile_verify(mock_tix, output)
+        reconcile_verify(mock_tix, output)
+        assert _reject_counts["t-1"] == 2
+        # Find the second retries call for t-1
+        retries_calls = [
+            c for c in mock_tix.task_update.call_args_list
+            if c[0][0] == "t-1" and c[0][1].get("meta", {}).get("retries") is not None
+        ]
+        assert retries_calls[-1][0][1]["meta"]["retries"] == 2
+
+    def test_different_tasks_track_independently(self, mock_tix):
+        """Different task IDs have independent reject counters."""
+        mock_tix.task_update.return_value = {}
+        output_a = '[RALPH_OUTPUT]\n{"results": [{"task_id": "t-a", "passed": false, "reason": "fail"}]}\n[/RALPH_OUTPUT]'
+        output_b = '[RALPH_OUTPUT]\n{"results": [{"task_id": "t-b", "passed": false, "reason": "fail"}]}\n[/RALPH_OUTPUT]'
+        reconcile_verify(mock_tix, output_a)
+        reconcile_verify(mock_tix, output_a)
+        reconcile_verify(mock_tix, output_b)
+        assert _reject_counts["t-a"] == 2
+        assert _reject_counts["t-b"] == 1
+
+    def test_reset_fixture_clears_counts(self, mock_tix):
+        """Verify the autouse fixture resets _reject_counts per test."""
+        # _reject_counts should be empty at start of each test
+        assert len(_reject_counts) == 0
+
+
+# =============================================================================
+# tokens_cached in telemetry
+# =============================================================================
+
+
+class TestTokensCachedTelemetry:
+    """Verify tokens_cached flows through telemetry attachment."""
+
+    def test_attach_stage_telemetry_includes_tokens_cached(self, mock_tix):
+        """_attach_stage_telemetry splits tokens_cached across tasks."""
+        metrics = {
+            "cost": 1.0, "tokens_in": 2000, "tokens_cached": 800,
+            "tokens_out": 500, "iterations": 2, "model": "opus",
+        }
+        _attach_stage_telemetry(mock_tix, ["t-1", "t-2"], metrics, "verify")
+        assert mock_tix.task_update.call_count == 2
+        for call in mock_tix.task_update.call_args_list:
+            meta = call[0][1]["meta"]
+            assert meta["tokens_cached"] == 400  # 800 // 2
+
+    def test_attach_stage_telemetry_omits_zero_tokens_cached(self, mock_tix):
+        """_attach_stage_telemetry omits tokens_cached when 0."""
+        metrics = {
+            "cost": 1.0, "tokens_in": 2000, "tokens_cached": 0,
+            "tokens_out": 500, "iterations": 2,
+        }
+        _attach_stage_telemetry(mock_tix, ["t-1"], metrics, "build")
+        meta = mock_tix.task_update.call_args[0][1]["meta"]
+        assert "tokens_cached" not in meta
+
+    def test_build_inline_includes_tokens_cached(self, mock_tix):
+        """reconcile_build inline telemetry includes tokens_cached."""
+        output = '[RALPH_OUTPUT]\n{"verdict": "done"}\n[/RALPH_OUTPUT]'
+        metrics = {
+            "cost": 0.5, "tokens_in": 1000, "tokens_cached": 300,
+            "tokens_out": 200, "iterations": 1, "model": "opus",
+        }
+        result = reconcile_build(mock_tix, output, "t-abc", stage_metrics=metrics)
+        assert result.ok
+        call_args = mock_tix.task_update.call_args[0]
+        meta = call_args[1]["meta"]
+        assert meta["tokens_cached"] == 300
+
+    def test_build_inline_omits_missing_tokens_cached(self, mock_tix):
+        """reconcile_build inline telemetry omits tokens_cached when absent."""
+        output = '[RALPH_OUTPUT]\n{"verdict": "done"}\n[/RALPH_OUTPUT]'
+        metrics = {
+            "cost": 0.5, "tokens_in": 1000, "tokens_out": 200,
+            "iterations": 1, "model": "opus",
+        }
+        result = reconcile_build(mock_tix, output, "t-abc", stage_metrics=metrics)
+        assert result.ok
+        call_args = mock_tix.task_update.call_args[0]
+        meta = call_args[1]["meta"]
+        assert "tokens_cached" not in meta

@@ -31,6 +31,10 @@ class TestGlobalConfigDefaults:
         assert config.timeout_ms == 900_000
         assert config.max_failures == 3
         assert config.max_iterations == 50
+        assert config.max_tokens == 0
+        assert config.max_wall_time_s == 3600
+        assert config.max_api_calls == 0
+        assert config.max_issues_per_spec == 10
         assert config.max_decompose_depth == 3
         assert config.commit_prefix == "ralph:"
         assert config.recent_commits_display == 3
@@ -372,3 +376,122 @@ model = "test-model"
         config = get_global_config()
         assert config.model == "test-model"
         assert config.profile == "test_profile"
+
+
+class TestIsLocalModel:
+    """Tests for GlobalConfig.is_local_model method."""
+
+    def test_vllm_prefix_is_local(self):
+        """Test vllm: prefix detected as local."""
+        cfg = GlobalConfig()
+        assert cfg.is_local_model("vllm:devstral-small-2") is True
+
+    def test_ollama_prefix_is_local(self):
+        """Test ollama: prefix detected as local."""
+        cfg = GlobalConfig()
+        assert cfg.is_local_model("ollama:llama3") is True
+
+    def test_local_prefix_is_local(self):
+        """Test local: prefix detected as local."""
+        cfg = GlobalConfig()
+        assert cfg.is_local_model("local:my-model") is True
+
+    def test_lmstudio_prefix_is_local(self):
+        """Test lmstudio: prefix detected as local."""
+        cfg = GlobalConfig()
+        assert cfg.is_local_model("lmstudio:my-model") is True
+
+    def test_localhost_url_is_local(self):
+        """Test model with localhost in name detected as local."""
+        cfg = GlobalConfig()
+        assert cfg.is_local_model("http://localhost:8000/v1") is True
+
+    def test_loopback_ip_is_local(self):
+        """Test model with 127.0.0.1 detected as local."""
+        cfg = GlobalConfig()
+        assert cfg.is_local_model("http://127.0.0.1:8000") is True
+
+    def test_anthropic_model_not_local(self):
+        """Test Anthropic cloud model is not local."""
+        cfg = GlobalConfig()
+        assert cfg.is_local_model("anthropic:claude-opus-4-20250514") is False
+
+    def test_empty_string_not_local(self):
+        """Test empty string is not local."""
+        cfg = GlobalConfig()
+        assert cfg.is_local_model("") is False
+
+    def test_case_insensitive(self):
+        """Test detection is case-insensitive."""
+        cfg = GlobalConfig()
+        assert cfg.is_local_model("VLLM:Model") is True
+        assert cfg.is_local_model("OLLAMA:Model") is True
+
+
+class TestIsStageLocal:
+    """Tests for GlobalConfig.is_stage_local method."""
+
+    def test_stage_with_local_model(self):
+        """Test stage using local model is detected."""
+        cfg = GlobalConfig(model="vllm:devstral")
+        assert cfg.is_stage_local("build") is True
+
+    def test_stage_with_cloud_model(self):
+        """Test stage using cloud model is not local."""
+        cfg = GlobalConfig(model="anthropic:claude-opus-4-20250514")
+        assert cfg.is_stage_local("build") is False
+
+    def test_stage_override_local(self):
+        """Test per-stage override to local model."""
+        cfg = GlobalConfig(
+            model="anthropic:claude-opus-4-20250514",
+            model_build="vllm:devstral",
+        )
+        assert cfg.is_stage_local("build") is True
+        assert cfg.is_stage_local("verify") is False
+
+    def test_stage_override_cloud(self):
+        """Test per-stage override to cloud model."""
+        cfg = GlobalConfig(
+            model="vllm:devstral",
+            model_verify="anthropic:claude-sonnet-4-20250514",
+        )
+        assert cfg.is_stage_local("build") is True
+        assert cfg.is_stage_local("verify") is False
+
+
+class TestGuardConfigFields:
+    """Tests for new guard-related config fields."""
+
+    def test_max_tokens_from_toml(self, tmp_path, monkeypatch):
+        """Test max_tokens loaded from TOML."""
+        config_dir = tmp_path / ".config" / "ralph"
+        config_dir.mkdir(parents=True)
+        (config_dir / "config.toml").write_text("max_tokens = 500000")
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+        monkeypatch.delenv("RALPH_PROFILE", raising=False)
+        monkeypatch.delenv("RALPH_ART_STYLE", raising=False)
+        cfg = GlobalConfig.load()
+        assert cfg.max_tokens == 500000
+
+    def test_max_wall_time_from_toml(self, tmp_path, monkeypatch):
+        """Test max_wall_time_s loaded from TOML."""
+        config_dir = tmp_path / ".config" / "ralph"
+        config_dir.mkdir(parents=True)
+        (config_dir / "config.toml").write_text("max_wall_time_s = 7200")
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+        monkeypatch.delenv("RALPH_PROFILE", raising=False)
+        monkeypatch.delenv("RALPH_ART_STYLE", raising=False)
+        cfg = GlobalConfig.load()
+        assert cfg.max_wall_time_s == 7200
+
+    def test_max_api_calls_from_toml(self, tmp_path, monkeypatch):
+        """Test max_api_calls loaded from TOML."""
+        config_dir = tmp_path / ".config" / "ralph"
+        config_dir.mkdir(parents=True)
+        (config_dir / "config.toml").write_text("max_api_calls = 100")
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+        monkeypatch.delenv("RALPH_PROFILE", raising=False)
+        monkeypatch.delenv("RALPH_ART_STYLE", raising=False)
+        cfg = GlobalConfig.load()
+        assert cfg.max_api_calls == 100

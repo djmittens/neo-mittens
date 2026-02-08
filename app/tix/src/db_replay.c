@@ -74,12 +74,6 @@ static void replay_one_line(tix_db_t *db, const char *line) {
     const char *name = tix_json_get_str(&obj, "name");
     if (name != NULL) { snprintf(ticket.name, TIX_MAX_NAME_LEN, "%s", name); }
 
-    /* legacy: "desc" is an alias for "name" on issues */
-    const char *desc = tix_json_get_str(&obj, "desc");
-    if (desc != NULL && ticket.name[0] == '\0') {
-      snprintf(ticket.name, TIX_MAX_NAME_LEN, "%s", desc);
-    }
-
     const char *s = tix_json_get_str(&obj, "s");
     ticket.status = status_from_jsonl(s);
 
@@ -184,31 +178,8 @@ static void replay_one_line(tix_db_t *db, const char *line) {
 
     tix_db_upsert_ticket(db, &ticket);
 
-    /* route metadata to ticket_meta table.
-       Supports both legacy inline keys (cost, model, etc.) and
-       new meta.* prefixed keys (from "meta":{...} sub-object). */
+    /* route metadata from "meta":{...} sub-object to ticket_meta table */
     if (ticket.id[0] != '\0') {
-      /* legacy inline telemetry keys */
-      static const char *LEGACY_NUM_KEYS[] = {
-        "cost", "tokens_in", "tokens_out", "iterations",
-        "retries", "kill_count", NULL
-      };
-      static const char *LEGACY_STR_KEYS[] = {
-        "model", NULL
-      };
-      for (int ki = 0; LEGACY_NUM_KEYS[ki] != NULL; ki++) {
-        double v = tix_json_get_double(&obj, LEGACY_NUM_KEYS[ki], 0.0);
-        if (v != 0.0) {
-          tix_db_set_ticket_meta_num(db, ticket.id, LEGACY_NUM_KEYS[ki], v);
-        }
-      }
-      for (int ki = 0; LEGACY_STR_KEYS[ki] != NULL; ki++) {
-        const char *v = tix_json_get_str(&obj, LEGACY_STR_KEYS[ki]);
-        if (v != NULL && v[0] != '\0') {
-          tix_db_set_ticket_meta_str(db, ticket.id, LEGACY_STR_KEYS[ki], v);
-        }
-      }
-      /* new meta.* prefixed keys (from "meta":{...} sub-object) */
       for (u32 fi = 0; fi < obj.field_count; fi++) {
         if (strncmp(obj.fields[fi].key, "meta.", 5) != 0) { continue; }
         const char *mkey = obj.fields[fi].key + 5; /* skip "meta." */

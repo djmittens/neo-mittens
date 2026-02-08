@@ -18,6 +18,7 @@ from typing import Optional, Sequence
 # Local imports
 from .commands.init import cmd_init
 from .commands.construct import cmd_construct
+from .commands.compare import cmd_compare
 from .commands.compact import cmd_compact
 from .commands.config_cmd import cmd_config
 from .commands.watch import cmd_watch
@@ -206,11 +207,25 @@ def _handle_plan(args) -> int:
 
 def _handle_construct(args) -> int:
     _maybe_select_profile(args)
-    config = _build_config(get_global_config())
+    global_cfg = get_global_config()
+
+    # CLI flags override config defaults for guard limits
+    if getattr(args, "max_tokens", 0):
+        global_cfg.max_tokens = args.max_tokens
+    if getattr(args, "max_wall_time", 0):
+        global_cfg.max_wall_time_s = args.max_wall_time
+    if getattr(args, "max_api_calls", 0):
+        global_cfg.max_api_calls = args.max_api_calls
+
+    config = _build_config(global_cfg)
     iterations = args.max_iterations or 0
     max_cost = getattr(args, "max_cost", 0.0) or 0.0
     max_failures = getattr(args, "max_failures", 3) or 3
     return cmd_construct(config, iterations, args, max_cost=max_cost, max_failures=max_failures)
+
+
+def _handle_compare(args) -> int:
+    return cmd_compare(get_global_config(), args)
 
 
 def _handle_query(args) -> int:
@@ -385,6 +400,7 @@ _COMMAND_HANDLERS = {
     "stream": _handle_stream,
     "plan": _handle_plan,
     "construct": _handle_construct,
+    "compare": _handle_compare,
     "query": _handle_query,
     "task": _handle_task,
     "issue": _handle_issue,
@@ -459,6 +475,26 @@ def _add_construct_parser(subparsers) -> None:
         "-p",
         help="Cost profile: budget, balanced, hybrid, cost_smart, quality",
     )
+    p.add_argument(
+        "--max-tokens", type=int, default=0,
+        help="Stop when total tokens exceed N (0 = unlimited)",
+    )
+    p.add_argument(
+        "--max-wall-time", type=int, default=0,
+        help="Stop after N seconds of wall time (0 = use config default)",
+    )
+    p.add_argument(
+        "--max-api-calls", type=int, default=0,
+        help="Stop after N remote API calls (0 = unlimited, local is free)",
+    )
+
+
+def _add_compare_parser(subparsers) -> None:
+    """Add compare subcommand for A/B run comparison."""
+    p = subparsers.add_parser("compare", help="Compare runs from the ledger")
+    p.add_argument("--spec", help="Filter by spec name")
+    p.add_argument("--profile-filter", help="Filter by profile name")
+    p.add_argument("--json", action="store_true", help="Output as JSON")
 
 
 def _add_entity_parsers(subparsers) -> None:
@@ -525,6 +561,7 @@ def _create_parser() -> argparse.ArgumentParser:
     )
     _add_simple_parsers(subparsers)
     _add_construct_parser(subparsers)
+    _add_compare_parser(subparsers)
     _add_entity_parsers(subparsers)
     return parser
 

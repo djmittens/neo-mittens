@@ -5,6 +5,7 @@ import os
 import subprocess
 import sys
 import threading
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Iterator, Optional, Tuple
 
@@ -31,6 +32,16 @@ class Colors:
     BRIGHT_CYAN = '\033[96m'
 
 
+def _opencode_env() -> dict:
+    """Build environment for opencode subprocesses."""
+    env = os.environ.copy()
+    env["XDG_STATE_HOME"] = "/tmp/ralph-opencode-state"
+    env["OPENCODE_PERMISSION"] = json.dumps(
+        {"external_directory": "deny", "doom_loop": "deny"}
+    )
+    return env
+
+
 def spawn_opencode(
     prompt: str,
     cwd: Path,
@@ -48,12 +59,6 @@ def spawn_opencode(
     Returns:
         subprocess.Popen instance with stdout=PIPE for reading output
     """
-    opencode_env = os.environ.copy()
-    opencode_env["XDG_STATE_HOME"] = "/tmp/ralph-opencode-state"
-
-    permission_config = {"external_directory": "deny", "doom_loop": "deny"}
-    opencode_env["OPENCODE_PERMISSION"] = json.dumps(permission_config)
-
     cmd = ["opencode", "run", "--format", "json"]
     if model:
         cmd.extend(["--model", model])
@@ -65,7 +70,42 @@ def spawn_opencode(
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
         cwd=cwd,
-        env=opencode_env,
+        env=_opencode_env(),
+    )
+
+
+def spawn_opencode_continue(
+    session_id: str,
+    message: str,
+    cwd: Path,
+    model: Optional[str] = None,
+) -> subprocess.Popen:
+    """Continue an existing opencode session with a follow-up message.
+
+    Reuses the session's cached context (system prompt, tool definitions,
+    previous conversation) so follow-up messages only pay for new tokens.
+
+    Args:
+        session_id: Session ID from a previous opencode run.
+        message: Follow-up message to send.
+        cwd: Working directory for the process.
+        model: Optional model override.
+
+    Returns:
+        subprocess.Popen instance with stdout=PIPE for reading output.
+    """
+    cmd = ["opencode", "run", "--format", "json", "-s", session_id]
+    if model:
+        cmd.extend(["--model", model])
+    cmd.append(message)
+
+    return subprocess.Popen(
+        cmd,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        cwd=cwd,
+        env=_opencode_env(),
     )
 
 
@@ -86,45 +126,6 @@ def parse_json_stream(output: str) -> Iterator[dict]:
             yield json.loads(line)
         except json.JSONDecodeError:
             continue
-
-
-def extract_metrics(output: str) -> Metrics:
-    """Extract cost and token metrics from opencode JSON output.
-
-    Parses step_finish events to accumulate cost and token usage.
-
-    Args:
-        output: Raw output string from opencode (newline-delimited JSON)
-
-    Returns:
-        Metrics instance with accumulated cost and token counts
-    """
-    metrics = Metrics()
-
-    for event in parse_json_stream(output):
-        event_type = event.get("type", "")
-
-        if event_type == "step_finish":
-            part = event.get("part", {})
-
-            cost = part.get("cost", 0)
-            if isinstance(cost, (int, float)):
-                metrics.total_cost += cost
-
-            tokens = part.get("tokens", {})
-            input_tokens = tokens.get("input", 0)
-            output_tokens = tokens.get("output", 0)
-            cache = tokens.get("cache", {})
-            cache_read = cache.get("read", 0)
-
-            if isinstance(input_tokens, int):
-                metrics.total_tokens_in += input_tokens + cache_read
-            if isinstance(output_tokens, int):
-                metrics.total_tokens_out += output_tokens
-
-            metrics.total_iterations += 1
-
-    return metrics
 
 
 def _format_tool_output(tool: str, args: dict, title: str, output: str) -> None:
@@ -210,52 +211,82 @@ def _process_event(event: dict, metrics: Metrics) -> None:
         if isinstance(cost, (int, float)):
             metrics.total_cost += cost
         if isinstance(input_tokens, int):
-            metrics.total_tokens_in += input_tokens + cache_read
+            metrics.total_tokens_in += input_tokens
+        if isinstance(cache_read, int) and cache_read > 0:
+            metrics.total_tokens_cached += cache_read
         if isinstance(output_tokens, int):
             metrics.total_tokens_out += output_tokens
         metrics.total_iterations += 1
+
+        # Capture model and finish reason for telemetry
+        model = part.get("model", "")
+        if isinstance(model, str) and model:
+            metrics.last_model = model
+        finish_reason = part.get("finish_reason", "")
+        if isinstance(finish_reason, str) and finish_reason:
+            metrics.last_finish_reason = finish_reason
         
+        cache_str = f" ({cache_read} cached)" if cache_read > 0 else ""
         print(f"\n{C.BRIGHT_BLACK}---{C.RESET}")
-        print(f"Cost: ${cost:.4f} | Tokens: {context_size}in/{output_tokens}out")
+        print(f"Cost: ${cost:.4f} | Tokens: {context_size}in{cache_str}/{output_tokens}out")
         sys.stdout.flush()
+
+
+@dataclass
+class SessionResult:
+    """Result from an opencode session run."""
+
+    return_code: int
+    raw_output: str
+    timed_out: bool
+    metrics: Metrics
+    session_id: Optional[str] = None
 
 
 def stream_and_collect(
     proc: subprocess.Popen,
     timeout_seconds: int,
     print_output: bool = True,
-) -> Tuple[int, str, bool, Metrics]:
+) -> SessionResult:
     """Stream output from opencode process while collecting metrics.
-    
+
     Reads stdout line-by-line, parses JSON events, prints human-readable
     progress in real-time, and accumulates metrics.
-    
+
     Args:
         proc: The opencode subprocess with stdout=PIPE
         timeout_seconds: Maximum time to wait for process completion
         print_output: Whether to print human-readable output (default True)
-    
+
     Returns:
-        Tuple of (return_code, raw_output, timed_out, metrics)
+        SessionResult with return code, output, metrics, and session ID.
     """
     metrics = Metrics()
     output_lines: list[str] = []
     timed_out = False
-    
+    session_id: Optional[str] = None
+
     def read_output():
-        nonlocal timed_out
+        nonlocal timed_out, session_id
         if proc.stdout is None:
             return
         try:
             for line_bytes in proc.stdout:
                 line = line_bytes.decode("utf-8", errors="replace").rstrip()
                 output_lines.append(line)
-                
+
                 if not line:
                     continue
-                
+
                 try:
                     event = json.loads(line)
+
+                    # Capture session ID from first event
+                    if session_id is None:
+                        sid = event.get("sessionID", "")
+                        if sid:
+                            session_id = sid
+
                     if print_output:
                         _process_event(event, metrics)
                     else:
@@ -268,24 +299,33 @@ def stream_and_collect(
                             output_tokens = tokens.get("output", 0)
                             cache = tokens.get("cache", {})
                             cache_read = cache.get("read", 0)
-                            
+
                             if isinstance(cost, (int, float)):
                                 metrics.total_cost += cost
                             if isinstance(input_tokens, int):
-                                metrics.total_tokens_in += input_tokens + cache_read
+                                metrics.total_tokens_in += input_tokens
+                            if isinstance(cache_read, int) and cache_read > 0:
+                                metrics.total_tokens_cached += cache_read
                             if isinstance(output_tokens, int):
                                 metrics.total_tokens_out += output_tokens
                             metrics.total_iterations += 1
+
+                            model = part.get("model", "")
+                            if isinstance(model, str) and model:
+                                metrics.last_model = model
+                            finish_reason = part.get("finish_reason", "")
+                            if isinstance(finish_reason, str) and finish_reason:
+                                metrics.last_finish_reason = finish_reason
                 except json.JSONDecodeError:
                     if print_output:
                         print(f"{Colors.RED}{line}{Colors.RESET}", file=sys.stderr)
                         sys.stderr.flush()
         except Exception:
             pass
-    
+
     reader_thread = threading.Thread(target=read_output, daemon=True)
     reader_thread.start()
-    
+
     try:
         reader_thread.join(timeout=timeout_seconds)
         if reader_thread.is_alive():
@@ -298,6 +338,12 @@ def stream_and_collect(
         proc.kill()
         proc.wait()
         timed_out = True
-    
+
     raw_output = "\n".join(output_lines)
-    return proc.returncode if proc.returncode is not None else -1, raw_output, timed_out, metrics
+    return SessionResult(
+        return_code=proc.returncode if proc.returncode is not None else -1,
+        raw_output=raw_output,
+        timed_out=timed_out,
+        metrics=metrics,
+        session_id=session_id,
+    )

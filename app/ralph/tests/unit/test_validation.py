@@ -12,6 +12,9 @@ from ralph.validation import (
     ValidationError,
     MIN_NOTES_LENGTH,
     MIN_ACCEPT_LENGTH,
+    _is_vague_acceptance,
+    _is_untargeted_command,
+    _has_measurable_command,
 )
 
 
@@ -48,6 +51,170 @@ class TestValidateTaskNotes:
         assert len(errors) == 0
 
 
+class TestIsVagueAcceptance:
+    """Tests for _is_vague_acceptance function."""
+
+    def test_works_correctly(self):
+        assert _is_vague_acceptance("works correctly") is True
+
+    def test_is_implemented(self):
+        assert _is_vague_acceptance("is implemented") is True
+
+    def test_should_work(self):
+        assert _is_vague_acceptance("should work") is True
+
+    def test_functions_properly(self):
+        assert _is_vague_acceptance("functions properly") is True
+
+    def test_tests_pass_bare(self):
+        assert _is_vague_acceptance("tests pass") is True
+
+    def test_all_tests_pass(self):
+        assert _is_vague_acceptance("all tests pass") is True
+
+    def test_builds_successfully(self):
+        assert _is_vague_acceptance("builds successfully") is True
+
+    def test_compiles_without_errors(self):
+        assert _is_vague_acceptance("compiles without errors") is True
+
+    def test_no_errors(self):
+        assert _is_vague_acceptance("no errors") is True
+
+    def test_everything_works(self):
+        assert _is_vague_acceptance("everything works") is True
+
+    def test_specific_command_not_vague(self):
+        assert _is_vague_acceptance("pytest tests/unit/test_foo.py passes") is False
+
+    def test_grep_command_not_vague(self):
+        assert _is_vague_acceptance("grep -c 'class Foo' src/foo.py returns 1") is False
+
+
+class TestIsUntargetedCommand:
+    """Tests for _is_untargeted_command function."""
+
+    # These should all be rejected as untargeted
+    def test_bare_make(self):
+        assert _is_untargeted_command("make") is True
+
+    def test_make_test(self):
+        assert _is_untargeted_command("make test") is True
+
+    def test_make_all(self):
+        assert _is_untargeted_command("make all") is True
+
+    def test_make_check(self):
+        assert _is_untargeted_command("make check") is True
+
+    def test_make_build(self):
+        assert _is_untargeted_command("make build") is True
+
+    def test_make_lint(self):
+        assert _is_untargeted_command("make lint") is True
+
+    def test_bare_pytest(self):
+        assert _is_untargeted_command("pytest") is True
+
+    def test_pytest_with_only_flags(self):
+        assert _is_untargeted_command("pytest -v") is True
+
+    def test_pytest_verbose_flag(self):
+        assert _is_untargeted_command("pytest --verbose") is True
+
+    def test_bare_npm_test(self):
+        assert _is_untargeted_command("npm test") is True
+
+    def test_bare_yarn_test(self):
+        assert _is_untargeted_command("yarn test") is True
+
+    def test_npm_run_test(self):
+        assert _is_untargeted_command("npm run test") is True
+
+    def test_bare_cargo_test(self):
+        assert _is_untargeted_command("cargo test") is True
+
+    def test_go_test_all(self):
+        assert _is_untargeted_command("go test ./...") is True
+
+    # These should be accepted as targeted
+    def test_pytest_with_path(self):
+        assert _is_untargeted_command("pytest tests/unit/test_foo.py") is False
+
+    def test_pytest_with_path_and_flags(self):
+        assert _is_untargeted_command("pytest tests/unit/test_foo.py -v") is False
+
+    def test_make_with_specific_target(self):
+        assert _is_untargeted_command("make test-unit TEST=test_config") is False
+
+    def test_npm_run_specific_script(self):
+        assert _is_untargeted_command("npm run test:unit -- --path foo") is False
+
+    def test_cargo_test_specific(self):
+        assert _is_untargeted_command("cargo test test_config") is False
+
+
+class TestHasMeasurableCommand:
+    """Tests for _has_measurable_command function."""
+
+    # These should pass - specific and targeted
+    def test_pytest_with_path(self):
+        assert _has_measurable_command("pytest tests/unit/test_foo.py passes") is True
+
+    def test_python_c_import(self):
+        assert _has_measurable_command("python -c 'from foo import bar' exits 0") is True
+
+    def test_python3_c_import(self):
+        assert _has_measurable_command('python3 -c "from ralph.config import GlobalConfig"') is True
+
+    def test_python_m_module(self):
+        assert _has_measurable_command("python -m pytest tests/test_foo.py") is True
+
+    def test_grep_with_file(self):
+        assert _has_measurable_command("grep -c 'pattern' file.py returns 1") is True
+
+    def test_test_f_file(self):
+        assert _has_measurable_command("test -f app/ralph/foo.py") is True
+
+    def test_test_d_dir(self):
+        assert _has_measurable_command("test -d app/ralph/stages") is True
+
+    def test_compound_with_file_ref(self):
+        assert _has_measurable_command(
+            "test -f app/ralph/foo.py && python3 -c 'from ralph.foo import Bar'"
+        ) is True
+
+    def test_script_execution(self):
+        assert _has_measurable_command("./run_test.sh") is True
+
+    def test_bash_script(self):
+        assert _has_measurable_command("bash scripts/verify.sh") is True
+
+    def test_pipe_with_file_ref(self):
+        assert _has_measurable_command("cat src/foo.py | grep -c 'class Foo'") is True
+
+    def test_exits_0_with_file_ref(self):
+        assert _has_measurable_command(
+            "python3 -c 'import ralph.config' exits 0"
+        ) is True
+
+    # These should fail - not specific enough
+    def test_bare_pytest_not_measurable(self):
+        assert _has_measurable_command("pytest") is False
+
+    def test_bare_make_not_measurable(self):
+        assert _has_measurable_command("make test") is False
+
+    def test_prose_not_measurable(self):
+        assert _has_measurable_command("the function works correctly") is False
+
+    def test_vague_tests_pass_not_measurable(self):
+        assert _has_measurable_command("all tests pass") is False
+
+    def test_npm_test_not_measurable(self):
+        assert _has_measurable_command("npm test") is False
+
+
 class TestValidateAcceptanceCriteria:
     """Tests for validate_acceptance_criteria function."""
 
@@ -68,11 +235,23 @@ class TestValidateAcceptanceCriteria:
         errors = validate_acceptance_criteria("is implemented")
         assert any(e.code == "ACCEPT_VAGUE" for e in errors)
 
+    def test_untargeted_pytest_returns_error(self):
+        errors = validate_acceptance_criteria("pytest -v")
+        assert any(e.code == "ACCEPT_UNTARGETED" for e in errors)
+
+    def test_untargeted_make_test_returns_error(self):
+        errors = validate_acceptance_criteria("make test")
+        assert any(e.code == "ACCEPT_UNTARGETED" for e in errors)
+
+    def test_untargeted_npm_test_returns_error(self):
+        errors = validate_acceptance_criteria("npm test")
+        assert any(e.code == "ACCEPT_UNTARGETED" for e in errors)
+
     def test_accept_without_command_returns_error(self):
         errors = validate_acceptance_criteria("the feature should work as expected by users")
         assert any(e.code == "ACCEPT_NOT_MEASURABLE" for e in errors)
 
-    def test_accept_with_pytest_passes(self):
+    def test_accept_with_targeted_pytest_passes(self):
         errors = validate_acceptance_criteria("pytest tests/unit/test_foo.py passes")
         assert len(errors) == 0
 
@@ -82,6 +261,16 @@ class TestValidateAcceptanceCriteria:
 
     def test_accept_with_grep_passes(self):
         errors = validate_acceptance_criteria("grep -c 'pattern' file.py returns 1")
+        assert len(errors) == 0
+
+    def test_accept_with_test_f_passes(self):
+        errors = validate_acceptance_criteria("test -f app/ralph/config.py")
+        assert len(errors) == 0
+
+    def test_accept_with_compound_command_passes(self):
+        errors = validate_acceptance_criteria(
+            "test -f app/ralph/foo.py && python3 -c 'from ralph.foo import Bar' exits 0"
+        )
         assert len(errors) == 0
 
 
@@ -103,7 +292,7 @@ class TestValidateTask:
         result = validate_task(
             name="Fix",
             notes="Source: src/foo.py lines 100-150. Fix the bug.",
-            accept="pytest passes",
+            accept="pytest tests/unit/test_foo.py passes",
             strict=True,
         )
         assert not result.valid
@@ -129,6 +318,28 @@ class TestValidateTask:
         assert not result.valid
         # Should have multiple errors
         assert len(result.errors) > 1
+
+    def test_strict_rejects_untargeted_pytest(self):
+        """Bare 'pytest' should fail strict validation."""
+        result = validate_task(
+            name="Add validation module",
+            notes="Source: src/validation.py lines 1-50. Create validation functions.",
+            accept="pytest",
+            strict=True,
+        )
+        assert not result.valid
+        assert any(e.code == "ACCEPT_UNTARGETED" for e in result.errors)
+
+    def test_strict_rejects_make_test(self):
+        """'make test' should fail strict validation."""
+        result = validate_task(
+            name="Add config module",
+            notes="Source: src/config.py lines 1-50. Create config loading functions.",
+            accept="make test",
+            strict=True,
+        )
+        assert not result.valid
+        assert any(e.code == "ACCEPT_UNTARGETED" for e in result.errors)
 
 
 class TestValidateIssue:

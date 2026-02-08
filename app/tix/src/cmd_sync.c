@@ -179,7 +179,7 @@ static i64 get_commit_timestamp(const char *hash) {
   return (i64)atol(buf);
 }
 
-/* Get file content at a specific commit, trying current path then legacy path */
+/* Get file content at a specific commit */
 static int get_snapshot(const char *hash, const char *rel_plan,
                         char *content, sz content_len) {
   char show_cmd[256];
@@ -187,16 +187,7 @@ static int get_snapshot(const char *hash, const char *rel_plan,
       "git show %s:%s 2>/dev/null", hash, rel_plan);
   if (n < 0 || (sz)n >= sizeof(show_cmd)) { return -1; }
 
-  int status = tix_git_run_cmd(show_cmd, content, content_len);
-  if (status != 0) {
-    /* try legacy plan.jsonl path */
-    n = snprintf(show_cmd, sizeof(show_cmd),
-        "git show %s:ralph/plan.jsonl 2>/dev/null", hash);
-    if (n < 0 || (sz)n >= sizeof(show_cmd)) { return -1; }
-    status = tix_git_run_cmd(show_cmd, content, content_len);
-  }
-
-  return status;
+  return tix_git_run_cmd(show_cmd, content, content_len);
 }
 
 tix_err_t tix_cmd_sync(tix_ctx_t *ctx, int argc, char **argv) {
@@ -249,26 +240,10 @@ tix_err_t tix_cmd_sync(tix_ctx_t *ctx, int argc, char **argv) {
         }
       }
     }
-    /* also check legacy plan.jsonl path */
-    if (strcmp(rel_plan, "ralph/plan.jsonl") != 0) {
-      n = snprintf(cmd, sizeof(cmd),
-          "git log --all --format=%%H --follow -- ralph/plan.jsonl");
-      if (n >= 0 && (sz)n < sizeof(cmd)) {
-        hash_count = collect_hashes(NULL, "ralph/plan.jsonl",
-                                    hashes, TIX_SYNC_MAX_COMMITS,
-                                    hash_count);
-      }
-    }
   } else {
     /* sync from specific branch (or current if branch is NULL) */
     hash_count = collect_hashes(branch, rel_plan,
                                 hashes, TIX_SYNC_MAX_COMMITS, 0);
-    /* also check legacy plan.jsonl path */
-    if (strcmp(rel_plan, "ralph/plan.jsonl") != 0) {
-      hash_count = collect_hashes(branch, "ralph/plan.jsonl",
-                                  hashes, TIX_SYNC_MAX_COMMITS,
-                                  hash_count);
-    }
   }
 
   TIX_INFO("sync: found %u commits touching plan.jsonl", hash_count);

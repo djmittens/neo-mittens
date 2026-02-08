@@ -59,6 +59,10 @@ class GlobalConfig:
     # Circuit breaker
     max_failures: int = 3
     max_iterations: int = 50
+    max_tokens: int = 0  # Total token budget (0 = unlimited)
+    max_wall_time_s: int = 3600  # Hard wall-clock limit in seconds (default 1hr)
+    max_api_calls: int = 0  # Max remote API calls (0 = unlimited, local calls free)
+    max_issues_per_spec: int = 10  # Cap INVESTIGATE explosion
 
     # Decomposition
     max_decompose_depth: int = 3
@@ -77,6 +81,7 @@ class GlobalConfig:
 
     # Progress tracking
     progress_check_interval: int = 600  # Warn if no progress in N seconds (0 = disabled)
+    progress_stall_abort_s: int = 1200  # Hard abort after N seconds no progress (0 = disabled)
 
     # Session logging
     emit_session_summary: bool = True  # Write JSON summary at end of session
@@ -95,6 +100,40 @@ class GlobalConfig:
 
     # Profile name (for display/debugging)
     profile: str = "default"
+
+    def is_local_model(self, model_name: str) -> bool:
+        """Check if a model is served locally (zero quota cost).
+
+        A model is considered local if its provider prefix is 'vllm'
+        or 'ollama' or 'local', or if it contains 'localhost' or '127.0.0.1'.
+
+        Args:
+            model_name: Model identifier (e.g. 'vllm:devstral-small-2').
+
+        Returns:
+            True if the model is local, False otherwise.
+        """
+        if not model_name:
+            return False
+        lower = model_name.lower()
+        local_prefixes = ("vllm:", "ollama:", "local:", "lmstudio:")
+        if any(lower.startswith(p) for p in local_prefixes):
+            return True
+        if "localhost" in lower or "127.0.0.1" in lower:
+            return True
+        return False
+
+    def is_stage_local(self, stage: str) -> bool:
+        """Check if a stage uses a local model.
+
+        Args:
+            stage: Stage name (build, verify, etc.).
+
+        Returns:
+            True if the stage's model is local.
+        """
+        model = self.model_for_stage(stage)
+        return self.is_local_model(model)
 
     def model_for_stage(self, stage: str) -> str:
         """Resolve the model to use for a given stage.

@@ -34,18 +34,6 @@ tix_err_t tix_ctx_init(tix_ctx_t *ctx) {
 
   struct stat st;
 
-  /* fallback: if configured plan file doesn't exist, try legacy path */
-  if (stat(ctx->plan_path, &st) != 0) {
-    char legacy_path[TIX_MAX_PATH_LEN];
-    n = snprintf(legacy_path, sizeof(legacy_path),
-                 "%s/ralph/plan.jsonl", ctx->repo_root);
-    if (n >= 0 && (sz)n < sizeof(legacy_path) &&
-        stat(legacy_path, &st) == 0) {
-      snprintf(ctx->plan_path, sizeof(ctx->plan_path), "%s", legacy_path);
-      TIX_INFO("using legacy plan file: %s", ctx->plan_path);
-    }
-  }
-
   char db_path[TIX_MAX_PATH_LEN];
   n = snprintf(db_path, sizeof(db_path), "%s/cache.db", ctx->tix_dir);
   if (n < 0 || (sz)n >= sizeof(db_path)) { return TIX_ERR_OVERFLOW; }

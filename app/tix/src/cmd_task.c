@@ -518,24 +518,7 @@ static tix_err_t task_update(tix_ctx_t *ctx, int argc, char **argv) {
   err = tix_db_upsert_ticket(&ctx->db, &ticket);
   if (err != TIX_OK) { return err; }
 
-  /* route metadata fields (legacy inline + meta.* prefixed) */
-  static const char *META_NUM_KEYS[] = {
-    "cost", "tokens_in", "tokens_out", "iterations",
-    "retries", "kill_count", NULL
-  };
-  static const char *META_STR_KEYS[] = { "model", NULL };
-  for (int ki = 0; META_NUM_KEYS[ki] != NULL; ki++) {
-    if (tix_json_has_key(&obj, META_NUM_KEYS[ki])) {
-      double mv = tix_json_get_double(&obj, META_NUM_KEYS[ki], 0.0);
-      tix_db_set_ticket_meta_num(&ctx->db, ticket.id, META_NUM_KEYS[ki], mv);
-    }
-  }
-  for (int ki = 0; META_STR_KEYS[ki] != NULL; ki++) {
-    const char *mv = tix_json_get_str(&obj, META_STR_KEYS[ki]);
-    if (mv != NULL && mv[0] != '\0') {
-      tix_db_set_ticket_meta_str(&ctx->db, ticket.id, META_STR_KEYS[ki], mv);
-    }
-  }
+  /* route metadata fields from meta.* prefixed keys */
   for (u32 fi = 0; fi < obj.field_count; fi++) {
     if (strncmp(obj.fields[fi].key, "meta.", 5) != 0) { continue; }
     const char *mkey = obj.fields[fi].key + 5;
