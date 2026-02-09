@@ -71,7 +71,7 @@ When done, output your result between markers as PLAIN TEXT (no code fences):
 - `new_tasks`: tasks for uncovered spec criteria (notes must have file paths, accept must be measurable)
 
 **CRITICAL: Do NOT wrap the [RALPH_OUTPUT] block in markdown code fences (``` or ~~~). Output it as plain text.**
-**You MUST output the [RALPH_OUTPUT] block as your final action before exiting.**
+**You MUST output the [RALPH_OUTPUT] block as your FINAL action. Do NOT just say "Task completed" — you MUST emit the JSON block above. The harness parses ONLY the [RALPH_OUTPUT] block. If you skip it, your verification results are lost.**
 """
 
 DEFAULT_PROMPT_INVESTIGATE = """# INVESTIGATE Stage
@@ -124,7 +124,7 @@ When done, output your result between markers as PLAIN TEXT (no code fences):
 - `out_of_scope`: issue IDs that don't need action
 
 **CRITICAL: Do NOT wrap the [RALPH_OUTPUT] block in markdown code fences (``` or ~~~). Output it as plain text.**
-**You MUST output the [RALPH_OUTPUT] block as your final action before exiting.**
+**You MUST output the [RALPH_OUTPUT] block as your FINAL action. Do NOT just say "done" — you MUST emit the JSON block above. The harness parses ONLY the [RALPH_OUTPUT] block.**
 """
 
 DEFAULT_PROMPT_DECOMPOSE = """# DECOMPOSE Stage
@@ -153,11 +153,11 @@ A task was killed (exceeded context or timeout). Break it into smaller subtasks.
 
 2. **Use a subagent** to analyze what the task requires and how to break it down.
 
-3. **Create 2-5 subtasks** that:
-   - Can each be completed in ONE iteration (< 100k tokens)
-   - Have clear, specific scope
+3. **Create 2-5 subtasks** (MAXIMUM 5, prefer fewer). Each must:
+   - Be completable in ONE iteration (< 100k tokens)
+   - Have clear, specific scope — one file or one logical change
    - Together accomplish the original task
-   - Use `deps` for ordering if needed
+   - Use `"deps": []` (empty array) — do NOT reference task names as deps
 
 ## Output
 
@@ -167,12 +167,15 @@ When done, output your result between markers as PLAIN TEXT (no code fences):
 {"subtasks": [{"name": "Extract parser into separate module", "notes": "Move parse_expr() and parse_stmt() from src/main.c lines 200-400 to src/parser.c. Update includes.", "accept": "make build succeeds and make test passes", "deps": []}, {"name": "Add error recovery to parser", "notes": "In src/parser.c parse_expr(): add synchronization points after syntax errors. Pattern: skip tokens until ';' or '}'.", "accept": "echo 'bad syntax;' | ./build/lang exits 1 without crash", "deps": []}]}
 [/RALPH_OUTPUT]
 
+Rules:
 - Each subtask `notes` MUST include specific file paths and approach (min 50 chars)
-- Each subtask `accept` MUST be measurable
+- Each subtask `accept` MUST be measurable (a command + expected result)
+- `deps` MUST be `[]` (empty array) or a list of valid tix task IDs like `["t-abc123"]`. Do NOT use task names as deps.
 - Do NOT try to implement anything — just create the breakdown
+- Do NOT create more than 5 subtasks — the harness will drop extras
 
 **CRITICAL: Do NOT wrap the [RALPH_OUTPUT] block in markdown code fences (``` or ~~~). Output it as plain text.**
-**You MUST output the [RALPH_OUTPUT] block as your final action before exiting.**
+**You MUST output the [RALPH_OUTPUT] block as your FINAL action. Do NOT just say "done" — you MUST emit the JSON block above. The harness parses ONLY the [RALPH_OUTPUT] block.**
 """
 
 EXAMPLE_SPEC = """# Example Specification

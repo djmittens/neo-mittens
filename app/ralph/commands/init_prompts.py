@@ -41,7 +41,7 @@ Read the spec file: `ralph/specs/{{SPEC_FILE}}`
    - `name`: Short description ("Add X to Y", not "Improve Z")
    - `notes`: DETAILED — specific file paths, line numbers, approach (min 50 chars)
    - `accept`: MEASURABLE — command to run + expected result
-   - `deps`: Task IDs this depends on (use IDs from earlier tasks in your list, or existing pending task IDs)
+   - `deps`: `[]` (empty) or list of valid tix task IDs like `["t-abc123"]`. Do NOT use task names as deps.
    - `priority`: One of `"high"`, `"medium"`, or `"low"` — high for foundational/blocking tasks, low for polish/docs
 
 ## Output
@@ -64,7 +64,7 @@ Rules:
 - Only include **new** tasks in `"tasks"` — do NOT echo back existing pending tasks you want to keep
 - Use `"drop"` to remove obsolete pending tasks; omit `"drop"` or use `[]` if all existing tasks should be kept
 
-**You MUST output the [RALPH_OUTPUT] block as your final action before exiting.**
+**You MUST output the [RALPH_OUTPUT] block as your FINAL action. Do NOT just say "done" — you MUST emit the JSON block above. The harness parses ONLY the [RALPH_OUTPUT] block.**
 """
 
 DEFAULT_PROMPT_BUILD = """# BUILD Stage
@@ -117,7 +117,8 @@ The `issues` array is for problems you discovered during implementation (optiona
   {"issues": [{"desc": "Memory leak in foo.c:123"}, {"desc": "Test flaky: bar_test"}]}
 
 **CRITICAL: Do NOT wrap the [RALPH_OUTPUT] block in markdown code fences (``` or ~~~). Output it as plain text.**
-**You MUST output the [RALPH_OUTPUT] block as your final action before exiting.**
+
+**You MUST output the [RALPH_OUTPUT] block as your FINAL action. Do NOT just say "Task completed" — you MUST emit the JSON block above. The harness CANNOT read your mind; it parses ONLY the [RALPH_OUTPUT] block. If you skip it, your work is lost.**
 """
 
 PROMPTS = {

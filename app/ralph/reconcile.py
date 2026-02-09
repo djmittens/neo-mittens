@@ -155,11 +155,63 @@ def extract_structured_output(agent_output: str) -> Optional[dict]:
     if last_json is not None and set(last_json.keys()) & _RALPH_OUTPUT_KEYS:
         return last_json
 
+    # Last-ditch: infer verdict from terminal phrases in the text.
+    # Weaker models sometimes say "Task completed." without emitting
+    # any structured output.  We scan for high-confidence terminal
+    # phrases and synthesise a verdict dict so the iteration is not
+    # wasted.  Only triggers when ALL other strategies failed.
+    inferred = _infer_verdict_from_text(text_content or agent_output)
+    if inferred is not None:
+        print("  Schema repair: inferred verdict from agent text",
+              file=sys.stderr)
+        return inferred
+
     return None
 
 
 # Keys that indicate a write tool's content is structured ralph output
 _RALPH_OUTPUT_KEYS = {"tasks", "verdict", "results", "subtasks"}
+
+# Terminal phrases that indicate the model considers the task done.
+# Checked case-insensitively against the last 500 chars of text.
+_DONE_PHRASES = (
+    "task completed",
+    "task is complete",
+    "task is done",
+    "all acceptance criteria",
+    "acceptance criteria are met",
+    "acceptance criteria met",
+    "implementation is complete",
+    "changes are complete",
+    "all tests pass",
+    "build passes",
+    "build succeeds",
+)
+
+
+def _infer_verdict_from_text(text: str) -> Optional[dict]:
+    """Infer a verdict dict from terminal phrases when all else fails.
+
+    Only returns a result for high-confidence "done" signals.  Does NOT
+    infer "blocked" — ambiguity should fall through to the normal
+    failure path so the harness can retry.
+
+    Args:
+        text: Assembled text content or raw agent output.
+
+    Returns:
+        ``{"verdict": "done", "summary": "..."}`` or None.
+    """
+    if not text:
+        return None
+    tail = text[-500:].lower()
+    for phrase in _DONE_PHRASES:
+        if phrase in tail:
+            return {
+                "verdict": "done",
+                "summary": f"(inferred from agent text: '{phrase}')",
+            }
+    return None
 
 
 def _extract_from_tool_events(agent_output: str) -> Optional[dict]:
@@ -363,6 +415,16 @@ def _repair_output(data: dict, stage: str) -> tuple[dict, list[str]]:
             if data["verdict"] in ("complete", "completed", "finished", "success"):
                 data["verdict"] = "done"
                 repairs.append("normalized verdict to 'done'")
+            elif data["verdict"] in (
+                "partial", "in_progress", "wip", "incomplete",
+                "failed", "error", "cannot", "impossible",
+            ):
+                data["verdict"] = "blocked"
+                if not data.get("reason"):
+                    data["reason"] = f"Agent reported verdict '{verdict.strip()}'"
+                repairs.append(
+                    f"normalized verdict '{verdict.strip()}' to 'blocked'"
+                )
 
     return data, repairs
 
@@ -719,6 +781,14 @@ def reconcile_decompose(
         result.ok = False
         return result
 
+    # Cap subtask count to prevent task proliferation.  Weaker models
+    # sometimes generate 10-15 tiny subtasks when 3-5 would suffice.
+    max_subtasks = 5
+    if len(subtasks) > max_subtasks:
+        print(f"  Warning: capping {len(subtasks)} subtasks to {max_subtasks}",
+              file=sys.stderr)
+        subtasks = subtasks[:max_subtasks]
+
     # Add each subtask with parent link and incremented depth
     child_depth = parent_depth + 1
     for task_data in subtasks:
@@ -821,6 +891,10 @@ def reconcile_plan(
             result.errors.append(f"PLAN task '{name}' rejected by validation: {reasons}")
             continue
 
+        # Sanitize deps before sending to tix
+        if "deps" in task_data:
+            task_data["deps"] = _sanitize_deps(task_data["deps"], result)
+
         task_data["spec"] = spec_name
         task_data.setdefault("assigned", "ralph")
         tasks_to_add.append(task_data)
@@ -846,6 +920,36 @@ def reconcile_plan(
 # Helpers
 # =============================================================================
 
+# Regex for valid tix task IDs: "t-" followed by hex chars.
+_VALID_TASK_ID_RE = re.compile(r"^t-[0-9a-f]+$")
+
+
+def _sanitize_deps(deps: Any, result: ReconcileResult) -> list[str]:
+    """Filter deps to only valid tix task IDs (``t-<hex>``).
+
+    Weaker models emit task *names* instead of IDs, or use object
+    references like ``{"name": "..."}``.  We silently drop those and
+    warn via result.errors so the task can still be created.
+
+    Args:
+        deps: Raw deps value from agent output (may be list, None, etc.).
+        result: ReconcileResult to append warnings to.
+
+    Returns:
+        List of valid task ID strings.
+    """
+    if not deps or not isinstance(deps, list):
+        return []
+    valid: list[str] = []
+    for dep in deps:
+        if isinstance(dep, str) and _VALID_TASK_ID_RE.match(dep):
+            valid.append(dep)
+        else:
+            # Don't fail — just drop the bad dep and warn
+            desc = repr(dep) if not isinstance(dep, str) else dep[:60]
+            result.errors.append(f"Dropped invalid dep: {desc}")
+    return valid
+
 
 def _add_task(
     tix: TixProtocol,
@@ -862,6 +966,10 @@ def _add_task(
     if not name:
         result.errors.append("Task missing name field")
         return
+
+    # Sanitize deps before sending to tix
+    if "deps" in task_data:
+        task_data["deps"] = _sanitize_deps(task_data["deps"], result)
 
     # Validate task quality before adding (non-strict to allow decompose subtasks)
     notes = task_data.get("notes", "")

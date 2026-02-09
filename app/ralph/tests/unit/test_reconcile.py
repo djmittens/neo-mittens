@@ -6,7 +6,9 @@ from unittest.mock import MagicMock, patch
 
 from ralph.reconcile import (
     _attach_stage_telemetry,
+    _infer_verdict_from_text,
     _reject_counts,
+    _sanitize_deps,
     extract_structured_output,
     reconcile_build,
     reconcile_verify,
@@ -611,3 +613,210 @@ class TestTokensCachedTelemetry:
         call_args = mock_tix.task_update.call_args[0]
         meta = call_args[1]["meta"]
         assert "tokens_cached" not in meta
+
+
+# =============================================================================
+# Verdict normalization (expanded)
+# =============================================================================
+
+
+class TestVerdictNormalization:
+    """Verify expanded verdict normalization covers weaker model outputs."""
+
+    def test_partial_normalized_to_blocked(self, mock_tix):
+        """'partial' verdict should be normalized to 'blocked'."""
+        output = '[RALPH_OUTPUT]\n{"verdict": "partial", "summary": "half done"}\n[/RALPH_OUTPUT]'
+        result = reconcile_build(mock_tix, output, "t-abc")
+        assert not result.ok
+        assert any("blocked" in e.lower() for e in result.errors)
+        mock_tix.task_done.assert_not_called()
+
+    def test_in_progress_normalized_to_blocked(self, mock_tix):
+        output = '[RALPH_OUTPUT]\n{"verdict": "in_progress"}\n[/RALPH_OUTPUT]'
+        result = reconcile_build(mock_tix, output, "t-abc")
+        assert not result.ok
+
+    def test_failed_normalized_to_blocked(self, mock_tix):
+        output = '[RALPH_OUTPUT]\n{"verdict": "failed", "reason": "tests fail"}\n[/RALPH_OUTPUT]'
+        result = reconcile_build(mock_tix, output, "t-abc")
+        assert not result.ok
+        # Should preserve the explicit reason
+        assert any("tests fail" in e for e in result.errors)
+
+    def test_completed_normalized_to_done(self, mock_tix):
+        output = '[RALPH_OUTPUT]\n{"verdict": "Completed", "summary": "all good"}\n[/RALPH_OUTPUT]'
+        result = reconcile_build(mock_tix, output, "t-abc")
+        assert result.ok
+        mock_tix.task_done.assert_called_once_with("t-abc")
+
+    def test_success_normalized_to_done(self, mock_tix):
+        output = '[RALPH_OUTPUT]\n{"verdict": "SUCCESS"}\n[/RALPH_OUTPUT]'
+        result = reconcile_build(mock_tix, output, "t-abc")
+        assert result.ok
+
+    def test_partial_gets_auto_reason(self, mock_tix):
+        """'partial' without explicit reason gets an auto-generated one."""
+        output = '[RALPH_OUTPUT]\n{"verdict": "partial"}\n[/RALPH_OUTPUT]'
+        result = reconcile_build(mock_tix, output, "t-abc")
+        assert not result.ok
+        assert any("partial" in e.lower() for e in result.errors)
+
+
+# =============================================================================
+# Infer verdict from text (last-ditch extraction)
+# =============================================================================
+
+
+class TestInferVerdictFromText:
+    """Test _infer_verdict_from_text for bare terminal phrases."""
+
+    def test_task_completed(self):
+        result = _infer_verdict_from_text("Some work done.\n\nTask completed.")
+        assert result is not None
+        assert result["verdict"] == "done"
+
+    def test_acceptance_criteria_met(self):
+        text = "Verified all changes. All acceptance criteria are met."
+        result = _infer_verdict_from_text(text)
+        assert result is not None
+        assert result["verdict"] == "done"
+
+    def test_all_tests_pass(self):
+        result = _infer_verdict_from_text("Ran the suite. All tests pass.")
+        assert result is not None
+        assert result["verdict"] == "done"
+
+    def test_no_match(self):
+        result = _infer_verdict_from_text("I started working on it.")
+        assert result is None
+
+    def test_empty_text(self):
+        assert _infer_verdict_from_text("") is None
+
+    def test_only_checks_tail(self):
+        """Phrase must appear in last 500 chars, not just anywhere."""
+        # "Task completed" at the start, but 600+ chars of padding after
+        text = "Task completed." + " " * 600 + "Still working."
+        result = _infer_verdict_from_text(text)
+        assert result is None
+
+    def test_build_uses_inferred_verdict(self, mock_tix):
+        """reconcile_build should use inferred verdict when extraction fails."""
+        # No RALPH_OUTPUT markers, no JSON — just terminal text
+        output = "I made all the changes.\n\nTask completed."
+        result = reconcile_build(mock_tix, output, "t-abc")
+        assert result.ok
+        mock_tix.task_done.assert_called_once_with("t-abc")
+
+
+# =============================================================================
+# Deps sanitization
+# =============================================================================
+
+
+class TestSanitizeDeps:
+    """Test _sanitize_deps filtering."""
+
+    def test_valid_deps_pass_through(self):
+        result = ReconcileResult()
+        deps = _sanitize_deps(["t-abc123", "t-def456"], result)
+        assert deps == ["t-abc123", "t-def456"]
+        assert not result.errors
+
+    def test_task_names_dropped(self):
+        result = ReconcileResult()
+        deps = _sanitize_deps(["Update type names in src/gc_heap.h"], result)
+        assert deps == []
+        assert len(result.errors) == 1
+        assert "Dropped invalid dep" in result.errors[0]
+
+    def test_object_deps_dropped(self):
+        result = ReconcileResult()
+        deps = _sanitize_deps([{"name": "Some task"}], result)
+        assert deps == []
+        assert len(result.errors) == 1
+
+    def test_mixed_deps_filtered(self):
+        result = ReconcileResult()
+        deps = _sanitize_deps(["t-abc123", "Bad Name", "t-def456"], result)
+        assert deps == ["t-abc123", "t-def456"]
+        assert len(result.errors) == 1
+
+    def test_none_deps(self):
+        result = ReconcileResult()
+        assert _sanitize_deps(None, result) == []
+
+    def test_empty_list(self):
+        result = ReconcileResult()
+        assert _sanitize_deps([], result) == []
+
+    def test_deps_sanitized_in_add_task(self, mock_tix):
+        """_add_task should sanitize deps before sending to tix."""
+        from ralph.reconcile import _add_task
+        result = ReconcileResult()
+        task = {
+            "name": "Fix bug",
+            "notes": "detailed notes about the fix",
+            "accept": "test passes",
+            "deps": ["t-abc123", "Not a valid dep ID"],
+        }
+        _add_task(mock_tix, task, result)
+        # Task should still be added (deps sanitized, not rejected)
+        assert len(result.tasks_added) == 1
+        # The task data sent to tix should have cleaned deps
+        call_data = mock_tix.task_add.call_args[0][0]
+        assert call_data["deps"] == ["t-abc123"]
+
+    def test_deps_sanitized_in_plan(self, mock_tix):
+        """reconcile_plan should sanitize deps before batch add."""
+        task = {
+            "name": "Extract config module",
+            "notes": "Source: src/config.py lines 1-50. Extract GlobalConfig class.",
+            "accept": "pytest tests/unit/test_config.py passes",
+            "deps": ["Invalid Name Dep"],
+        }
+        output = f'[RALPH_OUTPUT]\n{json.dumps({"tasks": [task]})}\n[/RALPH_OUTPUT]'
+        result = reconcile_plan(mock_tix, output, "my-spec.md")
+        assert len(result.tasks_added) == 1
+        # Check deps were sanitized before batch add
+        batch_call = mock_tix.task_batch_add.call_args[0][0]
+        assert batch_call[0]["deps"] == []
+
+
+# =============================================================================
+# Decompose subtask cap
+# =============================================================================
+
+
+class TestDecomposeSubtaskCap:
+    """Test that decompose caps subtasks at 5."""
+
+    def test_six_subtasks_capped_to_five(self, mock_tix):
+        subtasks = [
+            {"name": f"Sub {i}", "notes": "notes", "accept": "test"}
+            for i in range(6)
+        ]
+        output = f'[RALPH_OUTPUT]\n{json.dumps({"subtasks": subtasks})}\n[/RALPH_OUTPUT]'
+        result = reconcile_decompose(mock_tix, output, "t-parent")
+        assert result.ok
+        assert len(result.tasks_added) == 5
+
+    def test_five_subtasks_not_capped(self, mock_tix):
+        subtasks = [
+            {"name": f"Sub {i}", "notes": "notes", "accept": "test"}
+            for i in range(5)
+        ]
+        output = f'[RALPH_OUTPUT]\n{json.dumps({"subtasks": subtasks})}\n[/RALPH_OUTPUT]'
+        result = reconcile_decompose(mock_tix, output, "t-parent")
+        assert result.ok
+        assert len(result.tasks_added) == 5
+
+    def test_fifteen_subtasks_capped_to_five(self, mock_tix):
+        subtasks = [
+            {"name": f"Sub {i}", "notes": "notes", "accept": "test"}
+            for i in range(15)
+        ]
+        output = f'[RALPH_OUTPUT]\n{json.dumps({"subtasks": subtasks})}\n[/RALPH_OUTPUT]'
+        result = reconcile_decompose(mock_tix, output, "t-parent")
+        assert result.ok
+        assert len(result.tasks_added) == 5
