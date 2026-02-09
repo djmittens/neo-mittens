@@ -1484,8 +1484,9 @@ def cmd_construct(
         print(f"{Colors.YELLOW}No spec configured - run 'ralph plan <spec.md>' first{Colors.NC}")
         return 1
     
-    # Load global config
-    global_config = GlobalConfig.load()
+    # Load global config with per-repo overlay
+    repo_config = ralph_dir / "config.toml"
+    global_config = GlobalConfig.load(repo_config=repo_config)
     max_iterations = iterations if iterations > 0 else global_config.max_iterations
     stage_timeout_ms = global_config.stage_timeout_ms
     context_limit = global_config.context_window

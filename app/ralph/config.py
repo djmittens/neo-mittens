@@ -241,25 +241,64 @@ class GlobalConfig:
             config_dict["art_style"] = os.environ["RALPH_ART_STYLE"]
 
     @classmethod
-    def load(cls) -> GlobalConfig:
-        """Load config from ~/.config/ralph/config.toml with profile support."""
+    def _build_config_dict(cls, data: dict) -> dict:
+        """Build config dict from parsed TOML with profile and env overlays.
+
+        Args:
+            data: Parsed TOML data.
+
+        Returns:
+            Merged config dict ready for field filtering.
+        """
+        config_dict = cls._extract_base_config(data)
+        cls._apply_profile_overlay(config_dict, data)
+        cls._apply_env_overrides(config_dict)
+        return config_dict
+
+    @classmethod
+    def _apply_repo_overlay(cls, config_dict: dict, repo_config_path: Path) -> None:
+        """Overlay per-repo config.toml onto config dict.
+
+        Only scalar top-level keys are applied (no profiles, no sections).
+        This gives project-specific settings like ``format_command``
+        the highest priority.
+
+        Args:
+            config_dict: Config dict to update in place.
+            repo_config_path: Path to ``{ralph_dir}/config.toml``.
+        """
+        data = cls._load_toml_data(repo_config_path)
+        if data is None:
+            return
+        for key, value in data.items():
+            if not isinstance(value, dict):
+                config_dict[key] = value
+
+    @classmethod
+    def load(cls, repo_config: Optional[Path] = None) -> "GlobalConfig":
+        """Load config from ~/.config/ralph/config.toml with profile support.
+
+        Config priority (highest wins):
+        1. Top-level keys in global config.toml
+        2. ``[default]`` section (deprecated, backward compat)
+        3. ``RALPH_PROFILE`` overlay
+        4. Environment variable overrides
+        5. Per-repo ``{ralph_dir}/config.toml`` (if *repo_config* provided)
+
+        Args:
+            repo_config: Optional path to per-repo config.toml.
+        """
         config_path = Path.home() / ".config" / "ralph" / "config.toml"
 
         data = cls._load_toml_data(config_path)
         if data is None:
-            return cls()
+            config_dict: dict = {}
+        else:
+            config_dict = cls._build_config_dict(data)
 
-        # Config priority:
-        # 1. Top-level keys (not in [default] or [profiles])
-        # 2. [default] section (deprecated, for backward compat)
-        # 3. RALPH_PROFILE overlay (if set)
-        config_dict = cls._extract_base_config(data)
-
-        # Apply profile overlay
-        cls._apply_profile_overlay(config_dict, data)
-
-        # Apply environment variable overrides
-        cls._apply_env_overrides(config_dict)
+        # Per-repo overlay has highest priority
+        if repo_config:
+            cls._apply_repo_overlay(config_dict, repo_config)
 
         # Build config object with only valid fields
         valid_fields = {k: v for k, v in config_dict.items() if hasattr(cls, k)}

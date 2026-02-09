@@ -495,3 +495,94 @@ class TestGuardConfigFields:
         monkeypatch.delenv("RALPH_ART_STYLE", raising=False)
         cfg = GlobalConfig.load()
         assert cfg.max_api_calls == 100
+
+
+class TestRepoConfigOverlay:
+    """Tests for per-repo config.toml overlay."""
+
+    def test_repo_config_overrides_global(self, tmp_path, monkeypatch):
+        """Test per-repo config.toml overrides global settings."""
+        # Global config
+        config_dir = tmp_path / ".config" / "ralph"
+        config_dir.mkdir(parents=True)
+        (config_dir / "config.toml").write_text('format_command = "global-fmt"')
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+        monkeypatch.delenv("RALPH_PROFILE", raising=False)
+        monkeypatch.delenv("RALPH_ART_STYLE", raising=False)
+
+        # Per-repo config
+        repo_dir = tmp_path / "ralph"
+        repo_dir.mkdir()
+        (repo_dir / "config.toml").write_text('format_command = "make format"')
+
+        cfg = GlobalConfig.load(repo_config=repo_dir / "config.toml")
+        assert cfg.format_command == "make format"
+
+    def test_repo_config_without_global(self, tmp_path, monkeypatch):
+        """Test per-repo config works even without global config."""
+        config_dir = tmp_path / ".config" / "ralph"
+        config_dir.mkdir(parents=True)
+        # No global config.toml
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+        monkeypatch.delenv("RALPH_PROFILE", raising=False)
+        monkeypatch.delenv("RALPH_ART_STYLE", raising=False)
+
+        repo_dir = tmp_path / "ralph"
+        repo_dir.mkdir()
+        (repo_dir / "config.toml").write_text('format_command = "make format"')
+
+        cfg = GlobalConfig.load(repo_config=repo_dir / "config.toml")
+        assert cfg.format_command == "make format"
+
+    def test_missing_repo_config_is_ignored(self, tmp_path, monkeypatch):
+        """Test missing per-repo config.toml is silently ignored."""
+        config_dir = tmp_path / ".config" / "ralph"
+        config_dir.mkdir(parents=True)
+        (config_dir / "config.toml").write_text('format_command = "global-fmt"')
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+        monkeypatch.delenv("RALPH_PROFILE", raising=False)
+        monkeypatch.delenv("RALPH_ART_STYLE", raising=False)
+
+        cfg = GlobalConfig.load(repo_config=tmp_path / "nonexistent" / "config.toml")
+        assert cfg.format_command == "global-fmt"
+
+    def test_repo_config_ignores_sections(self, tmp_path, monkeypatch):
+        """Test per-repo config only applies scalar keys, not sections."""
+        config_dir = tmp_path / ".config" / "ralph"
+        config_dir.mkdir(parents=True)
+        (config_dir / "config.toml").write_text("")
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+        monkeypatch.delenv("RALPH_PROFILE", raising=False)
+        monkeypatch.delenv("RALPH_ART_STYLE", raising=False)
+
+        repo_dir = tmp_path / "ralph"
+        repo_dir.mkdir()
+        (repo_dir / "config.toml").write_text(
+            'format_command = "make format"\n\n'
+            "[profiles.sneaky]\n"
+            'model = "should-be-ignored"\n'
+        )
+
+        cfg = GlobalConfig.load(repo_config=repo_dir / "config.toml")
+        assert cfg.format_command == "make format"
+        # model should NOT be overridden by a section in repo config
+        assert cfg.model == ""
+
+    def test_repo_config_invalid_fields_ignored(self, tmp_path, monkeypatch):
+        """Test per-repo config with unknown fields doesn't crash."""
+        config_dir = tmp_path / ".config" / "ralph"
+        config_dir.mkdir(parents=True)
+        (config_dir / "config.toml").write_text("")
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+        monkeypatch.delenv("RALPH_PROFILE", raising=False)
+        monkeypatch.delenv("RALPH_ART_STYLE", raising=False)
+
+        repo_dir = tmp_path / "ralph"
+        repo_dir.mkdir()
+        (repo_dir / "config.toml").write_text(
+            'format_command = "make format"\n'
+            'bogus_field = "should be ignored"\n'
+        )
+
+        cfg = GlobalConfig.load(repo_config=repo_dir / "config.toml")
+        assert cfg.format_command == "make format"
