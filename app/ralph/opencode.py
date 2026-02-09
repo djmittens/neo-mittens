@@ -50,6 +50,7 @@ def spawn_opencode(
     cwd: Path,
     timeout: int,
     model: Optional[str] = None,
+    agent: Optional[str] = None,
 ) -> subprocess.Popen:
     """Spawn an opencode process with the given prompt.
 
@@ -58,6 +59,9 @@ def spawn_opencode(
         cwd: Working directory for the process
         timeout: Timeout in milliseconds (used by caller, not subprocess)
         model: Optional model override (uses opencode default if not specified)
+        agent: Optional agent profile name (e.g. "ralph-build"). Controls
+            which tools are available to the LLM via opencode's agent
+            sandboxing.
 
     Returns:
         subprocess.Popen instance with stdout=PIPE for reading output
@@ -65,6 +69,8 @@ def spawn_opencode(
     cmd = ["opencode", "run", "--format", "json"]
     if model:
         cmd.extend(["--model", model])
+    if agent:
+        cmd.extend(["--agent", agent])
     cmd.append(prompt)
 
     return subprocess.Popen(
@@ -82,6 +88,7 @@ def spawn_opencode_continue(
     message: str,
     cwd: Path,
     model: Optional[str] = None,
+    agent: Optional[str] = None,
 ) -> subprocess.Popen:
     """Continue an existing opencode session with a follow-up message.
 
@@ -93,6 +100,7 @@ def spawn_opencode_continue(
         message: Follow-up message to send.
         cwd: Working directory for the process.
         model: Optional model override.
+        agent: Optional agent profile name for tool sandboxing.
 
     Returns:
         subprocess.Popen instance with stdout=PIPE for reading output.
@@ -100,6 +108,8 @@ def spawn_opencode_continue(
     cmd = ["opencode", "run", "--format", "json", "-s", session_id]
     if model:
         cmd.extend(["--model", model])
+    if agent:
+        cmd.extend(["--agent", agent])
     cmd.append(message)
 
     return subprocess.Popen(

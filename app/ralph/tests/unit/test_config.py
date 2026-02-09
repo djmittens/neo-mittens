@@ -497,6 +497,103 @@ class TestGuardConfigFields:
         assert cfg.max_api_calls == 100
 
 
+class TestAgentForStage:
+    """Tests for GlobalConfig.agent_for_stage method."""
+
+    def test_no_agents_configured(self):
+        """Test empty string when no agents configured."""
+        cfg = GlobalConfig()
+        assert cfg.agent_for_stage("build") == ""
+        assert cfg.agent_for_stage("verify") == ""
+        assert cfg.agent_for_stage("dedup") == ""
+
+    def test_global_agent_fallback(self):
+        """Test global agent used when no stage-specific override."""
+        cfg = GlobalConfig(agent="ralph-default")
+        assert cfg.agent_for_stage("build") == "ralph-default"
+        assert cfg.agent_for_stage("verify") == "ralph-default"
+
+    def test_stage_specific_agent(self):
+        """Test stage-specific agent overrides global."""
+        cfg = GlobalConfig(
+            agent="ralph-default",
+            agent_build="ralph-build",
+            agent_verify="ralph-verify",
+        )
+        assert cfg.agent_for_stage("build") == "ralph-build"
+        assert cfg.agent_for_stage("verify") == "ralph-verify"
+        # investigate falls back to global
+        assert cfg.agent_for_stage("investigate") == "ralph-default"
+
+    def test_dedup_agent(self):
+        """Test dedup stage gets its own agent."""
+        cfg = GlobalConfig(agent_dedup="ralph-dedup")
+        assert cfg.agent_for_stage("dedup") == "ralph-dedup"
+        # Other stages get empty (no global fallback)
+        assert cfg.agent_for_stage("build") == ""
+
+    def test_all_stages_configured(self):
+        """Test all stages with individual agents."""
+        cfg = GlobalConfig(
+            agent_build="ralph-build",
+            agent_verify="ralph-verify",
+            agent_investigate="ralph-investigate",
+            agent_decompose="ralph-decompose",
+            agent_plan="ralph-plan",
+            agent_dedup="ralph-dedup",
+        )
+        assert cfg.agent_for_stage("build") == "ralph-build"
+        assert cfg.agent_for_stage("verify") == "ralph-verify"
+        assert cfg.agent_for_stage("investigate") == "ralph-investigate"
+        assert cfg.agent_for_stage("decompose") == "ralph-decompose"
+        assert cfg.agent_for_stage("plan") == "ralph-plan"
+        assert cfg.agent_for_stage("dedup") == "ralph-dedup"
+
+    def test_agent_from_toml(self, tmp_path, monkeypatch):
+        """Test agent config loaded from TOML file."""
+        config_dir = tmp_path / ".config" / "ralph"
+        config_dir.mkdir(parents=True)
+        (config_dir / "config.toml").write_text(
+            'agent_build = "ralph-build"\n'
+            'agent_dedup = "ralph-dedup"\n'
+        )
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+        monkeypatch.delenv("RALPH_PROFILE", raising=False)
+        monkeypatch.delenv("RALPH_ART_STYLE", raising=False)
+        cfg = GlobalConfig.load()
+        assert cfg.agent_for_stage("build") == "ralph-build"
+        assert cfg.agent_for_stage("dedup") == "ralph-dedup"
+        assert cfg.agent_for_stage("verify") == ""
+
+    def test_agent_from_profile(self, tmp_path, monkeypatch):
+        """Test agent config from profile overlay."""
+        config_dir = tmp_path / ".config" / "ralph"
+        config_dir.mkdir(parents=True)
+        (config_dir / "config.toml").write_text(
+            'agent_build = "base-build"\n\n'
+            "[profiles.sandboxed]\n"
+            'agent_build = "ralph-build"\n'
+            'agent_verify = "ralph-verify"\n'
+        )
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+        monkeypatch.setenv("RALPH_PROFILE", "sandboxed")
+        monkeypatch.delenv("RALPH_ART_STYLE", raising=False)
+        cfg = GlobalConfig.load()
+        assert cfg.agent_for_stage("build") == "ralph-build"
+        assert cfg.agent_for_stage("verify") == "ralph-verify"
+
+    def test_agent_defaults_empty(self):
+        """Test all agent fields default to empty string."""
+        cfg = GlobalConfig()
+        assert cfg.agent == ""
+        assert cfg.agent_build == ""
+        assert cfg.agent_verify == ""
+        assert cfg.agent_investigate == ""
+        assert cfg.agent_decompose == ""
+        assert cfg.agent_plan == ""
+        assert cfg.agent_dedup == ""
+
+
 class TestRepoConfigOverlay:
     """Tests for per-repo config.toml overlay."""
 

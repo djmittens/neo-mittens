@@ -158,14 +158,17 @@ def _run_opencode(
     """
     timeout = max(config.timeout_ms, MIN_PLAN_TIMEOUT_MS)
     timeout_seconds = timeout // 1000
+    plan_agent = config.agent_for_stage("plan") or None
 
     if session_id:
         proc = spawn_opencode_continue(
-            session_id, prompt, cwd=cwd, model=config.model
+            session_id, prompt, cwd=cwd, model=config.model,
+            agent=plan_agent,
         )
     else:
         proc = spawn_opencode(
             prompt=prompt, cwd=cwd, timeout=timeout, model=config.model,
+            agent=plan_agent,
         )
 
     try:

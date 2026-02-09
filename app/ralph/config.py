@@ -45,6 +45,16 @@ class GlobalConfig:
     model_decompose: str = ""
     model_plan: str = ""
 
+    # opencode agent profiles per stage (empty string = no --agent flag)
+    # These map to agent definitions in opencode.jsonc (e.g. "ralph-build")
+    agent: str = ""  # Default agent for all stages
+    agent_build: str = ""
+    agent_verify: str = ""
+    agent_investigate: str = ""
+    agent_decompose: str = ""
+    agent_plan: str = ""
+    agent_dedup: str = ""
+
     # Context limits
     context_window: int = 200_000
     context_warn_pct: int = 70
@@ -159,6 +169,30 @@ class GlobalConfig:
         if stage_model:
             return stage_model
         return self.model
+
+    def agent_for_stage(self, stage: str) -> str:
+        """Resolve the opencode agent profile for a given stage.
+
+        Resolution order:
+        1. agent_{stage} if set (e.g. agent_build, agent_verify)
+        2. agent (global fallback)
+        3. empty string (no --agent flag, use opencode default)
+
+        Agent profiles control tool sandboxing — e.g. VERIFY gets
+        read-only tools, DEDUP gets no tools at all.
+
+        Args:
+            stage: Stage name (build, verify, investigate, decompose,
+                plan, dedup).
+
+        Returns:
+            Agent profile name (e.g. "ralph-build") or empty string.
+        """
+        stage_field = f"agent_{stage.lower()}"
+        stage_agent = getattr(self, stage_field, "")
+        if stage_agent:
+            return stage_agent
+        return self.agent
 
     @classmethod
     def _load_toml_data(cls, config_path: Path) -> Optional[dict]:

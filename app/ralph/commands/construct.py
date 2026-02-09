@@ -357,12 +357,15 @@ def _execute_opencode(
     print_output: bool = True,
     stage_name: str = "",
     session_id: Optional[str] = None,
+    agent: Optional[str] = None,
 ) -> Tuple[int, str, bool, float, int, int, int, int, Optional[str], int]:
     """Execute opencode with real-time streaming output.
 
     Args:
         session_id: If provided, continues an existing session instead
             of starting a new one. Reuses cached context.
+        agent: Optional opencode agent profile for tool sandboxing.
+            Resolved from config if not provided.
 
     Returns:
         Tuple of (return_code, output, timed_out, cost, tokens_in,
@@ -370,14 +373,17 @@ def _execute_opencode(
                   last_context_size).
     """
     model = config.model_for_stage(stage_name) if stage_name else config.model
+    if agent is None and stage_name:
+        agent = config.agent_for_stage(stage_name)
 
     if session_id:
         proc = spawn_opencode_continue(
-            session_id, prompt, cwd=repo_root, model=model
+            session_id, prompt, cwd=repo_root, model=model, agent=agent,
         )
     else:
         proc = spawn_opencode(
-            prompt, cwd=repo_root, timeout=stage_timeout_ms, model=model
+            prompt, cwd=repo_root, timeout=stage_timeout_ms, model=model,
+            agent=agent,
         )
 
     timeout_seconds = stage_timeout_ms // 1000
@@ -695,6 +701,14 @@ def _print_construct_header(
             stage_overrides.append(f"{stage_name}={stage_model}")
     if stage_overrides:
         print(f"Routes: {', '.join(stage_overrides)}")
+    # Show agent profiles if any are configured
+    agent_overrides = []
+    for stage_name in ("build", "verify", "investigate", "decompose", "plan", "dedup"):
+        stage_agent = config.agent_for_stage(stage_name)
+        if stage_agent:
+            agent_overrides.append(f"{stage_name}={stage_agent}")
+    if agent_overrides:
+        print(f"Agents: {', '.join(agent_overrides)}")
     if max_iterations > 0:
         print(f"Max iterations: {max_iterations}")
     if max_cost > 0:
@@ -1549,9 +1563,11 @@ def cmd_construct(
     def _dedup_callback() -> int:
         def llm_fn(prompt: str) -> Optional[str]:
             model = global_config.model_for_stage("investigate")
+            dedup_agent = global_config.agent_for_stage("dedup")
             proc = spawn_opencode(
                 prompt, cwd=repo_root,
                 timeout=stage_timeout_ms, model=model,
+                agent=dedup_agent or None,
             )
             result = stream_and_collect(
                 proc, stage_timeout_ms // 1000, print_output=False
