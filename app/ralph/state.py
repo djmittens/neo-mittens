@@ -3,18 +3,24 @@
 Manages stage transitions, batch tracking, and spec/config metadata.
 All ticket data (tasks, issues, tombstones) is owned by tix.
 
-State is stored in .tix/ralph-state.json — a small JSON file separate
-from tix's plan.jsonl. This cleanly separates orchestration concerns
-(stage, batch progress, decompose target) from ticket data.
+State is ephemeral — stored under /tmp keyed by a hash of the repo
+root path.  If the file is missing or corrupted, Ralph starts fresh
+(correct behaviour for runtime orchestration state).  This avoids
+polluting the project tree and eliminates corruption risk from
+interrupted writes to in-repo files.
 """
 
+import hashlib
+import os
+import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
 import json
 
 
-# Default state file location relative to repo root
+# Subdirectory under /tmp for Ralph state files
+_STATE_DIR_PREFIX = "ralph-state"
 STATE_FILENAME = "ralph-state.json"
 
 
@@ -153,43 +159,90 @@ class RalphState:
         }
 
 
-def _state_path(repo_root: Path) -> Path:
-    """Get the path to ralph-state.json.
+def _repo_hash(repo_root: Path) -> str:
+    """Stable short hash of the resolved repo path.
+
+    Uses SHA-256 truncated to 12 hex chars — enough to avoid
+    collisions across repos on the same machine.
 
     Args:
         repo_root: Repository root directory.
 
     Returns:
-        Path to .tix/ralph-state.json
+        12-character hex string.
     """
-    return repo_root / ".tix" / STATE_FILENAME
+    canonical = str(repo_root.resolve())
+    return hashlib.sha256(canonical.encode()).hexdigest()[:12]
+
+
+def _state_path(repo_root: Path) -> Path:
+    """Get the path to the ephemeral ralph-state.json.
+
+    State lives under ``/tmp/ralph-state/<repo-hash>/ralph-state.json``
+    so it never pollutes the project tree and is automatically cleaned
+    on reboot.
+
+    Args:
+        repo_root: Repository root directory.
+
+    Returns:
+        Path to the ephemeral state file.
+    """
+    base = Path(tempfile.gettempdir()) / _STATE_DIR_PREFIX / _repo_hash(repo_root)
+    return base / STATE_FILENAME
 
 
 def load_state(repo_root: Path) -> RalphState:
-    """Load orchestration state from .tix/ralph-state.json.
+    """Load orchestration state from the ephemeral state file.
+
+    Falls back to ``.tix/ralph-state.json`` in the repo if the
+    ephemeral file does not exist yet (one-time migration).
 
     Args:
         repo_root: Repository root directory.
 
     Returns:
-        RalphState populated from the file, or empty state if file missing.
+        RalphState populated from the file, or empty state if missing.
     """
     path = _state_path(repo_root)
     state = RalphState()
 
-    if not path.exists():
+    # Try ephemeral location first
+    if path.exists():
+        _try_load(state, path)
         return state
 
+    # One-time migration: check legacy in-repo location
+    legacy = repo_root / ".tix" / STATE_FILENAME
+    if legacy.exists():
+        _try_load(state, legacy)
+        # Migrate: persist to ephemeral location so we don't read
+        # the legacy file again, then remove the in-repo copy.
+        save_state(state, repo_root)
+        try:
+            legacy.unlink()
+        except OSError:
+            pass
+        return state
+
+    return state
+
+
+def _try_load(state: RalphState, path: Path) -> None:
+    """Attempt to load state from *path*, ignoring errors.
+
+    Args:
+        state: RalphState to populate in place.
+        path: File to read.
+    """
     try:
         content = path.read_text().strip()
         if not content:
-            return state
+            return
         d = json.loads(content)
         _populate_from_dict(state, d)
     except (json.JSONDecodeError, KeyError, OSError):
         pass
-
-    return state
 
 
 def _populate_from_dict(state: RalphState, d: dict) -> None:
@@ -207,7 +260,10 @@ def _populate_from_dict(state: RalphState, d: dict) -> None:
 
 
 def save_state(state: RalphState, repo_root: Path) -> None:
-    """Save orchestration state to .tix/ralph-state.json.
+    """Save orchestration state to the ephemeral state file.
+
+    Uses atomic write (write to temp, then rename) to prevent
+    corruption if the process is killed mid-write.
 
     Args:
         state: RalphState to save.
@@ -222,7 +278,11 @@ def save_state(state: RalphState, repo_root: Path) -> None:
         d["spec"] = state.spec
 
     _add_optional_fields(state, d)
-    path.write_text(json.dumps(d, indent=2) + "\n")
+
+    # Atomic write: temp file in same directory, then rename.
+    tmp_path = path.with_suffix(".tmp")
+    tmp_path.write_text(json.dumps(d, indent=2) + "\n")
+    os.replace(str(tmp_path), str(path))
 
 
 def _add_optional_fields(state: RalphState, d: dict) -> None:

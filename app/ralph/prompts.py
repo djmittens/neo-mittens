@@ -148,7 +148,10 @@ def build_verify_context(
 
 
 def build_investigate_context(
-    issues: list[dict], spec_name: str, spec_content: str = ""
+    issues: list[dict],
+    spec_name: str,
+    spec_content: str = "",
+    pending_tasks: list[dict] | None = None,
 ) -> dict[str, Any]:
     """Build context dict for INVESTIGATE stage prompt.
 
@@ -156,15 +159,30 @@ def build_investigate_context(
         issues: List of issue dicts from tix query.
         spec_name: Spec file name.
         spec_content: Content of the spec file.
+        pending_tasks: Pending task list so INVESTIGATE avoids duplicates.
 
     Returns:
         Context dict for prompt injection.
     """
+    # Compact task summary: just id + name to keep token count low.
+    if pending_tasks:
+        compact = [
+            {"id": t.get("id", ""), "name": t.get("name", "")}
+            for t in pending_tasks
+        ]
+        pending_json = json.dumps(compact, indent=2)
+        pending_count = len(compact)
+    else:
+        pending_json = "[]"
+        pending_count = 0
+
     return {
         "issues_json": json.dumps(issues, indent=2),
         "issue_count": len(issues),
         "spec_file": spec_name,
         "spec_content": spec_content,
+        "pending_tasks_json": pending_json,
+        "pending_task_count": pending_count,
     }
 
 

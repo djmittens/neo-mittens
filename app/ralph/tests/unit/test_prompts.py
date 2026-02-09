@@ -317,11 +317,26 @@ class TestBuildInvestigateContext:
 
         assert context["issue_count"] == 2
         assert '"i-1"' in context["issues_json"]
+        assert context["pending_task_count"] == 0
+        assert context["pending_tasks_json"] == "[]"
 
     def test_includes_spec_content(self):
         context = build_investigate_context([], "s.md", "spec text")
 
         assert context["spec_content"] == "spec text"
+
+    def test_includes_pending_tasks(self):
+        pending = [
+            {"id": "t-1", "name": "Fix bug", "notes": "...", "accept": "..."},
+            {"id": "t-2", "name": "Add feature", "notes": "...", "accept": "..."},
+        ]
+        context = build_investigate_context([], "s.md", pending_tasks=pending)
+
+        assert context["pending_task_count"] == 2
+        assert '"t-1"' in context["pending_tasks_json"]
+        assert '"Fix bug"' in context["pending_tasks_json"]
+        # Notes/accept should NOT be in compact output
+        assert '"..."' not in context["pending_tasks_json"]
 
 
 class TestBuildDecomposeContext:

@@ -6,9 +6,12 @@ from unittest.mock import MagicMock, patch
 
 from ralph.reconcile import (
     _attach_stage_telemetry,
+    _find_similar_task,
     _infer_verdict_from_text,
     _reject_counts,
     _sanitize_deps,
+    _token_similarity,
+    dedup_tasks,
     extract_structured_output,
     reconcile_build,
     reconcile_verify,
@@ -311,6 +314,240 @@ class TestReconcileInvestigate:
         assert result.ok
         assert result.issues_cleared == 2
         mock_tix.issue_done_ids.assert_called_once_with(["i-1", "i-2"])
+
+
+# =============================================================================
+# Token similarity + investigate dedup
+# =============================================================================
+
+
+class TestTokenSimilarity:
+    def test_identical_strings(self):
+        assert _token_similarity("complete heap rename", "complete heap rename") == 1.0
+
+    def test_empty_strings(self):
+        assert _token_similarity("", "") == 1.0
+
+    def test_one_empty(self):
+        assert _token_similarity("some words", "") == 0.0
+        assert _token_similarity("", "some words") == 0.0
+
+    def test_partial_overlap(self):
+        score = _token_similarity(
+            "Complete heap rename across all files",
+            "Complete heap rename across all source files",
+        )
+        # 6 shared tokens out of 7 union tokens = 0.857
+        assert score > 0.8
+
+    def test_low_similarity(self):
+        score = _token_similarity(
+            "Update LSAN suppressions",
+            "Rename types in gc_heap.h",
+        )
+        assert score < 0.3
+
+    def test_case_insensitive(self):
+        assert _token_similarity("Heap Rename", "heap rename") == 1.0
+
+
+class TestFindSimilarTask:
+    def test_exact_match_not_used(self):
+        """_find_similar_task only does fuzzy — caller checks exact first."""
+        existing = {"Fix bug in parser": "t-1"}
+        # Exact match is above threshold so it should find it
+        assert _find_similar_task("Fix bug in parser", existing) == "t-1"
+
+    def test_fuzzy_match(self):
+        existing = {
+            "Complete heap rename across all files": "t-exist",
+            "Update LSAN suppressions": "t-lsan",
+        }
+        result = _find_similar_task(
+            "Complete heap rename across all source files", existing
+        )
+        assert result == "t-exist"
+
+    def test_no_match(self):
+        existing = {"Update LSAN suppressions": "t-lsan"}
+        result = _find_similar_task(
+            "Rename types in gc_heap.h", existing
+        )
+        assert result is None
+
+    def test_empty_name(self):
+        assert _find_similar_task("", {"foo": "t-1"}) is None
+
+    def test_empty_map(self):
+        assert _find_similar_task("some task", {}) is None
+
+    def test_custom_threshold(self):
+        existing = {"Complete heap rename": "t-1"}
+        # With high threshold, partial overlap is not enough
+        assert _find_similar_task("Complete heap", existing, threshold=0.95) is None
+        # With lower threshold, it matches
+        assert _find_similar_task("Complete heap", existing, threshold=0.5) == "t-1"
+
+
+class TestInvestigateDedup:
+    """Test dedup of investigate-proposed tasks against existing pending tasks."""
+
+    def test_upsert_exact_match(self):
+        """Investigate proposing a task with same name as existing updates it."""
+        from ralph.tests.conftest import MockTix
+
+        tix = MockTix(tasks=[{
+            "id": "t-existing",
+            "name": "Fix memory leak",
+            "notes": "old notes",
+            "accept": "old accept",
+        }])
+        output = json.dumps({
+            "tasks": [{
+                "name": "Fix memory leak",
+                "notes": "updated notes with better detail",
+                "accept": "updated accept criteria",
+            }],
+        })
+        output = f"[RALPH_OUTPUT]\n{output}\n[/RALPH_OUTPUT]"
+        result = reconcile_investigate(tix, output, batch_issue_ids=["i-1"])
+
+        # Should NOT add a new task
+        assert len(result.tasks_added) == 0
+        # Existing task should be updated
+        existing = [t for t in tix._tasks if t["id"] == "t-existing"]
+        assert len(existing) == 1
+        assert "updated notes" in existing[0]["notes"]
+
+    def test_near_duplicate_adds_new_task(self):
+        """Near-duplicate names are NOT caught by exact-match upsert.
+
+        Semantic dedup is handled by the LLM dedup pass at the state
+        machine level, not in reconcile_investigate.
+        """
+        from ralph.tests.conftest import MockTix
+
+        tix = MockTix(tasks=[{
+            "id": "t-existing",
+            "name": "Complete heap rename across all files",
+            "notes": "old notes",
+            "accept": "old accept",
+        }])
+        output = json.dumps({
+            "tasks": [{
+                "name": "Complete heap rename across all source files",
+                "notes": "better notes about what files need updating",
+                "accept": "make build passes",
+            }],
+        })
+        output = f"[RALPH_OUTPUT]\n{output}\n[/RALPH_OUTPUT]"
+        result = reconcile_investigate(tix, output, batch_issue_ids=["i-1"])
+
+        # Near-duplicate is NOT caught by exact match — adds a new task.
+        # The LLM dedup pass will clean this up later.
+        assert len(result.tasks_added) == 1
+        assert len(tix._tasks) == 2
+
+    def test_no_match_adds_normally(self):
+        """Genuinely new tasks are added when no match exists."""
+        from ralph.tests.conftest import MockTix
+
+        tix = MockTix(tasks=[{
+            "id": "t-existing",
+            "name": "Update LSAN suppressions",
+            "notes": "old notes",
+            "accept": "old accept",
+        }])
+        output = json.dumps({
+            "tasks": [{
+                "name": "Rename types in gc_heap.h",
+                "notes": "new unrelated task with enough detail",
+                "accept": "grep test passes",
+            }],
+        })
+        output = f"[RALPH_OUTPUT]\n{output}\n[/RALPH_OUTPUT]"
+        result = reconcile_investigate(tix, output, batch_issue_ids=["i-1"])
+
+        # Should add the new task
+        assert len(result.tasks_added) == 1
+
+    def test_dedup_within_batch(self):
+        """Duplicate names within a single investigate output are deduplicated."""
+        from ralph.tests.conftest import MockTix
+
+        tix = MockTix()
+        task = {
+            "name": "Fix the build",
+            "notes": "detailed notes about fixing",
+            "accept": "make build passes",
+        }
+        output = json.dumps({"tasks": [task, task]})
+        output = f"[RALPH_OUTPUT]\n{output}\n[/RALPH_OUTPUT]"
+        result = reconcile_investigate(tix, output, batch_issue_ids=["i-1"])
+
+        # Only one task should be added despite two identical ones in output
+        assert len(result.tasks_added) == 1
+
+    def test_exact_name_upsert_prevents_proliferation(self):
+        """Exact-match upsert catches tasks re-proposed with same name.
+
+        When INVESTIGATE re-proposes a task with the exact same name as
+        an existing pending task (e.g. after reject -> re-investigate),
+        the existing task is updated instead of creating a duplicate.
+        """
+        from ralph.tests.conftest import MockTix
+
+        tix = MockTix(tasks=[
+            {
+                "id": "t-original",
+                "name": "Complete heap rename across all files",
+                "notes": "Rename all heap2 types to heap",
+                "accept": "make build && grep heap2 returns 0",
+            },
+        ])
+
+        # Same name, improved notes
+        output = json.dumps({
+            "tasks": [{
+                "name": "Complete heap rename across all files",
+                "notes": "Better notes: rename in gc_heap.h, gc.h, gc_mark.c",
+                "accept": "make build passes",
+            }],
+        })
+        output = f"[RALPH_OUTPUT]\n{output}\n[/RALPH_OUTPUT]"
+        result = reconcile_investigate(tix, output, batch_issue_ids=["i-1"])
+
+        # Exact match catches this — no new task, existing one updated
+        assert len(result.tasks_added) == 0
+        assert len(tix._tasks) == 1
+        assert tix._tasks[0]["id"] == "t-original"
+        assert "Better notes" in tix._tasks[0]["notes"]
+
+    def test_distinct_tasks_not_merged(self):
+        """Tasks with genuinely different scopes are NOT merged."""
+        from ralph.tests.conftest import MockTix
+
+        tix = MockTix(tasks=[{
+            "id": "t-lsan",
+            "name": "Update LSAN suppressions in lsan_suppressions.txt",
+            "notes": "update suppression entries",
+            "accept": "grep test",
+        }])
+
+        output = json.dumps({
+            "tasks": [{
+                "name": "Rename types in gc_heap.h",
+                "notes": "different scope entirely with specific file refs",
+                "accept": "grep -c heap2 src/gc_heap.h returns 0",
+            }],
+        })
+        output = f"[RALPH_OUTPUT]\n{output}\n[/RALPH_OUTPUT]"
+        result = reconcile_investigate(tix, output, batch_issue_ids=["i-1"])
+
+        # Should add the new task — these are genuinely different
+        assert len(result.tasks_added) == 1
+        # Total: 2 tasks
+        assert len(tix._tasks) == 2
 
 
 # =============================================================================

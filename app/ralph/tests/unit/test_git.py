@@ -32,12 +32,10 @@ class TestGetCurrentCommit:
         mock_run.return_value = MagicMock(returncode=0, stdout="abc1234\n")
         result = get_current_commit()
         assert result == "abc1234"
-        mock_run.assert_called_once_with(
-            ["git", "rev-parse", "--short", "HEAD"],
-            capture_output=True,
-            text=True,
-            cwd=None,
-        )
+        mock_run.assert_called_once()
+        args, kwargs = mock_run.call_args
+        assert args[0] == ["git", "rev-parse", "--short", "HEAD"]
+        assert "timeout" in kwargs
 
     @patch("ralph.git.subprocess.run")
     def test_get_current_commit_failure(self, mock_run):
@@ -53,12 +51,17 @@ class TestGetCurrentCommit:
         cwd = Path("/some/path")
         result = get_current_commit(cwd=cwd)
         assert result == "def5678"
-        mock_run.assert_called_once_with(
-            ["git", "rev-parse", "--short", "HEAD"],
-            capture_output=True,
-            text=True,
-            cwd=cwd,
-        )
+        mock_run.assert_called_once()
+        _, kwargs = mock_run.call_args
+        assert kwargs["cwd"] == cwd
+        assert "timeout" in kwargs
+
+    @patch("ralph.git.subprocess.run")
+    def test_get_current_commit_timeout(self, mock_run):
+        """Test get_current_commit returns 'unknown' on timeout."""
+        mock_run.side_effect = subprocess.TimeoutExpired("git", 30)
+        result = get_current_commit()
+        assert result == "unknown"
 
 
 class TestGetCurrentBranch:
@@ -75,6 +78,13 @@ class TestGetCurrentBranch:
     def test_get_current_branch_failure(self, mock_run):
         """Test getting current branch returns 'unknown' on failure."""
         mock_run.side_effect = subprocess.CalledProcessError(1, "git")
+        result = get_current_branch()
+        assert result == "unknown"
+
+    @patch("ralph.git.subprocess.run")
+    def test_get_current_branch_timeout(self, mock_run):
+        """Test getting current branch returns 'unknown' on timeout."""
+        mock_run.side_effect = subprocess.TimeoutExpired("git", 30)
         result = get_current_branch()
         assert result == "unknown"
 
@@ -114,12 +124,11 @@ class TestHasUncommittedPlan:
         cwd = Path("/custom/path")
         mock_run.return_value = MagicMock(returncode=0, stdout="")
         has_uncommitted_plan(plan_file, cwd=cwd)
-        mock_run.assert_called_once_with(
-            ["git", "status", "--porcelain", str(plan_file)],
-            capture_output=True,
-            text=True,
-            cwd=cwd,
-        )
+        mock_run.assert_called_once()
+        args, kwargs = mock_run.call_args
+        assert args[0] == ["git", "status", "--porcelain", str(plan_file)]
+        assert kwargs["cwd"] == cwd
+        assert "timeout" in kwargs
 
 
 class TestSyncWithRemote:
@@ -277,12 +286,10 @@ class TestPushWithRetry:
         mock_run.return_value = MagicMock(returncode=0)
         result = push_with_retry(branch="feature-branch")
         assert result is True
-        mock_run.assert_called_once_with(
-            ["git", "push", "origin", "feature-branch"],
-            capture_output=True,
-            text=True,
-            cwd=None,
-        )
+        mock_run.assert_called_once()
+        args, kwargs = mock_run.call_args
+        assert args[0] == ["git", "push", "origin", "feature-branch"]
+        assert "timeout" in kwargs
 
 
 class TestIterationCommitInfo:
@@ -648,6 +655,7 @@ class TestGetUncommittedDiff:
         first_call = mock_run.call_args_list[0]
         assert first_call[0][0] == ["git", "diff", "HEAD"]
         assert first_call[1]["cwd"] == cwd
+        assert "timeout" in first_call[1]
 
     @patch("ralph.git.subprocess.run")
     def test_default_max_bytes_is_200k(self, mock_run):

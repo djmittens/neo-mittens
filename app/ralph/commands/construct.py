@@ -26,7 +26,6 @@ from ..git import (
     get_current_branch,
     get_current_commit,
     get_uncommitted_diff,
-    has_uncommitted_tix,
     push_with_retry,
     sync_with_remote,
     IterationCommitInfo,
@@ -61,6 +60,7 @@ from ..prompts import (
     build_decompose_context,
 )
 from ..reconcile import (
+    dedup_tasks,
     reconcile_build,
     reconcile_verify,
     reconcile_investigate,
@@ -249,7 +249,10 @@ def _build_stage_prompt_tix(
             meta["batch_issue_ids"] = batch_ids
         else:
             meta["batch_issue_ids"] = [i.get("id", "") for i in issues]
-        context = build_investigate_context(issues, spec_name, spec_content)
+        pending_tasks = _filter_by_spec(tix.query_tasks(), spec_name)
+        context = build_investigate_context(
+            issues, spec_name, spec_content, pending_tasks=pending_tasks
+        )
     elif stage == Stage.DECOMPOSE:
         # Find killed task from state's decompose_target
         target_id = state.decompose_target
@@ -1541,6 +1544,25 @@ def cmd_construct(
         repo_root, ralph_dir, project_rules, tix_instance,
         run_id=run_id, log_dir=log_dir,
     )
+
+    # LLM dedup callback: called after INVESTIGATE to remove duplicate tasks.
+    def _dedup_callback() -> int:
+        def llm_fn(prompt: str) -> Optional[str]:
+            model = global_config.model_for_stage("investigate")
+            proc = spawn_opencode(
+                prompt, cwd=repo_root,
+                timeout=stage_timeout_ms, model=model,
+            )
+            result = stream_and_collect(
+                proc, stage_timeout_ms // 1000, print_output=False
+            )
+            return result.raw_output if result.return_code == 0 else None
+
+        count = dedup_tasks(tix_instance, llm_fn)
+        if count > 0:
+            print(f"  Task dedup: removed {count} duplicate(s)")
+        return count
+
     state_machine = ConstructStateMachine(
         config=global_config,
         metrics=metrics,
@@ -1551,6 +1573,7 @@ def cmd_construct(
         save_state_fn=lambda st: save_state(st, repo_root),
         tix=tix_instance,
         loop_detector=loop_detector,
+        dedup_fn=_dedup_callback,
     )
 
     # Run construct loop

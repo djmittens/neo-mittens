@@ -71,6 +71,7 @@ class ConstructStateMachine:
         save_state_fn: Callable[["RalphState"], None],
         tix: Optional["TixProtocol"] = None,
         loop_detector: Optional["LoopDetector"] = None,
+        dedup_fn: Optional[Callable[[], int]] = None,
     ):
         """Initialize the state machine.
 
@@ -84,6 +85,8 @@ class ConstructStateMachine:
             save_state_fn: Function to save orchestration state
             tix: Tix-compatible instance for ticket queries
             loop_detector: Optional loop detector
+            dedup_fn: Optional callable that deduplicates pending tasks
+                via LLM and returns the number of tasks dropped.
         """
         self.config = config
         self.metrics = metrics
@@ -94,6 +97,7 @@ class ConstructStateMachine:
         self.save_state = save_state_fn
         self.tix = tix
         self.loop_detector = loop_detector
+        self._dedup_fn = dedup_fn
         self._last_stage_output: str = ""
         self._batch_failure_count: int = 0
         self._ticket_cache: Optional[dict] = None
@@ -113,14 +117,32 @@ class ConstructStateMachine:
         Call once at the start of each iteration (or after mutations)
         to avoid redundant subprocess calls. All _has_* and _get_*
         methods read from this cache.
+
+        On transient failure, retries once. If both attempts fail,
+        keeps the previous cache (stale data is safer than empty data
+        which could trigger premature COMPLETE).
         """
         if not self.tix:
             self._ticket_cache = {}
             return
-        try:
-            self._ticket_cache = self.tix.query_full()
-        except Exception:
-            self._ticket_cache = {}
+        for attempt in range(2):
+            try:
+                self._ticket_cache = self.tix.query_full()
+                return
+            except Exception as exc:
+                if attempt == 0:
+                    logger.warning(
+                        "tix query_full failed (attempt 1/2): %s", exc
+                    )
+                else:
+                    logger.error(
+                        "tix query_full failed (attempt 2/2): %s — "
+                        "keeping previous cache",
+                        exc,
+                    )
+                    # Keep self._ticket_cache as-is (may be None or stale).
+                    # _get_cached_full() handles None by retrying, and
+                    # stale data is safer than empty data.
 
     def _scope_cache_to_spec(self, spec_name: str) -> None:
         """Filter the ticket cache to only items belonging to *spec_name*.
@@ -524,10 +546,33 @@ class ConstructStateMachine:
         else:
             state._clear_batch_state()
 
+        # Deduplicate tasks after INVESTIGATE adds new ones
+        deduped = self._deduplicate_tasks()
+        if deduped > 0:
+            self._invalidate_ticket_cache()
+            logger.info("Task dedup: removed %d duplicate(s)", deduped)
+
         # INVESTIGATE -> BUILD
         state.transition_to_build()
         self.save_state(state)
         return True, False
+
+    def _deduplicate_tasks(self) -> int:
+        """LLM-based dedup of pending tasks after INVESTIGATE.
+
+        Only runs if a dedup_fn callback was provided (construct.py
+        wires this up with an opencode-backed LLM call).
+
+        Returns:
+            Number of duplicate tasks removed.
+        """
+        if not self._dedup_fn:
+            return 0
+        try:
+            return self._dedup_fn()
+        except Exception as e:
+            logger.warning("Task dedup failed: %s", e)
+            return 0
 
     def _run_build(self, state: "RalphState") -> tuple[bool, bool]:
         """Run BUILD stage. Transitions to VERIFY."""

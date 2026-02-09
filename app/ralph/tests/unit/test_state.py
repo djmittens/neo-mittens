@@ -3,7 +3,7 @@
 Tests orchestration state management: stage transitions, batch tracking,
 decompose state, and JSON roundtrip.
 
-State is stored in .tix/ralph-state.json — separate from tix's plan.jsonl.
+State is ephemeral — stored under /tmp keyed by a hash of the repo root.
 Ticket data (tasks, issues, tombstones) is owned by tix — not by RalphState.
 """
 
@@ -11,7 +11,7 @@ import json
 import pytest
 from pathlib import Path
 
-from ralph.state import RalphState, load_state, save_state
+from ralph.state import RalphState, load_state, save_state, _state_path
 
 
 class TestRalphState:
@@ -148,25 +148,18 @@ class TestBatchManagement:
 class TestLoadState:
     """Tests for load_state function.
 
-    load_state reads from .tix/ralph-state.json within repo_root.
+    load_state reads from the ephemeral location under /tmp, and
+    migrates from legacy .tix/ralph-state.json if present.
     """
 
     def test_load_state_missing_file(self, tmp_path):
-        """Test loading state when .tix/ralph-state.json doesn't exist."""
+        """Test loading state when no state file exists."""
         state = load_state(tmp_path)
         assert state.spec is None
         assert state.stage == "PLAN"
 
-    def test_load_state_empty_file(self, tmp_path):
-        """Test loading state from empty file."""
-        tix_dir = tmp_path / ".tix"
-        tix_dir.mkdir()
-        (tix_dir / "ralph-state.json").write_text("")
-        state = load_state(tmp_path)
-        assert state.spec is None
-
-    def test_load_state_with_spec(self, tmp_path):
-        """Test loading state with spec field."""
+    def test_load_state_from_legacy_location(self, tmp_path):
+        """Test loading state migrates from legacy .tix/ralph-state.json."""
         tix_dir = tmp_path / ".tix"
         tix_dir.mkdir()
         (tix_dir / "ralph-state.json").write_text(
@@ -175,17 +168,36 @@ class TestLoadState:
         state = load_state(tmp_path)
         assert state.spec == "my-spec.md"
         assert state.stage == "BUILD"
+        # Legacy file should be cleaned up after migration
+        assert not (tix_dir / "ralph-state.json").exists()
+        # Ephemeral file should exist now
+        assert _state_path(tmp_path).exists()
+
+    def test_load_state_from_ephemeral_location(self, tmp_path):
+        """Test loading state from ephemeral /tmp location."""
+        # Save first to create the ephemeral file
+        state = RalphState(spec="eph-spec.md", stage="VERIFY")
+        save_state(state, tmp_path)
+        # Load it back
+        loaded = load_state(tmp_path)
+        assert loaded.spec == "eph-spec.md"
+        assert loaded.stage == "VERIFY"
+
+    def test_load_state_empty_legacy_file(self, tmp_path):
+        """Test loading state from empty legacy file."""
+        tix_dir = tmp_path / ".tix"
+        tix_dir.mkdir()
+        (tix_dir / "ralph-state.json").write_text("")
+        state = load_state(tmp_path)
+        assert state.spec is None
 
     def test_load_state_with_stage(self, tmp_path):
         """Test loading state with stage and batch fields."""
-        tix_dir = tmp_path / ".tix"
-        tix_dir.mkdir()
-        (tix_dir / "ralph-state.json").write_text(json.dumps({
-            "spec": "s.md",
-            "stage": "VERIFY",
-            "batch_items": ["t-1"],
-            "batch_attempt": 2,
-        }))
+        # Use save/load roundtrip
+        original = RalphState(spec="s.md", stage="VERIFY")
+        original.batch_items = ["t-1"]
+        original.batch_attempt = 2
+        save_state(original, tmp_path)
         state = load_state(tmp_path)
         assert state.stage == "VERIFY"
         assert state.batch_items == ["t-1"]
@@ -193,15 +205,11 @@ class TestLoadState:
 
     def test_load_state_with_decompose_state(self, tmp_path):
         """Test loading state with decompose fields."""
-        tix_dir = tmp_path / ".tix"
-        tix_dir.mkdir()
-        (tix_dir / "ralph-state.json").write_text(json.dumps({
-            "spec": "s.md",
-            "stage": "DECOMPOSE",
-            "decompose_target": "t-42",
-            "decompose_reason": "timeout",
-            "decompose_log": "/tmp/log",
-        }))
+        original = RalphState(spec="s.md", stage="DECOMPOSE")
+        original.decompose_target = "t-42"
+        original.decompose_reason = "timeout"
+        original.decompose_log = "/tmp/log"
+        save_state(original, tmp_path)
         state = load_state(tmp_path)
         assert state.stage == "DECOMPOSE"
         assert state.decompose_target == "t-42"
@@ -210,6 +218,7 @@ class TestLoadState:
 
     def test_load_state_rescue_migrates_to_investigate(self, tmp_path):
         """Test that old RESCUE stage is migrated to INVESTIGATE."""
+        # Write legacy file with RESCUE stage
         tix_dir = tmp_path / ".tix"
         tix_dir.mkdir()
         (tix_dir / "ralph-state.json").write_text(
@@ -222,28 +231,30 @@ class TestLoadState:
 class TestSaveState:
     """Tests for save_state function.
 
-    save_state writes to .tix/ralph-state.json within repo_root.
+    save_state writes to ephemeral location under /tmp.
     """
 
     def test_save_state_with_spec(self, tmp_path):
         """Test saving state with spec."""
         state = RalphState(spec="test-spec.md")
         save_state(state, tmp_path)
-        content = (tmp_path / ".tix" / "ralph-state.json").read_text()
+        path = _state_path(tmp_path)
+        content = path.read_text()
         assert '"spec": "test-spec.md"' in content
 
     def test_save_state_empty(self, tmp_path):
         """Test saving empty state writes stage."""
         state = RalphState()
         save_state(state, tmp_path)
-        content = (tmp_path / ".tix" / "ralph-state.json").read_text()
+        path = _state_path(tmp_path)
+        content = path.read_text()
         assert '"stage": "PLAN"' in content
 
-    def test_save_state_creates_tix_dir(self, tmp_path):
-        """Test that save_state creates .tix/ directory if missing."""
+    def test_save_state_creates_parent_dir(self, tmp_path):
+        """Test that save_state creates parent directory if missing."""
         state = RalphState(spec="s.md")
         save_state(state, tmp_path)
-        assert (tmp_path / ".tix" / "ralph-state.json").exists()
+        assert _state_path(tmp_path).exists()
 
     def test_save_state_with_decompose_fields(self, tmp_path):
         """Test saving state with decompose fields."""
@@ -252,7 +263,7 @@ class TestSaveState:
         state.decompose_reason = "timeout"
         state.decompose_log = "/tmp/log"
         save_state(state, tmp_path)
-        content = (tmp_path / ".tix" / "ralph-state.json").read_text()
+        content = _state_path(tmp_path).read_text()
         assert "t-42" in content
         assert "timeout" in content
         assert "/tmp/log" in content
@@ -264,11 +275,25 @@ class TestSaveState:
         state.batch_completed = ["t-0"]
         state.batch_attempt = 2
         save_state(state, tmp_path)
-        content = (tmp_path / ".tix" / "ralph-state.json").read_text()
+        content = _state_path(tmp_path).read_text()
         assert "t-1" in content
         assert "t-2" in content
         assert "t-0" in content
         assert '"batch_attempt": 2' in content
+
+    def test_save_state_not_in_repo_tree(self, tmp_path):
+        """Test that state file is NOT written to .tix/ in the repo."""
+        state = RalphState(spec="s.md")
+        save_state(state, tmp_path)
+        assert not (tmp_path / ".tix" / "ralph-state.json").exists()
+
+    def test_save_state_atomic_write(self, tmp_path):
+        """Test that no .tmp file is left behind after save."""
+        state = RalphState(spec="s.md")
+        save_state(state, tmp_path)
+        path = _state_path(tmp_path)
+        assert path.exists()
+        assert not path.with_suffix(".tmp").exists()
 
 
 class TestStateRoundtrip:
@@ -303,3 +328,28 @@ class TestStateRoundtrip:
         assert restored.decompose_target == "t-42"
         assert restored.decompose_reason == "context_limit"
         assert restored.decompose_log == "/tmp/decompose.log"
+
+
+class TestStatePath:
+    """Tests for _state_path and ephemeral storage."""
+
+    def test_state_path_is_under_tmp(self, tmp_path):
+        """Test state path is under /tmp, not in repo."""
+        import tempfile
+        path = _state_path(tmp_path)
+        assert str(path).startswith(tempfile.gettempdir())
+        assert ".tix" not in str(path)
+
+    def test_state_path_is_deterministic(self, tmp_path):
+        """Test same repo root always produces same state path."""
+        path1 = _state_path(tmp_path)
+        path2 = _state_path(tmp_path)
+        assert path1 == path2
+
+    def test_different_repos_get_different_paths(self, tmp_path):
+        """Test different repo roots get different state paths."""
+        repo_a = tmp_path / "repo-a"
+        repo_b = tmp_path / "repo-b"
+        repo_a.mkdir()
+        repo_b.mkdir()
+        assert _state_path(repo_a) != _state_path(repo_b)

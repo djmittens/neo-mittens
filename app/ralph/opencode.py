@@ -1,6 +1,7 @@
 """OpenCode process spawning and output parsing for Ralph."""
 
 import json
+import logging
 import os
 import subprocess
 import sys
@@ -10,6 +11,8 @@ from pathlib import Path
 from typing import Callable, Iterator, Optional, Tuple
 
 from ralph.context import Metrics
+
+logger = logging.getLogger(__name__)
 
 
 class Colors:
@@ -243,6 +246,7 @@ class SessionResult:
     timed_out: bool
     metrics: Metrics
     session_id: Optional[str] = None
+    output_truncated: bool = False
 
 
 def stream_and_collect(
@@ -266,10 +270,11 @@ def stream_and_collect(
     metrics = Metrics()
     output_lines: list[str] = []
     timed_out = False
+    output_truncated = False
     session_id: Optional[str] = None
 
     def read_output():
-        nonlocal timed_out, session_id
+        nonlocal timed_out, session_id, output_truncated
         if proc.stdout is None:
             return
         try:
@@ -324,8 +329,11 @@ def stream_and_collect(
                     if print_output:
                         print(f"{Colors.RED}{line}{Colors.RESET}", file=sys.stderr)
                         sys.stderr.flush()
-        except Exception:
-            pass
+        except Exception as exc:
+            output_truncated = True
+            logger.warning(
+                "Reader thread error (output may be truncated): %s", exc
+            )
 
     reader_thread = threading.Thread(target=read_output, daemon=True)
     reader_thread.start()
@@ -335,11 +343,13 @@ def stream_and_collect(
         if reader_thread.is_alive():
             timed_out = True
             proc.kill()
+            reader_thread.join(timeout=5)
             proc.wait()
         else:
             proc.wait()
     except Exception:
         proc.kill()
+        reader_thread.join(timeout=5)
         proc.wait()
         timed_out = True
 
@@ -350,4 +360,5 @@ def stream_and_collect(
         timed_out=timed_out,
         metrics=metrics,
         session_id=session_id,
+        output_truncated=output_truncated,
     )

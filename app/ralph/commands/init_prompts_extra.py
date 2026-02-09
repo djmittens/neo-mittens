@@ -110,6 +110,17 @@ Issues were discovered during verification or build. Research them and produce a
 
 Total: {{ISSUE_COUNT}} issues
 
+## Existing Pending Tasks
+
+These tasks are already in the queue. **Do NOT create new tasks that duplicate this work.**
+If your investigation reveals that an existing task already covers the fix, mark the issue as out_of_scope instead.
+
+```json
+{{PENDING_TASKS_JSON}}
+```
+
+Total: {{PENDING_TASK_COUNT}} pending tasks
+
 ## Spec: {{SPEC_FILE}}
 
 {{SPEC_CONTENT}}
@@ -121,9 +132,10 @@ Total: {{ISSUE_COUNT}} issues
 2. Each subagent should:
    - Read relevant code to understand the problem
    - Determine root cause
-   - Decide: needs a fix task, trivial fix, or out of scope
+   - Check whether an **existing pending task** already covers the fix
+   - Decide: needs a NEW fix task, covered by existing task (out_of_scope), or out of scope
 
-3. For issues needing fix tasks, include detailed task definitions in output.
+3. For issues needing fix tasks, include detailed task definitions in output. Only create a new task if NO existing pending task covers the same work.
 
 4. **Do NOT make code changes** — only research and produce tasks.
 

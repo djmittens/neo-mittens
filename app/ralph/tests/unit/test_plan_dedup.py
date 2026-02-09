@@ -1,12 +1,10 @@
-"""Tests for plan dedup pass (_build_dedup_prompt, _dedup_plan_tasks)."""
+"""Tests for shared LLM task dedup (reconcile._build_dedup_prompt, dedup_tasks)."""
 
 import json
 import pytest
-from pathlib import Path
-from unittest.mock import patch, MagicMock
+from unittest.mock import MagicMock
 
-from ralph.commands.plan import _build_dedup_prompt, _dedup_plan_tasks
-from ralph.context import Metrics
+from ralph.reconcile import _build_dedup_prompt, dedup_tasks
 from ralph.tests.conftest import MockTix as _MockTix
 
 
@@ -53,140 +51,126 @@ class TestBuildDedupPrompt:
         assert '"dropped"' in prompt
 
 
-class TestDedupPlanTasks:
-    """Tests for _dedup_plan_tasks."""
+class TestDedupTasks:
+    """Tests for the shared dedup_tasks function."""
 
-    def _mock_opencode_response(self, keep: list[str], dropped: list[str]) -> str:
-        """Build a fake opencode JSON event stream with dedup output."""
+    def _mock_llm_response(self, keep: list[str], dropped: list[str]):
+        """Return an llm_fn that produces a keep/drop response."""
         data = {"keep": keep, "dropped": dropped}
-        return f'[RALPH_OUTPUT]\n{json.dumps(data)}\n[/RALPH_OUTPUT]'
+        output = f'[RALPH_OUTPUT]\n{json.dumps(data)}\n[/RALPH_OUTPUT]'
+        return lambda prompt: output
 
-    def test_skips_small_plans(self):
+    def test_skips_small_task_lists(self):
         """Plans with <= 8 tasks skip dedup entirely."""
         tix = _MockTix(tasks=[
             {"id": f"t-{i}", "name": f"Task {i}"} for i in range(5)
         ])
-        config = MagicMock()
-        dropped = _dedup_plan_tasks(tix, config, Path("/tmp"))
+        llm_fn = MagicMock()
+        dropped = dedup_tasks(tix, llm_fn)
         assert dropped == 0
+        llm_fn.assert_not_called()
 
-    @patch("ralph.commands.plan._run_opencode")
-    def test_drops_duplicates(self, mock_run):
+    def test_drops_duplicates(self):
         """Model identifies duplicates and they get deleted."""
         tasks = [
             {"id": f"t-{i:04x}", "name": f"Task {i}"} for i in range(10)
         ]
         tix = _MockTix(tasks=tasks)
 
-        # Model says to keep first 8, drop last 2
         keep = [f"t-{i:04x}" for i in range(8)]
         dropped = [f"t-{i:04x}" for i in range(8, 10)]
-        response = self._mock_opencode_response(keep, dropped)
-        mock_run.return_value = (response, Metrics(), None)
+        llm_fn = self._mock_llm_response(keep, dropped)
 
-        config = MagicMock()
-        count = _dedup_plan_tasks(tix, config, Path("/tmp"))
+        count = dedup_tasks(tix, llm_fn)
         assert count == 2
-        # Verify tasks were actually deleted from MockTix
         remaining_ids = {t["id"] for t in tix.query_tasks()}
         assert "t-0008" not in remaining_ids
         assert "t-0009" not in remaining_ids
         assert "t-0000" in remaining_ids
 
-    @patch("ralph.commands.plan._run_opencode")
-    def test_no_output_returns_zero(self, mock_run):
-        """If opencode returns None, no tasks are dropped."""
+    def test_no_output_returns_zero(self):
+        """If LLM returns None, no tasks are dropped."""
         tasks = [{"id": f"t-{i}", "name": f"Task {i}"} for i in range(10)]
         tix = _MockTix(tasks=tasks)
-        mock_run.return_value = (None, Metrics(), None)
 
-        config = MagicMock()
-        count = _dedup_plan_tasks(tix, config, Path("/tmp"))
+        count = dedup_tasks(tix, lambda prompt: None)
         assert count == 0
 
-    @patch("ralph.commands.plan._run_opencode")
-    def test_unparseable_output_returns_zero(self, mock_run):
+    def test_unparseable_output_returns_zero(self):
         """If structured output can't be parsed, no tasks are dropped."""
         tasks = [{"id": f"t-{i}", "name": f"Task {i}"} for i in range(10)]
         tix = _MockTix(tasks=tasks)
-        mock_run.return_value = ("garbage output", Metrics(), None)
 
-        config = MagicMock()
-        count = _dedup_plan_tasks(tix, config, Path("/tmp"))
+        count = dedup_tasks(tix, lambda prompt: "garbage output")
         assert count == 0
 
-    @patch("ralph.commands.plan._run_opencode")
-    def test_safety_rejects_too_aggressive_dedup(self, mock_run):
+    def test_safety_rejects_too_aggressive_dedup(self):
         """If model wants to drop >50% of tasks, we reject the dedup."""
         tasks = [{"id": f"t-{i:04x}", "name": f"Task {i}"} for i in range(10)]
         tix = _MockTix(tasks=tasks)
 
-        # Model says keep only 3 out of 10 — suspicious
         keep = [f"t-{i:04x}" for i in range(3)]
         dropped = [f"t-{i:04x}" for i in range(3, 10)]
-        response = self._mock_opencode_response(keep, dropped)
-        mock_run.return_value = (response, Metrics(), None)
+        llm_fn = self._mock_llm_response(keep, dropped)
 
-        config = MagicMock()
-        count = _dedup_plan_tasks(tix, config, Path("/tmp"))
+        count = dedup_tasks(tix, llm_fn)
         assert count == 0  # Safety check should reject
 
-    @patch("ralph.commands.plan._run_opencode")
-    def test_empty_keep_list_drops_nothing(self, mock_run):
+    def test_empty_keep_list_drops_nothing(self):
         """If model returns empty keep list, nothing is dropped."""
         tasks = [{"id": f"t-{i}", "name": f"Task {i}"} for i in range(10)]
         tix = _MockTix(tasks=tasks)
-        response = self._mock_opencode_response([], ["t-0", "t-1"])
-        mock_run.return_value = (response, Metrics(), None)
+        llm_fn = self._mock_llm_response([], ["t-0", "t-1"])
 
-        config = MagicMock()
-        count = _dedup_plan_tasks(tix, config, Path("/tmp"))
+        count = dedup_tasks(tix, llm_fn)
         assert count == 0
 
-    @patch("ralph.commands.plan._run_opencode")
-    def test_contradictory_ids_skipped(self, mock_run):
+    def test_contradictory_ids_skipped(self):
         """If a task ID appears in both keep and dropped, it's kept."""
         tasks = [{"id": f"t-{i:04x}", "name": f"Task {i}"} for i in range(10)]
         tix = _MockTix(tasks=tasks)
 
-        # t-0009 appears in both keep and dropped — contradiction
         keep = [f"t-{i:04x}" for i in range(10)]
         dropped = ["t-0009"]
-        response = self._mock_opencode_response(keep, dropped)
-        mock_run.return_value = (response, Metrics(), None)
+        llm_fn = self._mock_llm_response(keep, dropped)
 
-        config = MagicMock()
-        count = _dedup_plan_tasks(tix, config, Path("/tmp"))
+        count = dedup_tasks(tix, llm_fn)
         assert count == 0  # Contradictory, should be skipped
 
-    @patch("ralph.commands.plan._run_opencode")
-    def test_unknown_ids_in_dropped_ignored(self, mock_run):
+    def test_unknown_ids_in_dropped_ignored(self):
         """Unknown task IDs in dropped list are silently ignored."""
         tasks = [{"id": f"t-{i:04x}", "name": f"Task {i}"} for i in range(10)]
         tix = _MockTix(tasks=tasks)
 
         keep = [f"t-{i:04x}" for i in range(9)]
-        dropped = ["t-0009", "t-unknown"]  # t-unknown doesn't exist
-        response = self._mock_opencode_response(keep, dropped)
-        mock_run.return_value = (response, Metrics(), None)
+        dropped = ["t-0009", "t-unknown"]
+        llm_fn = self._mock_llm_response(keep, dropped)
 
-        config = MagicMock()
-        count = _dedup_plan_tasks(tix, config, Path("/tmp"))
+        count = dedup_tasks(tix, llm_fn)
         assert count == 1  # Only t-0009 should be dropped
 
-    @patch("ralph.commands.plan._run_opencode")
-    def test_passes_session_id(self, mock_run):
-        """Session ID is forwarded to _run_opencode for context reuse."""
+    def test_custom_min_tasks(self):
+        """Custom min_tasks threshold controls when dedup runs."""
         tasks = [{"id": f"t-{i}", "name": f"Task {i}"} for i in range(10)]
         tix = _MockTix(tasks=tasks)
-        response = self._mock_opencode_response(
-            [f"t-{i}" for i in range(10)], []
-        )
-        mock_run.return_value = (response, Metrics(), None)
+        llm_fn = MagicMock()
 
-        config = MagicMock()
-        _dedup_plan_tasks(tix, config, Path("/tmp"), session_id="sess-123")
+        # With min_tasks=15, 10 tasks should skip
+        count = dedup_tasks(tix, llm_fn, min_tasks=15)
+        assert count == 0
+        llm_fn.assert_not_called()
 
-        # Verify session_id was passed through
-        call_args = mock_run.call_args
-        assert call_args.kwargs.get("session_id") == "sess-123"
+    def test_llm_fn_receives_prompt(self):
+        """The LLM callable receives the dedup prompt."""
+        tasks = [{"id": f"t-{i}", "name": f"Task {i}"} for i in range(10)]
+        tix = _MockTix(tasks=tasks)
+
+        captured_prompt = []
+        def llm_fn(prompt):
+            captured_prompt.append(prompt)
+            return None  # No output
+
+        dedup_tasks(tix, llm_fn)
+        assert len(captured_prompt) == 1
+        assert "[RALPH_OUTPUT]" in captured_prompt[0]
+        assert "t-0" in captured_prompt[0]

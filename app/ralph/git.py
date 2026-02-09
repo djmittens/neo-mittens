@@ -11,6 +11,12 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
 
+# Timeouts for git subprocess calls (seconds).
+# Local operations (rev-parse, status, diff, add, commit) are fast.
+# Network operations (fetch, push) need more headroom.
+_GIT_LOCAL_TIMEOUT = 30
+_GIT_NETWORK_TIMEOUT = 120
+
 
 def get_current_commit(cwd: Optional[Path] = None) -> str:
     """Get current HEAD commit hash (short).
@@ -21,10 +27,15 @@ def get_current_commit(cwd: Optional[Path] = None) -> str:
     Returns:
         Short commit hash or "unknown" on failure.
     """
-    result = subprocess.run(
-        ["git", "rev-parse", "--short", "HEAD"], capture_output=True, text=True, cwd=cwd
-    )
-    return result.stdout.strip() if result.returncode == 0 else "unknown"
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "--short", "HEAD"],
+            capture_output=True, text=True, cwd=cwd,
+            timeout=_GIT_LOCAL_TIMEOUT,
+        )
+        return result.stdout.strip() if result.returncode == 0 else "unknown"
+    except subprocess.TimeoutExpired:
+        return "unknown"
 
 
 def get_current_branch(cwd: Optional[Path] = None) -> str:
@@ -43,9 +54,10 @@ def get_current_branch(cwd: Optional[Path] = None) -> str:
             text=True,
             check=True,
             cwd=cwd,
+            timeout=_GIT_LOCAL_TIMEOUT,
         )
         return result.stdout.strip()
-    except subprocess.CalledProcessError:
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired):
         return "unknown"
 
 
@@ -62,46 +74,36 @@ def has_uncommitted_plan(plan_file: Path, cwd: Optional[Path] = None) -> bool:
     if not plan_file.exists():
         return False
 
-    result = subprocess.run(
-        ["git", "status", "--porcelain", str(plan_file)],
-        capture_output=True,
-        text=True,
-        cwd=cwd,
-    )
-    return bool(result.stdout.strip())
+    try:
+        result = subprocess.run(
+            ["git", "status", "--porcelain", str(plan_file)],
+            capture_output=True,
+            text=True,
+            cwd=cwd,
+            timeout=_GIT_LOCAL_TIMEOUT,
+        )
+        return bool(result.stdout.strip())
+    except subprocess.TimeoutExpired:
+        return False
 
 
 def has_uncommitted_tix(
     plan_file: Path,
-    state_file: Path,
     cwd: Optional[Path] = None,
 ) -> bool:
-    """Check if tix plan.jsonl or ralph-state.json have uncommitted changes.
+    """Check if tix plan.jsonl has uncommitted changes.
+
+    Ralph orchestration state is ephemeral (in /tmp) and is not
+    tracked by git, so only plan.jsonl is checked.
 
     Args:
         plan_file: Path to the tix plan.jsonl file.
-        state_file: Path to .tix/ralph-state.json.
         cwd: Working directory for git command.
 
     Returns:
-        True if either file has uncommitted changes.
+        True if plan.jsonl has uncommitted changes.
     """
-    files = []
-    if plan_file.exists():
-        files.append(str(plan_file))
-    if state_file.exists():
-        files.append(str(state_file))
-
-    if not files:
-        return False
-
-    result = subprocess.run(
-        ["git", "status", "--porcelain"] + files,
-        capture_output=True,
-        text=True,
-        cwd=cwd,
-    )
-    return bool(result.stdout.strip())
+    return has_uncommitted_plan(plan_file, cwd)
 
 
 def _commit_plan_if_modified(plan_file: Optional[Path], cwd: Optional[Path]) -> None:
@@ -112,11 +114,13 @@ def _commit_plan_if_modified(plan_file: Optional[Path], cwd: Optional[Path]) -> 
         cwd: Working directory for git commands
     """
     if plan_file and has_uncommitted_plan(plan_file, cwd):
-        subprocess.run(["git", "add", str(plan_file)], cwd=cwd, capture_output=True)
+        subprocess.run(
+            ["git", "add", str(plan_file)],
+            cwd=cwd, capture_output=True, timeout=_GIT_LOCAL_TIMEOUT,
+        )
         subprocess.run(
             ["git", "commit", "-m", "ralph: save state before sync"],
-            cwd=cwd,
-            capture_output=True,
+            cwd=cwd, capture_output=True, timeout=_GIT_LOCAL_TIMEOUT,
         )
 
 
@@ -130,10 +134,15 @@ def _fetch_remote(branch: str, cwd: Optional[Path]) -> bool:
     Returns:
         True if fetch succeeded, False otherwise
     """
-    fetch_result = subprocess.run(
-        ["git", "fetch", "origin", branch], capture_output=True, text=True, cwd=cwd
-    )
-    return fetch_result.returncode == 0
+    try:
+        fetch_result = subprocess.run(
+            ["git", "fetch", "origin", branch],
+            capture_output=True, text=True, cwd=cwd,
+            timeout=_GIT_NETWORK_TIMEOUT,
+        )
+        return fetch_result.returncode == 0
+    except subprocess.TimeoutExpired:
+        return False
 
 
 def _is_branch_behind(cwd: Optional[Path]) -> bool:
@@ -145,13 +154,18 @@ def _is_branch_behind(cwd: Optional[Path]) -> bool:
     Returns:
         True if branch is behind or has diverged, False if up to date
     """
-    status_result = subprocess.run(
-        ["git", "status", "-uno"], capture_output=True, text=True, cwd=cwd
-    )
-    return (
-        "Your branch is behind" in status_result.stdout
-        or "have diverged" in status_result.stdout
-    )
+    try:
+        status_result = subprocess.run(
+            ["git", "status", "-uno"],
+            capture_output=True, text=True, cwd=cwd,
+            timeout=_GIT_LOCAL_TIMEOUT,
+        )
+        return (
+            "Your branch is behind" in status_result.stdout
+            or "have diverged" in status_result.stdout
+        )
+    except subprocess.TimeoutExpired:
+        return False
 
 
 def _rebase_onto_remote(branch: str, cwd: Optional[Path]) -> str:
@@ -164,13 +178,27 @@ def _rebase_onto_remote(branch: str, cwd: Optional[Path]) -> str:
     Returns:
         "updated" on success, "conflict" on merge conflict, "error" otherwise
     """
-    rebase_result = subprocess.run(
-        ["git", "rebase", f"origin/{branch}"], capture_output=True, text=True, cwd=cwd
-    )
+    try:
+        rebase_result = subprocess.run(
+            ["git", "rebase", f"origin/{branch}"],
+            capture_output=True, text=True, cwd=cwd,
+            timeout=_GIT_LOCAL_TIMEOUT,
+        )
+    except subprocess.TimeoutExpired:
+        subprocess.run(
+            ["git", "rebase", "--abort"],
+            capture_output=True, cwd=cwd,
+            timeout=_GIT_LOCAL_TIMEOUT,
+        )
+        return "error"
 
     if rebase_result.returncode != 0:
         # Abort rebase to restore clean state
-        subprocess.run(["git", "rebase", "--abort"], capture_output=True, cwd=cwd)
+        subprocess.run(
+            ["git", "rebase", "--abort"],
+            capture_output=True, cwd=cwd,
+            timeout=_GIT_LOCAL_TIMEOUT,
+        )
         if (
             "CONFLICT" in rebase_result.stdout
             or "conflict" in rebase_result.stderr.lower()
@@ -245,9 +273,14 @@ def push_with_retry(
             return False
 
     for attempt in range(retries):
-        push_result = subprocess.run(
-            ["git", "push", "origin", branch], capture_output=True, text=True, cwd=cwd
-        )
+        try:
+            push_result = subprocess.run(
+                ["git", "push", "origin", branch],
+                capture_output=True, text=True, cwd=cwd,
+                timeout=_GIT_NETWORK_TIMEOUT,
+            )
+        except subprocess.TimeoutExpired:
+            return False
 
         if push_result.returncode == 0:
             return True
@@ -332,13 +365,17 @@ def has_uncommitted_changes(cwd: Optional[Path] = None) -> bool:
     Returns:
         True if there are any uncommitted changes.
     """
-    result = subprocess.run(
-        ["git", "status", "--porcelain"],
-        capture_output=True,
-        text=True,
-        cwd=cwd,
-    )
-    return bool(result.stdout.strip())
+    try:
+        result = subprocess.run(
+            ["git", "status", "--porcelain"],
+            capture_output=True,
+            text=True,
+            cwd=cwd,
+            timeout=_GIT_LOCAL_TIMEOUT,
+        )
+        return bool(result.stdout.strip())
+    except subprocess.TimeoutExpired:
+        return False
 
 
 def lookup_task_names(
@@ -509,33 +546,39 @@ def get_uncommitted_diff(
 
 def _get_raw_diff(cwd: Optional[Path] = None) -> str:
     """Run git diff HEAD, falling back to --cached."""
-    result = subprocess.run(
-        ["git", "diff", "HEAD"],
-        capture_output=True,
-        text=True,
-        cwd=cwd,
-    )
-    diff = result.stdout if result.returncode == 0 else ""
-    if not diff:
+    try:
         result = subprocess.run(
-            ["git", "diff", "--cached"],
-            capture_output=True,
-            text=True,
-            cwd=cwd,
+            ["git", "diff", "HEAD"],
+            capture_output=True, text=True, cwd=cwd,
+            timeout=_GIT_LOCAL_TIMEOUT,
         )
         diff = result.stdout if result.returncode == 0 else ""
+    except subprocess.TimeoutExpired:
+        diff = ""
+    if not diff:
+        try:
+            result = subprocess.run(
+                ["git", "diff", "--cached"],
+                capture_output=True, text=True, cwd=cwd,
+                timeout=_GIT_LOCAL_TIMEOUT,
+            )
+            diff = result.stdout if result.returncode == 0 else ""
+        except subprocess.TimeoutExpired:
+            diff = ""
     return diff
 
 
 def _get_diff_stat(cwd: Optional[Path] = None) -> str:
     """Run git diff HEAD --stat for a file-level summary."""
-    result = subprocess.run(
-        ["git", "diff", "HEAD", "--stat"],
-        capture_output=True,
-        text=True,
-        cwd=cwd,
-    )
-    return result.stdout.strip() if result.returncode == 0 else ""
+    try:
+        result = subprocess.run(
+            ["git", "diff", "HEAD", "--stat"],
+            capture_output=True, text=True, cwd=cwd,
+            timeout=_GIT_LOCAL_TIMEOUT,
+        )
+        return result.stdout.strip() if result.returncode == 0 else ""
+    except subprocess.TimeoutExpired:
+        return ""
 
 
 def _assemble_diff(stat: str, diff: str, max_bytes: int) -> str:
@@ -569,16 +612,19 @@ def commit_iteration(
     if not has_uncommitted_changes(cwd):
         return False
 
-    subprocess.run(
-        ["git", "add", "-A"],
-        cwd=cwd,
-        capture_output=True,
-    )
+    try:
+        subprocess.run(
+            ["git", "add", "-A"],
+            cwd=cwd, capture_output=True,
+            timeout=_GIT_LOCAL_TIMEOUT,
+        )
 
-    message = build_commit_message(info)
-    result = subprocess.run(
-        ["git", "commit", "-m", message],
-        cwd=cwd,
-        capture_output=True,
-    )
-    return result.returncode == 0
+        message = build_commit_message(info)
+        result = subprocess.run(
+            ["git", "commit", "-m", message],
+            cwd=cwd, capture_output=True,
+            timeout=_GIT_LOCAL_TIMEOUT,
+        )
+        return result.returncode == 0
+    except subprocess.TimeoutExpired:
+        return False

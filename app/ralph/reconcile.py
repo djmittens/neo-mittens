@@ -13,13 +13,14 @@ import json
 import re
 import sys
 from dataclasses import dataclass, field
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 
 from ralph.tix import Tix, TixError, TixProtocol
 from ralph.validation import validate_task, validate_issue
 
 __all__ = [
     "ReconcileResult",
+    "dedup_tasks",
     "reconcile_build",
     "reconcile_verify",
     "reconcile_investigate",
@@ -683,6 +684,11 @@ def reconcile_investigate(
     This is batch-aware: issues outside the batch are preserved for the
     next batch iteration.
 
+    Task dedup: proposed tasks are checked against existing pending tasks
+    by exact name match.  If a match is found, the existing task is updated
+    (upsert) instead of creating a duplicate.  This prevents the common
+    VERIFY-reject -> INVESTIGATE -> duplicate-task proliferation loop.
+
     Args:
         tix: Tix harness instance.
         agent_output: Full agent stdout.
@@ -706,8 +712,31 @@ def reconcile_investigate(
         for repair in repairs:
             print(f"  Schema repair: {repair}", file=sys.stderr)
 
-    # Add all investigation tasks
+    # Add investigation tasks with dedup against existing pending tasks.
+    # INVESTIGATE often proposes tasks that duplicate already-pending work
+    # (e.g., a rejected task goes back to pending, then INVESTIGATE creates
+    # a new near-identical task for the same issue).  Use exact-match upsert
+    # like reconcile_plan does for validation retries.
+    existing_map = _get_existing_task_map(tix)
+    seen_names: set[str] = set()
+
     for task_data in data.get("tasks", []):
+        name = task_data.get("name", "")
+
+        # Deduplicate within this batch
+        if name and name in seen_names:
+            continue
+        if name:
+            seen_names.add(name)
+
+        # Upsert: if task with same name already pending, update it.
+        # Semantic dedup (LLM-based) runs after reconcile via the state
+        # machine's _deduplicate_tasks — this is just exact-match.
+        existing_id = existing_map.get(name) if name else None
+        if existing_id:
+            _upsert_task(tix, existing_id, task_data, result)
+            continue
+
         _add_task(tix, task_data, result, spec_name=spec_name)
 
     # Attach investigate-stage telemetry to newly created tasks (best-effort).
@@ -937,6 +966,164 @@ def reconcile_plan(
 # Helpers
 # =============================================================================
 
+
+def _token_similarity(a: str, b: str) -> float:
+    """Jaccard similarity over word tokens (case-insensitive).
+
+    Returns a score between 0.0 and 1.0.  Used by reconcile_investigate
+    to detect near-duplicate tasks (e.g. "Complete heap rename across
+    all files" vs "Complete heap rename across all source files").
+    """
+    tokens_a = set(a.lower().split())
+    tokens_b = set(b.lower().split())
+    if not tokens_a and not tokens_b:
+        return 1.0
+    if not tokens_a or not tokens_b:
+        return 0.0
+    return len(tokens_a & tokens_b) / len(tokens_a | tokens_b)
+
+
+def _find_similar_task(
+    name: str,
+    existing_map: dict[str, str],
+    threshold: float = 0.7,
+) -> Optional[str]:
+    """Find an existing pending task with a similar name.
+
+    Returns the task ID if a match is found above the threshold, else None.
+    Uses Jaccard token similarity — the same approach as issue dedup in
+    the state machine.
+    """
+    if not name:
+        return None
+    for existing_name, task_id in existing_map.items():
+        if _token_similarity(name, existing_name) >= threshold:
+            return task_id
+    return None
+
+# =============================================================================
+# LLM-based task deduplication
+# =============================================================================
+
+# Type alias for the LLM callback used by dedup_tasks.
+# Takes a prompt string, returns the model's output string (or None on failure).
+LlmCallable = Callable[[str], Optional[str]]
+
+
+def _build_dedup_prompt(tasks: list[dict]) -> str:
+    """Build a prompt asking the model to deduplicate the task list.
+
+    The prompt is self-contained — no codebase context needed.  The model
+    sees task IDs, names, and truncated notes, and returns which IDs to
+    keep (choosing the best version of each duplicate group).
+    """
+    task_lines = []
+    for t in tasks:
+        tid = t.get("id", "?")
+        name = t.get("name", "untitled")
+        notes = t.get("notes", "")
+        short_notes = notes[:120] + "..." if len(notes) > 120 else notes
+        task_lines.append(f"- [{tid}] {name}")
+        if short_notes:
+            task_lines.append(f"  Notes: {short_notes}")
+    task_block = "\n".join(task_lines)
+
+    return (
+        "Review this task list and remove duplicates.  Some tasks describe "
+        "the same work with slightly different names (e.g. different "
+        "line-range formats, minor wording changes, or rephrased "
+        "descriptions of the same operation).\n\n"
+        f"## Tasks ({len(tasks)} total)\n\n"
+        f"{task_block}\n\n"
+        "## Instructions\n\n"
+        "For each group of duplicate tasks, keep the ONE with the best/"
+        "most detailed name and notes.\n"
+        "Do NOT modify task names or notes — just choose which IDs to keep.\n"
+        "Do NOT remove tasks that target different files or different "
+        "operations, even if they sound similar.\n\n"
+        "Output your answer inside [RALPH_OUTPUT] markers:\n\n"
+        "[RALPH_OUTPUT]\n"
+        '{"keep": ["t-id1", "t-id2", ...], '
+        '"dropped": ["t-id3", "t-id4", ...]}\n'
+        "[/RALPH_OUTPUT]\n\n"
+        'The "keep" array must contain every task ID that should remain.\n'
+        'The "dropped" array contains IDs that are duplicates and should '
+        "be removed.\n"
+        "Every task ID must appear in exactly one of the two arrays.\n"
+    )
+
+
+def dedup_tasks(
+    tix: TixProtocol,
+    llm_fn: LlmCallable,
+    min_tasks: int = 8,
+) -> int:
+    """Ask the LLM to deduplicate the pending task list.
+
+    Sends just task IDs + names + truncated notes to the model.  The
+    model returns keep/drop decisions.  Safety checks reject obviously
+    bad results (empty keep list, >50% dropped, contradictory IDs).
+
+    This is used after PLAN retries and after INVESTIGATE creates new
+    tasks — any time the pending queue may have accumulated duplicates.
+
+    Args:
+        tix: Tix harness instance.
+        llm_fn: Callable that takes a prompt string and returns the
+            model's output string, or None on failure.
+        min_tasks: Skip dedup if fewer than this many tasks.
+
+    Returns:
+        Number of tasks dropped.
+    """
+    tasks = tix.query_tasks()
+    if len(tasks) <= min_tasks:
+        return 0
+
+    prompt = _build_dedup_prompt(tasks)
+    output_str = llm_fn(prompt)
+    if output_str is None:
+        print("  Dedup pass: no output from model", file=sys.stderr)
+        return 0
+
+    data = extract_structured_output(output_str)
+    if data is None:
+        print("  Dedup pass: could not parse output", file=sys.stderr)
+        return 0
+
+    keep_ids = set(data.get("keep", []))
+    dropped_ids = data.get("dropped", [])
+
+    if not keep_ids:
+        return 0
+
+    # Sanity check: keep list should contain most tasks
+    task_ids = {t.get("id") for t in tasks}
+    if len(keep_ids) < len(task_ids) * 0.5:
+        print(
+            f"  Dedup pass: keep list too small "
+            f"({len(keep_ids)}/{len(task_ids)}), skipping",
+            file=sys.stderr,
+        )
+        return 0
+
+    dropped = 0
+    for tid in dropped_ids:
+        if not isinstance(tid, str) or not tid:
+            continue
+        if tid not in task_ids:
+            continue
+        if tid in keep_ids:
+            continue  # Contradictory
+        try:
+            tix.task_delete(tid)
+            dropped += 1
+        except TixError:
+            pass
+
+    return dropped
+
+
 # Regex for valid tix task IDs: "t-" followed by hex chars.
 _VALID_TASK_ID_RE = re.compile(r"^t-[0-9a-f]+$")
 
@@ -944,8 +1131,8 @@ _VALID_TASK_ID_RE = re.compile(r"^t-[0-9a-f]+$")
 def _get_existing_task_map(tix: TixProtocol) -> dict[str, str]:
     """Get mapping of task name -> task ID for existing pending tasks.
 
-    Used by reconcile_plan to upsert tasks that the model re-emits
-    during validation retries (with potentially improved notes/accept).
+    Used by reconcile_plan (validation retries) and reconcile_investigate
+    (reject-investigate loops) to upsert tasks instead of duplicating.
     """
     try:
         tasks = tix.query_tasks()
