@@ -870,6 +870,12 @@ def reconcile_plan(
         result.ok = False
         return result
 
+    # Build map of existing task names for upsert detection.
+    # Validation retries often re-emit previously accepted tasks with
+    # improved notes/accept — update in place rather than duplicating.
+    existing_map = _get_existing_task_map(tix)
+    seen_names: set[str] = set()
+
     # Validate and filter tasks before adding.
     # PLAN runs on the expensive reasoning model — bad tasks waste
     # downstream BUILD and VERIFY calls. Strict validation here ensures
@@ -885,6 +891,11 @@ def reconcile_plan(
         notes = task_data.get("notes", "")
         accept = task_data.get("accept", "")
 
+        # Deduplicate within this batch
+        if name in seen_names:
+            continue
+        seen_names.add(name)
+
         vr = validate_task(name, notes, accept, is_modification=True, strict=True)
         if not vr.valid:
             reasons = "; ".join(e.message for e in vr.errors)
@@ -894,6 +905,12 @@ def reconcile_plan(
         # Sanitize deps before sending to tix
         if "deps" in task_data:
             task_data["deps"] = _sanitize_deps(task_data["deps"], result)
+
+        # Upsert: if task with same name exists, update it
+        existing_id = existing_map.get(name)
+        if existing_id:
+            _upsert_task(tix, existing_id, task_data, result)
+            continue
 
         task_data["spec"] = spec_name
         task_data.setdefault("assigned", "ralph")
@@ -922,6 +939,47 @@ def reconcile_plan(
 
 # Regex for valid tix task IDs: "t-" followed by hex chars.
 _VALID_TASK_ID_RE = re.compile(r"^t-[0-9a-f]+$")
+
+
+def _get_existing_task_map(tix: TixProtocol) -> dict[str, str]:
+    """Get mapping of task name -> task ID for existing pending tasks.
+
+    Used by reconcile_plan to upsert tasks that the model re-emits
+    during validation retries (with potentially improved notes/accept).
+    """
+    try:
+        tasks = tix.query_tasks()
+        return {
+            t["name"]: t["id"]
+            for t in tasks
+            if t.get("name") and t.get("id")
+        }
+    except TixError:
+        return {}
+
+
+def _upsert_task(
+    tix: TixProtocol,
+    task_id: str,
+    task_data: dict,
+    result: ReconcileResult,
+) -> None:
+    """Update an existing task with improved notes/accept from a retry.
+
+    Validation retries re-emit tasks with better details. Rather than
+    adding duplicates, update the existing task in place.
+    """
+    fields: dict[str, str] = {}
+    if task_data.get("notes"):
+        fields["notes"] = task_data["notes"]
+    if task_data.get("accept"):
+        fields["accept"] = task_data["accept"]
+    if not fields:
+        return
+    try:
+        tix.task_update(task_id, fields)
+    except TixError as e:
+        result.errors.append(f"Failed to update {task_id}: {e}")
 
 
 def _sanitize_deps(deps: Any, result: ReconcileResult) -> list[str]:

@@ -35,7 +35,7 @@ from ..opencode import (
 from ..prompts import (
     load_and_inject, build_plan_context, build_prompt_with_rules, find_project_rules,
 )
-from ..reconcile import reconcile_plan, ReconcileResult
+from ..reconcile import reconcile_plan, extract_structured_output, ReconcileResult
 from ..state import load_state, save_state
 from ..tix import Tix, TixError
 from ..utils import Colors
@@ -460,6 +460,131 @@ def _print_plan_report(
                 print(f"     {Colors.CYAN}Deps:{Colors.NC} {', '.join(deps)}")
 
 
+def _build_dedup_prompt(tasks: list[dict]) -> str:
+    """Build a prompt asking the model to deduplicate the task list.
+
+    The prompt is self-contained — no codebase context needed. The model
+    sees task IDs, names, and truncated notes, and returns which IDs to
+    keep (choosing the best version of each duplicate group).
+
+    Args:
+        tasks: List of task dicts from tix.query_tasks().
+
+    Returns:
+        Prompt string for the dedup pass.
+    """
+    task_lines = []
+    for t in tasks:
+        tid = t.get("id", "?")
+        name = t.get("name", "untitled")
+        notes = t.get("notes", "")
+        # Truncate notes to keep prompt small
+        short_notes = notes[:120] + "..." if len(notes) > 120 else notes
+        task_lines.append(f"- [{tid}] {name}")
+        if short_notes:
+            task_lines.append(f"  Notes: {short_notes}")
+    task_block = "\n".join(task_lines)
+
+    return f"""Review this task list and remove duplicates. Some tasks describe the same work
+with slightly different names (e.g. different line-range formats, minor wording changes).
+
+## Tasks ({len(tasks)} total)
+
+{task_block}
+
+## Instructions
+
+For each group of duplicate tasks, keep the ONE with the best/most detailed name and notes.
+Do NOT modify task names or notes — just choose which IDs to keep.
+Do NOT remove tasks that target different files or different operations, even if they sound similar.
+
+Output your answer inside [RALPH_OUTPUT] markers:
+
+[RALPH_OUTPUT]
+{{"keep": ["t-id1", "t-id2", ...], "dropped": ["t-id3", "t-id4", ...]}}
+[/RALPH_OUTPUT]
+
+The "keep" array must contain every task ID that should remain.
+The "dropped" array contains IDs that are duplicates and should be removed.
+Every task ID must appear in exactly one of the two arrays.
+"""
+
+
+def _dedup_plan_tasks(
+    tix: Tix,
+    config: GlobalConfig,
+    cwd: Path,
+    session_id: Optional[str] = None,
+) -> int:
+    """Ask the LLM to deduplicate the plan task list.
+
+    Runs after plan retries complete. Sends just the task list (no
+    codebase context) and applies the model's keep/drop decisions.
+
+    Args:
+        tix: Tix harness instance.
+        config: Ralph configuration.
+        cwd: Working directory.
+        session_id: Optional session ID to continue (reuses plan context).
+
+    Returns:
+        Number of tasks dropped.
+    """
+    tasks = tix.query_tasks()
+    if len(tasks) <= 8:
+        return 0  # Small plans unlikely to have duplicates
+
+    prompt = _build_dedup_prompt(tasks)
+
+    # Use the same session if available (model already knows the plan),
+    # otherwise start a fresh lightweight call.
+    output_str, _metrics, _sid = _run_opencode(
+        config, prompt, cwd, session_id=session_id
+    )
+    if output_str is None:
+        print(f"{Colors.YELLOW}Dedup pass: no output from model{Colors.NC}",
+              file=sys.stderr)
+        return 0
+
+    data = extract_structured_output(output_str)
+    if data is None:
+        print(f"{Colors.YELLOW}Dedup pass: could not parse output{Colors.NC}",
+              file=sys.stderr)
+        return 0
+
+    keep_ids = set(data.get("keep", []))
+    dropped_ids = data.get("dropped", [])
+
+    if not keep_ids:
+        # Model didn't return a keep list — don't delete anything
+        return 0
+
+    # Sanity check: keep list should contain most tasks
+    task_ids = {t.get("id") for t in tasks}
+    if len(keep_ids) < len(task_ids) * 0.5:
+        print(f"{Colors.YELLOW}Dedup pass: keep list too small "
+              f"({len(keep_ids)}/{len(task_ids)}), skipping{Colors.NC}",
+              file=sys.stderr)
+        return 0
+
+    # Delete tasks not in the keep list
+    dropped = 0
+    for tid in dropped_ids:
+        if not isinstance(tid, str) or not tid:
+            continue
+        if tid not in task_ids:
+            continue  # Unknown ID, skip
+        if tid in keep_ids:
+            continue  # Contradictory, skip
+        try:
+            tix.task_delete(tid)
+            dropped += 1
+        except TixError:
+            pass
+
+    return dropped
+
+
 def cmd_plan(config: GlobalConfig, spec_file: str, args) -> int:
     """Plan mode - generate implementation plan from spec.
 
@@ -653,6 +778,15 @@ def _finalize_plan(
         print(f"{Colors.GREEN}Added {len(recon.tasks_added)} tasks via tix{Colors.NC}")
     if recon.tasks_deleted:
         print(f"{Colors.YELLOW}Dropped {len(recon.tasks_deleted)} obsolete tasks{Colors.NC}")
+
+    # Dedup pass: ask the model to remove near-duplicate tasks that
+    # slipped through exact-match upsert (different names, same work).
+    if config and retry > 0:
+        dedup_count = _dedup_plan_tasks(
+            tix, config, cwd, session_id=session_id
+        )
+        if dedup_count > 0:
+            print(f"{Colors.GREEN}Dedup: removed {dedup_count} duplicate tasks{Colors.NC}")
 
     # Get tasks back from tix for prioritization and reporting
     spec_tasks = tix.query_tasks()

@@ -398,6 +398,70 @@ class TestReconcilePlan:
         # Should have validation errors
         assert any("rejected by validation" in e for e in result.errors)
 
+    def test_upsert_existing_task_on_retry(self):
+        """Retry re-emitting same task name updates notes/accept in place."""
+        from ralph.tests.conftest import MockTix
+        import json
+        tix = MockTix()
+        task_v1 = {
+            "name": "Extract config module",
+            "notes": "Source: src/config.py lines 1-50. Extract GlobalConfig class to separate module.",
+            "accept": "pytest tests/unit/test_config.py passes"
+        }
+        output1 = f'[RALPH_OUTPUT]\n{json.dumps({"tasks": [task_v1]})}\n[/RALPH_OUTPUT]'
+
+        # First call adds the task
+        result1 = reconcile_plan(tix, output1, "my-spec.md")
+        assert len(result1.tasks_added) == 1
+        task_id = result1.tasks_added[0]
+
+        # Second call with improved notes (simulating retry)
+        task_v2 = {
+            "name": "Extract config module",
+            "notes": "Source: src/config.py lines 1-50. Extract GlobalConfig class into its own module with proper imports.",
+            "accept": "pytest tests/unit/test_config.py -v passes"
+        }
+        output2 = f'[RALPH_OUTPUT]\n{json.dumps({"tasks": [task_v2]})}\n[/RALPH_OUTPUT]'
+        result2 = reconcile_plan(tix, output2, "my-spec.md")
+
+        # Should not add a new task
+        assert len(result2.tasks_added) == 0
+        # Should have updated the existing task
+        updated = [t for t in tix._tasks if t["id"] == task_id]
+        assert len(updated) == 1
+        assert "proper imports" in updated[0]["notes"]
+        assert "-v" in updated[0]["accept"]
+
+    def test_dedup_within_single_output(self, mock_tix):
+        """Duplicate task names within a single output are deduplicated."""
+        import json
+        task = {
+            "name": "Rename types in gc_heap.h",
+            "notes": "Source: src/gc_heap.h lines 107-280. Replace struct valk_gc_heap2 with struct valk_gc_heap.",
+            "accept": "grep -E 'valk_gc_heap2' src/gc_heap.h | wc -l returns 0"
+        }
+        output = f'[RALPH_OUTPUT]\n{json.dumps({"tasks": [task, task]})}\n[/RALPH_OUTPUT]'
+        result = reconcile_plan(mock_tix, output, "my-spec.md")
+        assert len(result.tasks_added) == 1
+
+    def test_dedup_allows_different_names(self, mock_tix):
+        """Tasks with different names are both added even if similar."""
+        import json
+        task1 = {
+            "name": "Rename types in gc_heap.h",
+            "notes": "Source: src/gc_heap.h lines 107-280. Replace struct valk_gc_heap2 with struct valk_gc_heap.",
+            "accept": "grep -E 'valk_gc_heap2' src/gc_heap.h | wc -l returns 0"
+        }
+        task2 = {
+            "name": "Rename types in gc.h",
+            "notes": "Source: src/gc.h lines 1-420. Replace valk_gc_heap2_t with valk_gc_heap_t throughout.",
+            "accept": "grep -E 'valk_gc_heap2' src/gc.h | wc -l returns 0"
+        }
+        output = f'[RALPH_OUTPUT]\n{json.dumps({"tasks": [task1, task2]})}\n[/RALPH_OUTPUT]'
+        result = reconcile_plan(mock_tix, output, "my-spec.md")
+        assert len(result.tasks_added) == 2
+
+
 
 # =============================================================================
 # ReconcileResult
