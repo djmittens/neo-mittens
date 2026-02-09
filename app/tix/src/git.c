@@ -83,6 +83,13 @@ tix_err_t tix_git_current_branch(char *out, sz out_len) {
   return TIX_OK;
 }
 
+int tix_git_is_detached_head(void) {
+  char buf[TIX_MAX_BRANCH_LEN];
+  tix_err_t err = tix_git_current_branch(buf, sizeof(buf));
+  if (err != TIX_OK) { return 0; }
+  return strcmp(buf, "HEAD") == 0;
+}
+
 tix_err_t tix_git_is_clean(int *is_clean) {
   if (is_clean == NULL) { return TIX_ERR_INVALID_ARG; }
 

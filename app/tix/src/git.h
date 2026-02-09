@@ -26,3 +26,6 @@ tix_err_t tix_git_user_name(char *out, sz out_len);
 
 /* Check if a string is safe to embed in a shell command (no metacharacters) */
 int tix_git_is_shell_safe(const char *s);
+
+/* Returns 1 if HEAD is detached (no branch), 0 otherwise */
+int tix_git_is_detached_head(void);

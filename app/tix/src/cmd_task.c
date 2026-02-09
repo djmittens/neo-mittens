@@ -25,9 +25,11 @@ static int has_dependents(tix_db_t *db, const char *id) {
 }
 
 /* Check if ticket belongs to current branch.
-   Returns 1 if OK (ticket has no branch or matches current), 0 if mismatch. */
+   Returns 1 if OK (ticket has no branch or matches current).
+   Returns 0 if mismatch or HEAD is detached. */
 static int check_branch_scope(const tix_ticket_t *ticket) {
   if (ticket->branch[0] == '\0') { return 1; }
+  if (tix_git_is_detached_head()) { return 0; }
   char current[TIX_MAX_BRANCH_LEN];
   if (tix_git_current_branch(current, sizeof(current)) != TIX_OK) {
     return 1;
@@ -191,6 +193,13 @@ static tix_err_t task_add(tix_ctx_t *ctx, int argc, char **argv) {
   /* auto-fill author from git user.name */
   tix_git_user_name(ticket.author, sizeof(ticket.author));
 
+  /* reject task creation in detached HEAD state */
+  if (tix_git_is_detached_head()) {
+    fprintf(stderr, "error: cannot create tasks in detached HEAD state; "
+            "checkout a branch first\n");
+    return TIX_ERR_STATE;
+  }
+
   /* stamp current branch on creation */
   tix_git_current_branch(ticket.branch, sizeof(ticket.branch));
 
@@ -249,8 +258,13 @@ static tix_err_t task_done(tix_ctx_t *ctx, int argc, char **argv) {
   }
 
   if (!check_branch_scope(&ticket)) {
-    fprintf(stderr, "error: task %s belongs to branch '%s', "
-            "not current branch\n", id, ticket.branch);
+    if (tix_git_is_detached_head()) {
+      fprintf(stderr, "error: HEAD is detached; task %s belongs to "
+              "branch '%s'\n", id, ticket.branch);
+    } else {
+      fprintf(stderr, "error: task %s belongs to branch '%s', "
+              "not current branch\n", id, ticket.branch);
+    }
     return TIX_ERR_INVALID_ARG;
   }
 
@@ -309,8 +323,13 @@ static tix_err_t task_accept(tix_ctx_t *ctx, int argc, char **argv) {
   }
 
   if (!check_branch_scope(&ticket)) {
-    fprintf(stderr, "error: task %s belongs to branch '%s', "
-            "not current branch\n", id, ticket.branch);
+    if (tix_git_is_detached_head()) {
+      fprintf(stderr, "error: HEAD is detached; task %s belongs to "
+              "branch '%s'\n", id, ticket.branch);
+    } else {
+      fprintf(stderr, "error: task %s belongs to branch '%s', "
+              "not current branch\n", id, ticket.branch);
+    }
     return TIX_ERR_INVALID_ARG;
   }
 
@@ -375,8 +394,13 @@ static tix_err_t task_reject(tix_ctx_t *ctx, int argc, char **argv) {
   }
 
   if (!check_branch_scope(&ticket)) {
-    fprintf(stderr, "error: task %s belongs to branch '%s', "
-            "not current branch\n", id, ticket.branch);
+    if (tix_git_is_detached_head()) {
+      fprintf(stderr, "error: HEAD is detached; task %s belongs to "
+              "branch '%s'\n", id, ticket.branch);
+    } else {
+      fprintf(stderr, "error: task %s belongs to branch '%s', "
+              "not current branch\n", id, ticket.branch);
+    }
     return TIX_ERR_INVALID_ARG;
   }
 
@@ -428,8 +452,13 @@ static tix_err_t task_delete(tix_ctx_t *ctx, int argc, char **argv) {
   }
 
   if (!check_branch_scope(&ticket)) {
-    fprintf(stderr, "error: task %s belongs to branch '%s', "
-            "not current branch\n", id, ticket.branch);
+    if (tix_git_is_detached_head()) {
+      fprintf(stderr, "error: HEAD is detached; task %s belongs to "
+              "branch '%s'\n", id, ticket.branch);
+    } else {
+      fprintf(stderr, "error: task %s belongs to branch '%s', "
+              "not current branch\n", id, ticket.branch);
+    }
     return TIX_ERR_INVALID_ARG;
   }
 
