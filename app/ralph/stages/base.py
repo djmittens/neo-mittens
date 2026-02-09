@@ -347,7 +347,20 @@ class ConstructStateMachine:
     # =========================================================================
 
     def run_iteration(self, iteration: int) -> tuple[bool, bool]:
-        """Run a single iteration of the construct loop.
+        """Run a full iteration of the construct loop.
+
+        A single iteration drives the state machine through a complete
+        task lifecycle: BUILD -> VERIFY -> (INVESTIGATE/DECOMPOSE if
+        needed) until the cycle reaches a natural commit point or the
+        spec is complete.
+
+        The iteration ends when:
+        - The spec is complete (all tasks accepted, no issues)
+        - A BUILD stage runs (one task worked on per iteration)
+        - No further progress can be made (no work, failure)
+
+        This means one call to ``run_iteration`` produces one
+        meaningful unit of work suitable for a single commit.
 
         Args:
             iteration: Current iteration number
@@ -355,15 +368,13 @@ class ConstructStateMachine:
         Returns:
             Tuple of (should_continue, spec_complete)
         """
-        # Refresh ticket cache once per iteration (replaces 8-12 subprocess calls)
+        # Refresh ticket cache once per iteration
         self._refresh_ticket_cache()
         state = self.load_state()
 
         if not state.spec:
             return False, False
 
-        # Scope the cache to the active spec so the state machine never
-        # sees tasks/issues from unrelated specs.
         self._scope_cache_to_spec(state.spec)
 
         if state.stage == "COMPLETE":
@@ -381,7 +392,66 @@ class ConstructStateMachine:
                     f"(threshold: {progress_interval}s)"
                 )
 
-        # Dispatch based on explicit stage
+        # Guard against runaway internal loops.  Each stage dispatch
+        # counts as one step; if we exceed this limit something is
+        # wrong with the state transitions.
+        max_steps = 20
+
+        for _step in range(max_steps):
+            state = self.load_state()
+            self._refresh_ticket_cache()
+            self._scope_cache_to_spec(state.spec or "")
+
+            if state.stage == "COMPLETE":
+                return False, True
+
+            # Unknown or PLAN stage — bootstrap from ticket state
+            if state.stage not in (
+                "BUILD", "VERIFY", "INVESTIGATE", "DECOMPOSE",
+            ):
+                state.stage = self._compute_initial_stage()
+                self.save_state(state)
+                if state.stage == "COMPLETE":
+                    return False, True
+                continue
+
+            # Dispatch the current stage
+            should_continue, spec_complete = self._dispatch_stage(
+                state,
+            )
+
+            if spec_complete:
+                return False, True
+            if not should_continue:
+                return False, False
+
+            # After BUILD completes we have done one task —
+            # continue the inner loop to VERIFY it (and handle
+            # any INVESTIGATE/DECOMPOSE) before returning.
+            # But after a *second* BUILD we stop: one task per
+            # iteration.
+            new_state = self.load_state()
+            if new_state.stage == "BUILD" and state.stage != "BUILD":
+                # We've cycled back to BUILD after
+                # VERIFY (+ optional INVESTIGATE/DECOMPOSE).
+                # The iteration is complete.
+                return True, False
+
+        # Exhausted max steps — something is cycling
+        logger.warning(
+            "Iteration %d hit max internal steps (%d)",
+            iteration, max_steps,
+        )
+        return True, False
+
+    def _dispatch_stage(
+        self, state: "RalphState",
+    ) -> tuple[bool, bool]:
+        """Dispatch a single stage and return its result.
+
+        Returns:
+            Tuple of (should_continue, spec_complete)
+        """
         if state.stage == "DECOMPOSE":
             return self._run_decompose(state)
         if state.stage == "INVESTIGATE":
@@ -390,11 +460,7 @@ class ConstructStateMachine:
             return self._run_build(state)
         if state.stage == "VERIFY":
             return self._run_verify(state)
-
-        # Unknown or PLAN stage — compute from ticket state
-        state.stage = self._compute_initial_stage()
-        self.save_state(state)
-        return True, False
+        return False, False
 
     def _compute_initial_stage(self) -> str:
         """Compute initial stage from ticket state (migration helper)."""

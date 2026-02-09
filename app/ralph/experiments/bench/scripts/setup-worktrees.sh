@@ -1,8 +1,8 @@
 #!/bin/bash
 # setup-worktrees.sh <experiment.conf>
 #
-# Creates one isolated git worktree per profile, all branched from BASE_REF.
-# Safe to re-run: skips worktrees that already exist.
+# Creates one isolated git worktree per profile, all branched from BASE_REF
+# (a tag, branch, or commit). Safe to re-run: skips worktrees that already exist.
 #
 # Usage:
 #   bash bench/scripts/setup-worktrees.sh 001-profile-showdown/experiment.conf

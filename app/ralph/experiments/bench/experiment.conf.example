@@ -12,8 +12,9 @@
 # Absolute path to the target git repository
 TARGET_REPO="$HOME/src/valkyria"
 
-# Branch or commit to branch experiments from
-BASE_REF="networking"
+# Tag, branch, or commit to branch experiments from.
+# Prefer tags over branches so the base stays stable as the branch advances.
+BASE_REF="ralph-experiment-refactor-spec"
 
 # Ralph spec filename (must exist in the target repo's ralph/specs/)
 SPEC="system-architecture-refactor.md"

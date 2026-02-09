@@ -1,10 +1,13 @@
 """Git operations for Ralph.
 
 Provides functions for syncing with remote, pushing with retry,
-checking uncommitted changes, and getting commit information.
+checking uncommitted changes, getting commit information, and
+building descriptive commit messages from iteration results.
 """
 
+import json
 import subprocess
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
 
@@ -259,3 +262,323 @@ def push_with_retry(
             return False
 
     return False
+
+
+# =============================================================================
+# Iteration commit support
+# =============================================================================
+
+
+@dataclass
+class TaskVerdict:
+    """A single task accept/reject verdict for commit messages."""
+
+    task_id: str
+    name: str
+    accepted: bool
+    reason: str = ""
+
+
+@dataclass
+class IterationCommitInfo:
+    """Accumulated info for building a descriptive commit message.
+
+    Populated across BUILD and VERIFY stages within one logical
+    iteration. Reset after each commit.
+    """
+
+    iteration: int = 0
+    spec: str = ""
+    stages_run: list[str] = field(default_factory=list)
+    verdicts: list[TaskVerdict] = field(default_factory=list)
+    tasks_added: list[str] = field(default_factory=list)
+    issues_added: list[str] = field(default_factory=list)
+    issues_investigated: int = 0
+
+    @property
+    def has_verdicts(self) -> bool:
+        """True if any tasks were accepted or rejected."""
+        return len(self.verdicts) > 0
+
+    @property
+    def accepted(self) -> list[TaskVerdict]:
+        """Verdicts where the task was accepted."""
+        return [v for v in self.verdicts if v.accepted]
+
+    @property
+    def rejected(self) -> list[TaskVerdict]:
+        """Verdicts where the task was rejected."""
+        return [v for v in self.verdicts if not v.accepted]
+
+    def reset(self, iteration: int = 0) -> None:
+        """Clear accumulated state for the next commit cycle."""
+        self.iteration = iteration
+        self.stages_run.clear()
+        self.verdicts.clear()
+        self.tasks_added.clear()
+        self.issues_added.clear()
+        self.issues_investigated = 0
+
+
+def has_uncommitted_changes(cwd: Optional[Path] = None) -> bool:
+    """Check if the working tree has any uncommitted changes.
+
+    Includes both staged and unstaged modifications, additions,
+    and deletions across all tracked and untracked files.
+
+    Args:
+        cwd: Working directory for git command.
+
+    Returns:
+        True if there are any uncommitted changes.
+    """
+    result = subprocess.run(
+        ["git", "status", "--porcelain"],
+        capture_output=True,
+        text=True,
+        cwd=cwd,
+    )
+    return bool(result.stdout.strip())
+
+
+def lookup_task_names(
+    plan_file: Path, task_ids: list[str]
+) -> dict[str, str]:
+    """Look up task names from plan.jsonl by task ID.
+
+    Scans accept and task entries in the plan file to find the
+    human-readable name for each task ID.
+
+    Args:
+        plan_file: Path to .tix/plan.jsonl.
+        task_ids: List of task IDs to look up.
+
+    Returns:
+        Dict mapping task_id -> task_name. Missing IDs are omitted.
+    """
+    if not plan_file.exists() or not task_ids:
+        return {}
+
+    wanted = set(task_ids)
+    names: dict[str, str] = {}
+
+    try:
+        for line in plan_file.read_text().splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                entry = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            entry_id = entry.get("id", "")
+            if entry_id in wanted and "name" in entry:
+                names[entry_id] = entry["name"]
+    except OSError:
+        pass
+
+    return names
+
+
+def build_commit_message(info: IterationCommitInfo) -> str:
+    """Build a descriptive commit message from iteration results.
+
+    Format:
+        Subject: ralph: <action summary>
+        Body: task details, rejection reasons, metadata
+
+    Args:
+        info: Accumulated iteration commit info.
+
+    Returns:
+        Multi-line commit message string.
+    """
+    accepted = info.accepted
+    rejected = info.rejected
+
+    # Build subject line
+    subject = _build_subject(info, accepted, rejected)
+
+    # Build body
+    body_parts: list[str] = []
+
+    if accepted:
+        body_parts.append("Accepted:")
+        for v in accepted:
+            body_parts.append(f"  {v.task_id} {v.name}")
+
+    if rejected:
+        body_parts.append("Rejected:")
+        for v in rejected:
+            body_parts.append(f"  {v.task_id} {v.name}")
+            if v.reason:
+                # Truncate long reasons to keep commit readable
+                reason = v.reason if len(v.reason) <= 200 else (
+                    v.reason[:197] + "..."
+                )
+                body_parts.append(f"    reason: {reason}")
+
+    if info.tasks_added:
+        count = len(info.tasks_added)
+        body_parts.append(f"Tasks created: {count}")
+
+    if info.issues_investigated:
+        body_parts.append(
+            f"Issues investigated: {info.issues_investigated}"
+        )
+
+    # Footer
+    footer_parts = []
+    if info.spec:
+        footer_parts.append(f"Spec: {info.spec}")
+    if info.stages_run:
+        footer_parts.append(
+            f"Stages: {' -> '.join(info.stages_run)}"
+        )
+    footer_parts.append(f"Iteration: {info.iteration}")
+
+    if footer_parts:
+        body_parts.append("")
+        body_parts.extend(footer_parts)
+
+    if body_parts:
+        return subject + "\n\n" + "\n".join(body_parts)
+    return subject
+
+
+def _build_subject(
+    info: IterationCommitInfo,
+    accepted: list[TaskVerdict],
+    rejected: list[TaskVerdict],
+) -> str:
+    """Build the commit subject line.
+
+    Prioritizes the most significant action: accept > reject > build.
+    """
+    if accepted and not rejected:
+        if len(accepted) == 1:
+            return f"ralph: accept {accepted[0].task_id} {accepted[0].name}"
+        return f"ralph: accept {len(accepted)} tasks"
+    if rejected and not accepted:
+        if len(rejected) == 1:
+            return f"ralph: reject {rejected[0].task_id} {rejected[0].name}"
+        return f"ralph: reject {len(rejected)} tasks"
+    if accepted and rejected:
+        return (
+            f"ralph: accept {len(accepted)}, "
+            f"reject {len(rejected)} tasks"
+        )
+    if info.tasks_added:
+        return f"ralph: create {len(info.tasks_added)} tasks"
+    if info.issues_investigated:
+        return (
+            f"ralph: investigate {info.issues_investigated} issues"
+        )
+    if "BUILD" in info.stages_run:
+        return f"ralph: build iteration {info.iteration}"
+    return f"ralph: iteration {info.iteration}"
+
+
+def get_uncommitted_diff(
+    cwd: Optional[Path] = None,
+    max_bytes: int = 200_000,
+) -> str:
+    """Get the diff of all uncommitted changes (staged + unstaged).
+
+    Combines ``git diff HEAD`` to capture everything not yet committed.
+    A ``--stat`` summary is always prepended so VERIFY sees the full
+    file list even when the detailed diff is truncated.
+
+    The result is truncated to *max_bytes* to avoid blowing up the
+    VERIFY prompt context window.
+
+    Args:
+        cwd: Working directory for git command.
+        max_bytes: Maximum bytes of diff output to return.
+
+    Returns:
+        Unified diff string (with stat header), or empty string if no changes.
+    """
+    diff = _get_raw_diff(cwd)
+    if not diff:
+        return ""
+
+    stat = _get_diff_stat(cwd)
+    return _assemble_diff(stat, diff, max_bytes)
+
+
+def _get_raw_diff(cwd: Optional[Path] = None) -> str:
+    """Run git diff HEAD, falling back to --cached."""
+    result = subprocess.run(
+        ["git", "diff", "HEAD"],
+        capture_output=True,
+        text=True,
+        cwd=cwd,
+    )
+    diff = result.stdout if result.returncode == 0 else ""
+    if not diff:
+        result = subprocess.run(
+            ["git", "diff", "--cached"],
+            capture_output=True,
+            text=True,
+            cwd=cwd,
+        )
+        diff = result.stdout if result.returncode == 0 else ""
+    return diff
+
+
+def _get_diff_stat(cwd: Optional[Path] = None) -> str:
+    """Run git diff HEAD --stat for a file-level summary."""
+    result = subprocess.run(
+        ["git", "diff", "HEAD", "--stat"],
+        capture_output=True,
+        text=True,
+        cwd=cwd,
+    )
+    return result.stdout.strip() if result.returncode == 0 else ""
+
+
+def _assemble_diff(stat: str, diff: str, max_bytes: int) -> str:
+    """Combine stat header and diff body, truncating if needed."""
+    header = f"--- DIFF STAT ---\n{stat}\n\n--- FULL DIFF ---\n" if stat else ""
+    budget = max_bytes - len(header.encode("utf-8", errors="replace"))
+    if budget < 0:
+        budget = 0
+    if len(diff) > budget:
+        limit_kb = max_bytes // 1024
+        diff = diff[:budget] + f"\n\n... (diff truncated at {limit_kb}KB) ..."
+    return header + diff
+
+
+def commit_iteration(
+    info: IterationCommitInfo,
+    cwd: Optional[Path] = None,
+) -> bool:
+    """Stage all changes and commit with a descriptive message.
+
+    Runs ``git add -A`` to stage everything (code + tix state),
+    then commits with a message built from the iteration info.
+
+    Args:
+        info: Accumulated iteration results.
+        cwd: Working directory for git commands.
+
+    Returns:
+        True if a commit was created, False otherwise.
+    """
+    if not has_uncommitted_changes(cwd):
+        return False
+
+    subprocess.run(
+        ["git", "add", "-A"],
+        cwd=cwd,
+        capture_output=True,
+    )
+
+    message = build_commit_message(info)
+    result = subprocess.run(
+        ["git", "commit", "-m", message],
+        cwd=cwd,
+        capture_output=True,
+    )
+    return result.returncode == 0

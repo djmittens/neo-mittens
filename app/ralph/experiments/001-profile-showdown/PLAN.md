@@ -32,7 +32,7 @@ that require understanding C threading primitives and GC internals.
   - Phase 0: Mechanical rename of ~90 symbols across ~30 files
   - Phases 1-7: Architectural refactor (new struct, STW protocol, AIO integration)
   - Phase 8-9: Cleanup and verification
-- **Branch**: `networking` at commit `41a0480`
+- **Base**: tag `ralph-experiment-refactor-spec` (commit `534d11f` on `networking`)
 - **Machine**: redbox (Ryzen 9 9900X 12C/24T, 64GB RAM, RTX 5090 32GB)
 
 ## Profiles Under Test
@@ -219,8 +219,8 @@ for t in d.get('tombstones', {}).get('rejected', []):
 "
 
 # Check git diff for what was actually produced
-git diff networking..HEAD --stat
-git log --oneline networking..HEAD
+git diff ralph-experiment-refactor-spec..HEAD --stat
+git log --oneline ralph-experiment-refactor-spec..HEAD
 
 # Read stage logs
 ls -lt /tmp/ralph-logs/ralph-*-build.log | head -5

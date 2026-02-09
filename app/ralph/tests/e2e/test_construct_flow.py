@@ -238,9 +238,10 @@ class TestConstructStageTransitions:
         assert spec_complete is True
 
     def test_full_cycle_build_verify_investigate(self, tmp_path: Path):
-        """Test full cycle: BUILD -> VERIFY -> INVESTIGATE -> BUILD.
+        """Test full cycle in a single iteration.
 
-        The flow is: BUILD -> VERIFY -> (if issues) INVESTIGATE -> BUILD.
+        One run_iteration call should drive:
+        BUILD -> VERIFY -> INVESTIGATE -> (back to BUILD = done).
         """
         repo_root = init_ralph_with_git(tmp_path)
         create_test_state(repo_root, stage=Stage.BUILD)
@@ -268,7 +269,7 @@ class TestConstructStageTransitions:
                 save_state(state, repo_root)
 
             if stage == Stage.INVESTIGATE:
-                # Investigate resolves issue
+                # Investigate resolves issue, tasks still pending
                 mock_tix._issues = []
                 state = load_state(repo_root)
                 state.batch_completed.append("i-test01")
@@ -290,14 +291,14 @@ class TestConstructStageTransitions:
             tix=mock_tix,
         )
 
-        # Iteration 1: BUILD (marks task done)
-        sm.run_iteration(1)
-        # Iteration 2: VERIFY (rejects task, creates issue)
-        sm.run_iteration(2)
-        # Iteration 3: INVESTIGATE (issues exist, processes them)
-        sm.run_iteration(3)
+        # Single iteration drives the full cycle
+        should_continue, spec_complete = sm.run_iteration(1)
 
-        assert stages_run == [Stage.BUILD, Stage.VERIFY, Stage.INVESTIGATE]
+        assert should_continue is True
+        assert spec_complete is False
+        assert Stage.BUILD in stages_run
+        assert Stage.VERIFY in stages_run
+        assert Stage.INVESTIGATE in stages_run
 
     def test_verify_skips_investigate_when_no_issues(self, tmp_path: Path):
         """When VERIFY passes everything and no issues, go to COMPLETE."""

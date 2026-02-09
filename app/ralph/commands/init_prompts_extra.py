@@ -10,7 +10,7 @@ calls task/issue CLI commands directly — the harness reconciles via tix.
 
 DEFAULT_PROMPT_VERIFY = """# VERIFY Stage
 
-Verify that done tasks meet their acceptance criteria.
+Verify that done tasks meet their acceptance criteria AND that code changes are correct.
 
 ## Done Tasks to Verify
 
@@ -24,7 +24,17 @@ Total: {{DONE_COUNT}} tasks
 
 {{SPEC_CONTENT}}
 
+## Code Diff
+
+The following diff shows what was changed by the BUILD stage. Review it carefully.
+
+```diff
+{{BUILD_DIFF}}
+```
+
 ## Instructions
+
+### Part 1: Acceptance Criteria
 
 1. **For each done task**, spawn a subagent (Task tool) to verify its acceptance criteria. Run all verifications in parallel.
 
@@ -38,6 +48,20 @@ Total: {{DONE_COUNT}} tasks
    - For unchecked criteria (`- [ ]`): identify what's missing
 
 4. For unchecked criteria not covered by existing tasks, include them in `new_tasks`.
+
+### Part 2: Diff Quality Review
+
+Review the diff above for these **quality defects**. Any defect found MUST be reported as an issue:
+
+1. **Logic changes beyond spec scope**: Control flow was restructured (if/else branches added, removed, reordered, or nested differently). The spec defines what changes are allowed — anything else is a defect. Example: a rename-only spec should not change any control flow, function signatures, or remove parameters.
+
+2. **Comment hallucinations**: Comment text was changed to something nonsensical or factually wrong. When identifiers in comments are renamed, verify the comment still accurately describes what the code does. Example: renaming `heap2` to `heap` in a comment is fine, but changing "wrappers around heap2" to "wrappers around mark_children" is wrong if `mark_children` is unrelated.
+
+3. **Scope creep**: Changes that go beyond what the spec asked for — removed function declarations, deleted parameters, changed API signatures, removed forward declarations, removed typedefs — unless the spec explicitly requested it.
+
+4. **Stale comments**: Comments that reference old names or removed entities that should have been updated.
+
+### Part 3: Cross-cutting Issues
 
 5. **Report cross-cutting issues** in `issues`: problems that affect multiple tasks or indicate a missing prerequisite. Examples:
    - A shared dependency is broken causing several tasks to fail the same way
@@ -64,9 +88,9 @@ When done, output your result between markers as PLAIN TEXT (no code fences):
 
 - `results`: one entry per done task — `passed: true` to accept, `passed: false` to reject
 - `reason`: required when `passed: false` — diagnostic with file paths, error output, and root cause
-- `issues`: cross-cutting problems not tied to a single task (missing prerequisites, broken shared deps, spec issues)
+- `issues`: cross-cutting problems not tied to a single task (missing prerequisites, broken shared deps, spec issues). **Diff quality defects** (logic changes, hallucinated comments, scope creep) MUST be reported here with the specific file, line, and what is wrong.
   - `desc` MUST be specific — include file paths, error messages, and what needs to happen
-  - `priority`: "high" for blocking issues, "medium" for non-blocking
+  - `priority`: "high" for logic/correctness issues, "medium" for comments/style
 - `spec_complete`: true only if ALL spec criteria are satisfied and no new work needed
 - `new_tasks`: tasks for uncovered spec criteria (notes must have file paths, accept must be measurable)
 

@@ -94,6 +94,12 @@ class GlobalConfig:
     art_style: str = "braille"
     dashboard_buffer_lines: int = 2000
 
+    # Post-build hooks
+    format_command: str = ""  # Shell command to run after BUILD (e.g. "clang-format -i")
+
+    # Diff review limits
+    diff_max_bytes: int = 200_000  # Max bytes of diff to inject into VERIFY prompt
+
     # Directories (relative to repo root, or absolute)
     ralph_dir: str = "ralph"
     log_dir: str = "/tmp/ralph-logs"

@@ -17,6 +17,7 @@ from ralph.commands.construct import (
     _looks_like_command,
     _pick_best_task,
     _run_acceptance_precheck,
+    _run_format_command,
 )
 from ralph.config import GlobalConfig
 from ralph.context import Metrics
@@ -1115,3 +1116,35 @@ class TestLoadSpecContent:
         """Missing specs directory returns empty string."""
         content = _load_spec_content(tmp_path / "nope", "feat.md")
         assert content == ""
+
+
+class TestRunFormatCommand:
+    """Tests for _run_format_command post-BUILD hook."""
+
+    def test_successful_command(self, tmp_path: Path):
+        """Returns True when command exits 0."""
+        result = _run_format_command("true", tmp_path)
+        assert result is True
+
+    def test_failing_command(self, tmp_path: Path):
+        """Returns False when command exits non-zero."""
+        result = _run_format_command("false", tmp_path)
+        assert result is False
+
+    def test_runs_in_repo_root(self, tmp_path: Path):
+        """Command runs in the specified repo root directory."""
+        marker = tmp_path / "marker.txt"
+        _run_format_command(f"touch {marker}", tmp_path)
+        assert marker.exists()
+
+    def test_timeout_returns_false(self, tmp_path: Path):
+        """Returns False when command exceeds timeout."""
+        result = _run_format_command("sleep 10", tmp_path, timeout_seconds=1)
+        assert result is False
+
+    def test_nonexistent_command_returns_false(self, tmp_path: Path):
+        """Returns False for a command that doesn't exist."""
+        result = _run_format_command(
+            "this_command_does_not_exist_12345", tmp_path,
+        )
+        assert result is False

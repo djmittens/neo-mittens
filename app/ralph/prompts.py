@@ -122,7 +122,10 @@ def build_build_context(
 
 
 def build_verify_context(
-    done_tasks: list[dict], spec_name: str, spec_content: str = ""
+    done_tasks: list[dict],
+    spec_name: str,
+    spec_content: str = "",
+    build_diff: str = "",
 ) -> dict[str, Any]:
     """Build context dict for VERIFY stage prompt.
 
@@ -130,6 +133,7 @@ def build_verify_context(
         done_tasks: List of done task dicts from tix query.
         spec_name: Spec file name.
         spec_content: Content of the spec file.
+        build_diff: Unified diff of uncommitted changes from BUILD.
 
     Returns:
         Context dict for prompt injection.
@@ -139,6 +143,7 @@ def build_verify_context(
         "done_count": len(done_tasks),
         "spec_file": spec_name,
         "spec_content": spec_content,
+        "build_diff": build_diff or "(no diff available)",
     }
 
 

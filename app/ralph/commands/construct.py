@@ -25,9 +25,14 @@ from ..context import Metrics, LoopDetector, SessionSummary, context_pressure
 from ..git import (
     get_current_branch,
     get_current_commit,
+    get_uncommitted_diff,
     has_uncommitted_tix,
     push_with_retry,
     sync_with_remote,
+    IterationCommitInfo,
+    TaskVerdict,
+    commit_iteration,
+    lookup_task_names,
 )
 from ..ledger import (
     RunRecord,
@@ -202,6 +207,7 @@ def _build_stage_prompt_tix(
     ralph_dir: Path,
     project_rules: Optional[str] = None,
     config: Optional[GlobalConfig] = None,
+    repo_root: Optional[Path] = None,
 ) -> Tuple[Optional[str], Optional[dict]]:
     """Build a prompt for a stage using tix for ticket data.
     
@@ -227,7 +233,11 @@ def _build_stage_prompt_tix(
         done = full.get("tasks", {}).get("done", [])
         if not done:
             return None, None
-        context = build_verify_context(done, spec_name, spec_content)
+        max_diff = config.diff_max_bytes if config else 200_000
+        build_diff = get_uncommitted_diff(cwd=repo_root, max_bytes=max_diff)
+        context = build_verify_context(
+            done, spec_name, spec_content, build_diff=build_diff,
+        )
     elif stage == Stage.INVESTIGATE:
         issues = _filter_by_spec(tix.query_issues(), spec_name)
         if not issues:
@@ -393,7 +403,8 @@ def _run_stage(
 ) -> StageResult:
     """Run a stage using tix for ticket data and reconcile after."""
     prompt, meta = _build_stage_prompt_tix(
-        stage, tix, state, ralph_dir, project_rules, config
+        stage, tix, state, ralph_dir, project_rules, config,
+        repo_root=repo_root,
     )
     if not prompt or meta is None:
         return _make_result(
@@ -793,6 +804,141 @@ def _looks_like_command(text: str) -> bool:
     return False
 
 
+def _run_format_command(
+    command: str,
+    repo_root: Path,
+    timeout_seconds: int = 120,
+) -> bool:
+    """Run the configured format/lint command after BUILD.
+
+    Executes the command in the repo root. If it modifies files
+    (e.g. clang-format -i), those changes are auto-staged.
+    If it fails, logs a warning but does not block the pipeline.
+
+    Args:
+        command: Shell command to run (e.g. "clang-format -i src/*.c").
+        repo_root: Repository root for subprocess cwd.
+        timeout_seconds: Max seconds for the command.
+
+    Returns:
+        True if the command succeeded (exit 0), False otherwise.
+    """
+    print(f"  Format: running '{command}'")
+    try:
+        result = subprocess.run(
+            command,
+            shell=True,
+            capture_output=True,
+            text=True,
+            cwd=repo_root,
+            timeout=timeout_seconds,
+        )
+        if result.returncode != 0:
+            stderr = result.stderr.strip()
+            if stderr:
+                # Truncate long output
+                if len(stderr) > 500:
+                    stderr = stderr[:497] + "..."
+                print(f"  Format: FAILED (exit {result.returncode})")
+                print(f"  {stderr}")
+            else:
+                print(f"  Format: FAILED (exit {result.returncode})")
+            return False
+        print("  Format: OK")
+        return True
+    except subprocess.TimeoutExpired:
+        print(f"  Format: TIMEOUT ({timeout_seconds}s)")
+        return False
+    except OSError as e:
+        print(f"  Format: ERROR ({e})")
+        return False
+
+
+def _accumulate_commit_info(
+    info: IterationCommitInfo,
+    reconcile: ReconcileResult,
+    tix: Optional[Tix],
+    repo_root: Path,
+) -> None:
+    """Populate commit info from a reconcile result.
+
+    Resolves task IDs to human-readable names via the plan file,
+    and records accept/reject verdicts with reasons.
+
+    Args:
+        info: Mutable commit info to accumulate into.
+        reconcile: Reconcile result from the latest stage.
+        tix: Tix instance for plan file access.
+        repo_root: Repository root for plan file path.
+    """
+    # Collect all task IDs that need name resolution
+    all_ids = (
+        reconcile.tasks_accepted
+        + reconcile.tasks_rejected
+        + reconcile.tasks_added
+    )
+    if not all_ids:
+        return
+
+    # Resolve names from plan file
+    plan_file = repo_root / ".tix" / "plan.jsonl"
+    names = lookup_task_names(plan_file, all_ids)
+
+    # Record verdicts
+    for task_id in reconcile.tasks_accepted:
+        name = names.get(task_id, task_id)
+        info.verdicts.append(
+            TaskVerdict(task_id=task_id, name=name, accepted=True)
+        )
+
+    for task_id in reconcile.tasks_rejected:
+        name = names.get(task_id, task_id)
+        reason = _lookup_reject_reason(plan_file, task_id)
+        info.verdicts.append(
+            TaskVerdict(
+                task_id=task_id, name=name, accepted=False,
+                reason=reason,
+            )
+        )
+
+    # Record new tasks
+    info.tasks_added.extend(reconcile.tasks_added)
+    info.issues_added.extend(reconcile.issues_added)
+
+
+def _lookup_reject_reason(plan_file: Path, task_id: str) -> str:
+    """Find the most recent rejection reason for a task from plan.jsonl.
+
+    Args:
+        plan_file: Path to .tix/plan.jsonl.
+        task_id: Task ID to look up.
+
+    Returns:
+        Rejection reason string, or empty string if not found.
+    """
+    if not plan_file.exists():
+        return ""
+
+    reason = ""
+    try:
+        for line in plan_file.read_text().splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                entry = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if (
+                entry.get("t") == "reject"
+                and entry.get("id") == task_id
+            ):
+                reason = entry.get("reason", "")
+    except OSError:
+        pass
+    return reason
+
+
 def _create_stage_wrapper(
     repo_root: Path,
     ralph_dir: Path,
@@ -808,9 +954,17 @@ def _create_stage_wrapper(
     # Mutable container for stage breakdown accumulation
     _stage_breakdowns: dict[str, StageBreakdown] = {}
 
+    # Accumulates reconcile results across stages for descriptive commits.
+    # Reset after each commit by the construct loop.
+    _commit_info = IterationCommitInfo()
+
     def get_stage_breakdowns() -> dict[str, StageBreakdown]:
         """Return accumulated stage breakdowns (for run record)."""
         return _stage_breakdowns
+
+    def get_commit_info() -> IterationCommitInfo:
+        """Return the accumulated commit info for this cycle."""
+        return _commit_info
 
     def run_stage_wrapper(
         cfg: GlobalConfig,
@@ -866,6 +1020,12 @@ def _create_stage_wrapper(
         else:
             met.api_calls_remote += 1
 
+        # Post-BUILD: run format command if configured
+        if stage == Stage.BUILD and result.outcome == StageOutcome.SUCCESS:
+            fmt_cmd = getattr(cfg, "format_command", "")
+            if fmt_cmd:
+                _run_format_command(fmt_cmd, repo_root)
+
         # Post-BUILD: try auto-accepting the task immediately
         post_accepted = 0
         if stage == Stage.BUILD and result.outcome == StageOutcome.SUCCESS:
@@ -884,6 +1044,13 @@ def _create_stage_wrapper(
         # Capture reconcile result for iteration record
         reconcile = _last_reconcile_result.get("result")
         _last_reconcile_result["result"] = None  # Reset for next iteration
+
+        # Accumulate into commit info for descriptive commit messages
+        _commit_info.stages_run.append(stage.name)
+        if reconcile:
+            _accumulate_commit_info(
+                _commit_info, reconcile, tix_instance, repo_root,
+            )
 
         # Emit iteration record to ledger
         validation_retries_delta = met.validation_retries - validation_retries_before
@@ -933,8 +1100,9 @@ def _create_stage_wrapper(
 
         return result
 
-    # Attach accessor as attribute
+    # Attach accessors as attributes
     run_stage_wrapper.get_stage_breakdowns = get_stage_breakdowns  # type: ignore[attr-defined]
+    run_stage_wrapper.get_commit_info = get_commit_info  # type: ignore[attr-defined]
     return run_stage_wrapper
 
 
@@ -1471,27 +1639,16 @@ def cmd_construct(
                 exit_reason = "loop_detected"
                 break
             
-            # Commit any tix plan changes
-            plan_file = tix_instance.plan_file()
-            state_file = cwd / ".tix" / "ralph-state.json"
-            if has_uncommitted_tix(plan_file, state_file, cwd):
-                files_to_add = [str(plan_file)]
-                if state_file.exists():
-                    files_to_add.append(str(state_file))
-                subprocess.run(
-                    ["git", "add"] + files_to_add,
-                    cwd=cwd,
-                    capture_output=True,
-                )
-                commit_result = subprocess.run(
-                    ["git", "commit", "-m", f"ralph: iteration {iteration}"],
-                    cwd=cwd,
-                    capture_output=True,
-                )
-                if commit_result.returncode == 0:
-                    metrics.commits_made += 1
+            # Commit with descriptive message (code + tix state)
+            commit_info = stage_wrapper.get_commit_info()  # type: ignore[attr-defined]
+            commit_info.iteration = iteration
+            commit_info.spec = load_state(repo_root).spec or ""
+            if commit_iteration(commit_info, cwd):
+                metrics.commits_made += 1
+            commit_info.reset(iteration)
             
             # Push changes with retry
+            plan_file = tix_instance.plan_file()
             if not push_with_retry(branch, retries=2, plan_file=plan_file, cwd=cwd):
                 print(f"{Colors.YELLOW}Push failed - continuing without push{Colors.NC}")
 

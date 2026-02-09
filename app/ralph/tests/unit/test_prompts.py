@@ -288,6 +288,22 @@ class TestBuildVerifyContext:
 
         assert context["spec_content"] == "spec text"
 
+    def test_includes_build_diff(self):
+        diff = "diff --git a/src/gc.c\n-old\n+new\n"
+        context = build_verify_context([], "s.md", build_diff=diff)
+
+        assert context["build_diff"] == diff
+
+    def test_build_diff_default_placeholder(self):
+        context = build_verify_context([], "s.md")
+
+        assert context["build_diff"] == "(no diff available)"
+
+    def test_empty_diff_uses_placeholder(self):
+        context = build_verify_context([], "s.md", build_diff="")
+
+        assert context["build_diff"] == "(no diff available)"
+
 
 class TestBuildInvestigateContext:
     """Tests for build_investigate_context (tix dict-based)."""
