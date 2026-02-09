@@ -23,7 +23,7 @@ tix task done [id]                # Mark task done
 tix task accept <id>              # Accept done task
 tix task reject <id> "reason"     # Reject done task
 tix task update <id> '<json>'     # Update fields on existing ticket
-tix issue add "description"       # Add issue
+tix issue add '<json>'            # Add issue
 tix issue done [id]               # Resolve issue
 tix search "keywords"             # Search tickets
 tix tree [id]                     # Dependency tree
@@ -124,7 +124,7 @@ tix task update t-a1b2c3d4 '{"labels": ["module:parser", "epic:auth"]}'  # Set l
 Issues are lightweight items for the INVESTIGATE stage:
 
 ```bash
-tix issue add "Memory leak in parser module"
+tix issue add '{"desc":"Memory leak in parser module"}'
 tix issue done                    # Resolve first issue
 tix issue done i-a1b2c3d4         # Resolve specific issue
 tix issue done-all                # Resolve all issues
@@ -330,7 +330,7 @@ tix query tasks --label epic:v2 --spec parser.md --priority high
 ### Investigating issues
 
 ```bash
-tix issue add "Found problem X"
+tix issue add '{"desc":"Found problem X"}'
 tix query issues                  # Review open issues
 # ... investigate and create tasks ...
 tix task add '{"name": "Fix X", "created_from": "i-xxxx", "accept": "..."}'

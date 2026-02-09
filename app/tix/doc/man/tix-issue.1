@@ -3,7 +3,7 @@
 tix\-issue \- manage issues in the tix ticket system
 .SH SYNOPSIS
 .B tix issue add
-.I "description"
+.I "'<json>'"
 .br
 .B tix issue done
 .RI [ id ]
@@ -29,11 +29,22 @@ to view resolved issues.
 Issue IDs use the prefix
 .BR I\- .
 .SH SUBCOMMANDS
-.SS tix issue add \fI"description"\fR
-Create a new issue.
-The description must be non\-empty.
+.SS tix issue add \fI'<json>'\fR
+Create a new issue from a JSON object.
+The JSON must contain a
+.B desc
+field (non\-empty).
+Optional fields:
+.BR spec .
 The author is auto\-filled from
 .BR "git config user.name" .
+.PP
+.B Example:
+.RS
+.nf
+tix issue add '{"desc":"Memory leak in parser","spec":"coverage.md"}'
+.fi
+.RE
 .PP
 .B Output:
 .RS

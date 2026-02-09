@@ -300,7 +300,7 @@ def _handle_task(args) -> int:
 def _handle_issue(args) -> int:
     """Delegate issue operations to tix CLI."""
     if not args.action:
-        print("Usage: ralph issue [add|done|done-all|done-ids] <description>")
+        print("Usage: ralph issue [add|done|done-all|done-ids] <description|ids>")
         return 1
 
     tix = Tix(Path.cwd())

@@ -56,25 +56,11 @@ Good: `"src/pool.c:67 — error path skips free(conn). test-asan output: 'LeakSa
 
 ## Output
 
-When done, output your result between markers EXACTLY like this:
+When done, output your result between markers as PLAIN TEXT (no code fences):
 
-```
 [RALPH_OUTPUT]
-{
-  "results": [
-    {"task_id": "t-xxx", "passed": true},
-    {"task_id": "t-yyy", "passed": false, "reason": "src/pool.c:67 — error path skips free(conn). test-asan fails with: LeakSanitizer detected 64 byte leak"}
-  ],
-  "issues": [
-    {"desc": "libfoo.so missing from test env — causes 3 tasks to fail with 'shared library not found'. Need a setup task to install it.", "priority": "high"}
-  ],
-  "spec_complete": false,
-  "new_tasks": [
-    {"name": "Fix failing criterion", "notes": "Detailed: file paths, approach, min 50 chars", "accept": "measurable command + expected result"}
-  ]
-}
+{"results": [{"task_id": "t-xxx", "passed": true}, {"task_id": "t-yyy", "passed": false, "reason": "src/pool.c:67 — error path skips free(conn). test-asan fails with: LeakSanitizer detected 64 byte leak"}], "issues": [{"desc": "libfoo.so missing from test env — causes 3 tasks to fail with 'shared library not found'. Need a setup task to install it.", "priority": "high"}], "spec_complete": false, "new_tasks": [{"name": "Fix failing criterion", "notes": "Detailed: file paths, approach, min 50 chars", "accept": "measurable command + expected result"}]}
 [/RALPH_OUTPUT]
-```
 
 - `results`: one entry per done task — `passed: true` to accept, `passed: false` to reject
 - `reason`: required when `passed: false` — diagnostic with file paths, error output, and root cause
@@ -84,6 +70,7 @@ When done, output your result between markers EXACTLY like this:
 - `spec_complete`: true only if ALL spec criteria are satisfied and no new work needed
 - `new_tasks`: tasks for uncovered spec criteria (notes must have file paths, accept must be measurable)
 
+**CRITICAL: Do NOT wrap the [RALPH_OUTPUT] block in markdown code fences (``` or ~~~). Output it as plain text.**
 **You MUST output the [RALPH_OUTPUT] block as your final action before exiting.**
 """
 
@@ -123,25 +110,11 @@ Total: {{ISSUE_COUNT}} issues
 
 ## Output
 
-When done, output your result between markers EXACTLY like this:
+When done, output your result between markers as PLAIN TEXT (no code fences):
 
-```
 [RALPH_OUTPUT]
-{
-  "tasks": [
-    {
-      "name": "Fix memory leak in connection pool",
-      "notes": "In src/pool.c lines 45-80: conn_acquire() allocates but error path at line 67 skips free. Add free(conn) before return NULL.",
-      "accept": "make test-asan passes with no leaks in pool_test",
-      "priority": "high",
-      "created_from": "i-xxxx"
-    }
-  ],
-  "out_of_scope": ["i-yyyy"],
-  "summary": "Found 2 actionable issues, 1 out of scope"
-}
+{"tasks": [{"name": "Fix memory leak in connection pool", "notes": "In src/pool.c lines 45-80: conn_acquire() allocates but error path at line 67 skips free. Add free(conn) before return NULL.", "accept": "make test-asan passes with no leaks in pool_test", "priority": "high", "created_from": "i-xxxx"}], "out_of_scope": ["i-yyyy"], "summary": "Found 2 actionable issues, 1 out of scope"}
 [/RALPH_OUTPUT]
-```
 
 - `tasks`: one entry per issue that needs a fix task
   - `notes` MUST include specific file paths and approach (min 50 chars)
@@ -150,6 +123,7 @@ When done, output your result between markers EXACTLY like this:
   - `created_from`: the issue ID that spawned this task
 - `out_of_scope`: issue IDs that don't need action
 
+**CRITICAL: Do NOT wrap the [RALPH_OUTPUT] block in markdown code fences (``` or ~~~). Output it as plain text.**
 **You MUST output the [RALPH_OUTPUT] block as your final action before exiting.**
 """
 
@@ -187,33 +161,17 @@ A task was killed (exceeded context or timeout). Break it into smaller subtasks.
 
 ## Output
 
-When done, output your result between markers EXACTLY like this:
+When done, output your result between markers as PLAIN TEXT (no code fences):
 
-```
 [RALPH_OUTPUT]
-{
-  "subtasks": [
-    {
-      "name": "Extract parser into separate module",
-      "notes": "Move parse_expr() and parse_stmt() from src/main.c lines 200-400 to src/parser.c. Update includes.",
-      "accept": "make build succeeds and make test passes",
-      "deps": []
-    },
-    {
-      "name": "Add error recovery to parser",
-      "notes": "In src/parser.c parse_expr(): add synchronization points after syntax errors. Pattern: skip tokens until ';' or '}'.",
-      "accept": "echo 'bad syntax;' | ./build/lang exits 1 without crash",
-      "deps": []
-    }
-  ]
-}
+{"subtasks": [{"name": "Extract parser into separate module", "notes": "Move parse_expr() and parse_stmt() from src/main.c lines 200-400 to src/parser.c. Update includes.", "accept": "make build succeeds and make test passes", "deps": []}, {"name": "Add error recovery to parser", "notes": "In src/parser.c parse_expr(): add synchronization points after syntax errors. Pattern: skip tokens until ';' or '}'.", "accept": "echo 'bad syntax;' | ./build/lang exits 1 without crash", "deps": []}]}
 [/RALPH_OUTPUT]
-```
 
 - Each subtask `notes` MUST include specific file paths and approach (min 50 chars)
 - Each subtask `accept` MUST be measurable
 - Do NOT try to implement anything — just create the breakdown
 
+**CRITICAL: Do NOT wrap the [RALPH_OUTPUT] block in markdown code fences (``` or ~~~). Output it as plain text.**
 **You MUST output the [RALPH_OUTPUT] block as your final action before exiting.**
 """
 

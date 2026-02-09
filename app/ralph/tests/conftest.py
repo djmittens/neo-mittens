@@ -162,10 +162,13 @@ class MockTix:
 
     # -- Issue mutations -----------------------------------------------------
 
-    def issue_add(self, desc: str) -> dict:
+    def issue_add(self, desc: str, spec: str = "") -> dict:
         """Add an issue."""
         issue_id = f"i-auto-{len(self._issues)}"
-        self._issues.append({"id": issue_id, "desc": desc})
+        issue: dict = {"id": issue_id, "desc": desc}
+        if spec:
+            issue["spec"] = spec
+        self._issues.append(issue)
         return {"id": issue_id}
 
     def issue_done(self) -> dict:

@@ -44,6 +44,11 @@ class Metrics:
     last_model: str = ""  # Actual model that served the last request
     last_finish_reason: str = ""  # "stop", "length", "tool_use"
 
+    # Per-turn context size: input_tokens + cache_read from the last
+    # step_finish event. Used for context pressure detection — unlike
+    # total_tokens_in (cumulative), this reflects actual window occupancy.
+    last_context_size: int = 0
+
     @property
     def tokens_used(self) -> int:
         """Total tokens used (in + cached + out)."""

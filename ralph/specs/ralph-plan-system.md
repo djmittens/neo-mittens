@@ -121,7 +121,7 @@ If a merge conflict occurs in plan.jsonl:
 | `ralph task add "desc"` | Add task to pending |
 | `ralph task accept` | Clear all done tasks (validation passed) |
 | `ralph issue done` | Remove first issue |
-| `ralph issue add "desc"` | Add issue |
+| `ralph issue add "desc"` | Add issue (wraps as JSON for tix) |
 | `ralph set-spec <file>` | Set current spec |
 
 All mutations:
@@ -288,7 +288,7 @@ Build loop (`ralph` or `ralph build`):
 - Each iteration: load state, get stage, select prompt, run LLM
 - `ralph query` for state inspection
 - `ralph task done` to complete tasks
-- `ralph issue add` for discovered issues
+- `ralph issue add` for discovered issues (JSON-based via tix)
 
 ### Remove IMPLEMENTATION_PLAN.md
 

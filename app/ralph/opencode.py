@@ -217,6 +217,8 @@ def _process_event(event: dict, metrics: Metrics) -> None:
         if isinstance(output_tokens, int):
             metrics.total_tokens_out += output_tokens
         metrics.total_iterations += 1
+        # Track actual window occupancy for context pressure detection
+        metrics.last_context_size = context_size
 
         # Capture model and finish reason for telemetry
         model = part.get("model", "")
@@ -309,6 +311,8 @@ def stream_and_collect(
                             if isinstance(output_tokens, int):
                                 metrics.total_tokens_out += output_tokens
                             metrics.total_iterations += 1
+                            context_size = input_tokens + cache_read
+                            metrics.last_context_size = context_size
 
                             model = part.get("model", "")
                             if isinstance(model, str) and model:

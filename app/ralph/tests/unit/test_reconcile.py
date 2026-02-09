@@ -81,6 +81,106 @@ class TestExtractStructuredOutput:
         result = extract_structured_output(output)
         assert result["verdict"] == "blocked"
 
+    def test_extract_from_write_tool_event(self):
+        """Model writes plan JSON to a file instead of emitting markers."""
+        plan_json = json.dumps({
+            "tasks": [
+                {"name": "Fix bug", "notes": "detailed notes here", "accept": "grep -c fix src/foo.c"}
+            ],
+            "drop": []
+        })
+        # Simulate opencode event stream with a write tool event
+        event = json.dumps({
+            "type": "tool_use",
+            "part": {
+                "tool": "write",
+                "state": {
+                    "input": {"content": plan_json, "filePath": "/tmp/ralph_output.json"},
+                    "output": "Wrote file successfully.",
+                }
+            }
+        })
+        output = f"some text\n{event}\nmore text"
+        result = extract_structured_output(output)
+        assert result is not None
+        assert len(result["tasks"]) == 1
+        assert result["tasks"][0]["name"] == "Fix bug"
+
+    def test_extract_from_write_tool_with_markers_in_content(self):
+        """Model writes content with [RALPH_OUTPUT] markers to a file."""
+        content = '[RALPH_OUTPUT]\n{"verdict": "done"}\n[/RALPH_OUTPUT]'
+        event = json.dumps({
+            "type": "tool_use",
+            "part": {
+                "tool": "write",
+                "state": {
+                    "input": {"content": content, "filePath": "/tmp/out.txt"},
+                    "output": "Wrote file successfully.",
+                }
+            }
+        })
+        output = f"{event}\n"
+        result = extract_structured_output(output)
+        assert result is not None
+        assert result["verdict"] == "done"
+
+    def test_write_tool_ignores_non_ralph_json(self):
+        """Write events with non-ralph JSON should not be extracted via tool fallback."""
+        from ralph.reconcile import _extract_from_tool_events
+        event = json.dumps({
+            "type": "tool_use",
+            "part": {
+                "tool": "write",
+                "state": {
+                    "input": {"content": '{"name": "test", "version": "1.0"}', "filePath": "/tmp/package.json"},
+                    "output": "Wrote file successfully.",
+                }
+            }
+        })
+        output = f"{event}\n"
+        # The tool-event extractor specifically should return None
+        result = _extract_from_tool_events(output)
+        assert result is None
+
+    def test_extract_from_bash_cat_heredoc(self):
+        """Model uses bash cat << EOF to output plan JSON."""
+        plan_json = json.dumps({
+            "tasks": [
+                {"name": "Phase 0: Rename types", "notes": "detailed notes about renaming", "accept": "grep -rE 'heap2' src/ returns nothing"}
+            ],
+            "drop": []
+        })
+        event = json.dumps({
+            "type": "tool_use",
+            "part": {
+                "tool": "bash",
+                "state": {
+                    "input": {"command": "cat << 'EOF'\n...\nEOF", "description": "Output task list"},
+                    "output": plan_json,
+                    "metadata": {"output": plan_json, "exit": 0},
+                }
+            }
+        })
+        output = f"some earlier events\n{event}\nfinal text"
+        result = extract_structured_output(output)
+        assert result is not None
+        assert len(result["tasks"]) == 1
+        assert result["tasks"][0]["name"] == "Phase 0: Rename types"
+
+    def test_write_tool_prefers_larger_task_list(self):
+        """When multiple write events have tasks, pick the one with more."""
+        small = json.dumps({"tasks": [{"name": "One", "notes": "n", "accept": "a"}]})
+        big = json.dumps({"tasks": [
+            {"name": "One", "notes": "n", "accept": "a"},
+            {"name": "Two", "notes": "n", "accept": "a"},
+        ]})
+        ev1 = json.dumps({"type": "tool_use", "part": {"tool": "write", "state": {"input": {"content": small, "filePath": "/tmp/a.json"}, "output": ""}}})
+        ev2 = json.dumps({"type": "tool_use", "part": {"tool": "write", "state": {"input": {"content": big, "filePath": "/tmp/b.json"}, "output": ""}}})
+        output = f"{ev1}\n{ev2}\n"
+        result = extract_structured_output(output)
+        assert result is not None
+        assert len(result["tasks"]) == 2
+
 
 # =============================================================================
 # reconcile_build
@@ -110,7 +210,7 @@ class TestReconcileBuild:
         output = '[RALPH_OUTPUT]\n{"verdict": "done", "issues": [{"desc": "memory leak"}]}\n[/RALPH_OUTPUT]'
         result = reconcile_build(mock_tix, output, "t-abc")
         assert result.ok
-        mock_tix.issue_add.assert_called_once_with("memory leak")
+        mock_tix.issue_add.assert_called_once_with("memory leak", spec="")
         assert len(result.issues_added) == 1
 
     def test_task_done_fails(self, mock_tix):
@@ -157,7 +257,7 @@ class TestReconcileVerify:
         result = reconcile_verify(mock_tix, output)
         assert len(result.tasks_rejected) == 1
         assert len(result.issues_added) == 1
-        mock_tix.issue_add.assert_called_once_with("libfoo.so not installed in test env")
+        mock_tix.issue_add.assert_called_once_with("libfoo.so not installed in test env", spec="")
 
     def test_issues_empty_list(self, mock_tix):
         """Empty issues list is fine — no issue_add calls."""

@@ -124,7 +124,7 @@ ralph query stage        # Show current stage (PLAN/BUILD/VERIFY/etc)
 ralph task done          # Mark first pending task as done
 ralph task add "desc"    # Add a new task
 ralph task accept        # Accept all done tasks
-ralph issue add "desc"   # Add a discovered issue
+ralph issue add "desc"   # Add a discovered issue (passes JSON to tix)
 ralph issue done         # Resolve first issue
 ralph set-spec <spec.md> # Set current spec file
 

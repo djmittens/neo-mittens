@@ -122,6 +122,32 @@ class ConstructStateMachine:
         except Exception:
             self._ticket_cache = {}
 
+    def _scope_cache_to_spec(self, spec_name: str) -> None:
+        """Filter the ticket cache to only items belonging to *spec_name*.
+
+        Called after loading state so all ``_has_*`` / ``_get_*`` helpers
+        only see work scoped to the active spec.  Items without a ``spec``
+        field are excluded.
+
+        NOTE: issues created via ``tix issue add`` during BUILD/VERIFY
+        stages may lack a ``spec`` field if the caller omitted it.
+        These are kept to avoid silently dropping in-flight issues.
+        """
+        if not spec_name or not self._ticket_cache:
+            return
+
+        def _belongs(item: dict) -> bool:
+            s = item.get("spec", "")
+            return s == spec_name or s == ""
+
+        tasks = self._ticket_cache.get("tasks", {})
+        self._ticket_cache["tasks"] = {
+            status: [t for t in task_list if _belongs(t)]
+            for status, task_list in tasks.items()
+        }
+        issues = self._ticket_cache.get("issues", [])
+        self._ticket_cache["issues"] = [i for i in issues if _belongs(i)]
+
     def _invalidate_ticket_cache(self) -> None:
         """Invalidate the cache so the next query re-fetches from tix."""
         self._ticket_cache = None
@@ -198,9 +224,11 @@ class ConstructStateMachine:
                 task_id, retry_count,
             )
             try:
+                spec = task.get("spec", "")
                 self.tix.issue_add(
                     f"Task '{task_name}' ({task_id}) has been rejected "
-                    f"{retry_count} times. Last reason: {reason}"
+                    f"{retry_count} times. Last reason: {reason}",
+                    spec=spec,
                 )
                 self.tix.task_reject(
                     task_id,
@@ -333,6 +361,10 @@ class ConstructStateMachine:
 
         if not state.spec:
             return False, False
+
+        # Scope the cache to the active spec so the state machine never
+        # sees tasks/issues from unrelated specs.
+        self._scope_cache_to_spec(state.spec)
 
         if state.stage == "COMPLETE":
             return False, True

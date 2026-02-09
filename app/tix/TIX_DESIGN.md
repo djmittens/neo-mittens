@@ -375,7 +375,7 @@ record `done_at`, but does not create a commit.
 | | `reject <id> "reason"` | Reject done task, create tombstone |
 | | `delete <id>` | Remove task |
 | | `prioritize <id> <level>` | Set priority (high/medium/low) |
-| `tix issue` | `add "desc"` | Create issue |
+| `tix issue` | `add '<json>'` | Create issue |
 | | `done [id]` | Resolve issue |
 | | `done-all` | Resolve all issues |
 | | `done-ids <id>...` | Resolve specific issues |

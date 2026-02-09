@@ -67,6 +67,30 @@ class ReconcileResult:
         return ", ".join(parts) if parts else "no changes"
 
 
+def _assemble_text_content(agent_output: str) -> str:
+    """Concatenate decoded text from ``text`` events in the event stream.
+
+    The raw agent output is newline-delimited JSON events.  Text events
+    carry already-decoded strings (no JSON escaping), so searching this
+    concatenated text for ``[RALPH_OUTPUT]`` markers works even when the
+    model wraps them in markdown fences.
+    """
+    parts: list[str] = []
+    for line in agent_output.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            event = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if event.get("type") == "text":
+            text = event.get("part", {}).get("text", "")
+            if text:
+                parts.append(text)
+    return "\n".join(parts)
+
+
 def extract_structured_output(agent_output: str) -> Optional[dict]:
     """Extract structured JSON from agent output.
 
@@ -75,13 +99,36 @@ def extract_structured_output(agent_output: str) -> Optional[dict]:
         {"verdict": "done", ...}
         [/RALPH_OUTPUT]
 
+    Weaker models sometimes write the JSON to a file via the ``write``
+    tool instead of emitting it as text.  When marker-based extraction
+    fails we scan ``write`` tool events in the JSON event stream for
+    content that looks like structured output (contains ``tasks``,
+    ``verdict``, ``results``, or ``subtasks`` keys, or is wrapped in
+    ``[RALPH_OUTPUT]`` markers inside the written content).
+
     Args:
-        agent_output: Full stdout from the agent run.
+        agent_output: Full stdout from the agent run (JSON event stream).
 
     Returns:
         Parsed dict, or None if no structured output found.
     """
-    # Try marker-based extraction first
+    # Primary: reassemble decoded text from text events and search for
+    # markers there.  This handles the common case where the model wraps
+    # [RALPH_OUTPUT] inside a markdown code fence — the decoded text
+    # doesn't have JSON escaping, so markers + JSON are clean.
+    text_content = _assemble_text_content(agent_output)
+    if text_content:
+        start = text_content.find(OUTPUT_MARKER)
+        end = text_content.find(OUTPUT_END_MARKER)
+        if start != -1 and end != -1:
+            json_str = text_content[start + len(OUTPUT_MARKER):end].strip()
+            try:
+                return json.loads(json_str)
+            except json.JSONDecodeError:
+                pass
+
+    # Legacy: try raw stream search (works when opencode emits plain text
+    # instead of JSON events, e.g. older versions).
     start = agent_output.find(OUTPUT_MARKER)
     end = agent_output.find(OUTPUT_END_MARKER)
     if start != -1 and end != -1:
@@ -91,11 +138,137 @@ def extract_structured_output(agent_output: str) -> Optional[dict]:
         except json.JSONDecodeError:
             pass
 
-    # Fallback: find last JSON object in output (for robustness)
-    # Look for last {...} block
-    last_json = _find_last_json_object(agent_output)
-    if last_json is not None:
+    # Fallback: scan tool events for structured output.
+    # Weaker models sometimes deliver the plan JSON via a tool call
+    # (write to file, bash cat/echo, etc.) instead of as plain text.
+    from_tools = _extract_from_tool_events(agent_output)
+    if from_tools is not None:
+        print("  Schema repair: extracted output from tool call",
+              file=sys.stderr)
+        return from_tools
+
+    # Last resort: find last JSON object in assembled text that has
+    # at least one recognized ralph output key.  Without this check,
+    # random JSON from tool outputs gets picked up and repaired into
+    # nonsense (e.g. empty verdict string).
+    last_json = _find_last_json_object(text_content or agent_output)
+    if last_json is not None and set(last_json.keys()) & _RALPH_OUTPUT_KEYS:
         return last_json
+
+    return None
+
+
+# Keys that indicate a write tool's content is structured ralph output
+_RALPH_OUTPUT_KEYS = {"tasks", "verdict", "results", "subtasks"}
+
+
+def _extract_from_tool_events(agent_output: str) -> Optional[dict]:
+    """Scan tool events for structured output delivered via tools.
+
+    Weaker models deliver plan JSON through various tool channels
+    instead of emitting it as text:
+    - ``write`` tool: content field contains the JSON
+    - ``bash`` tool: output field contains the JSON (e.g. ``cat << EOF``)
+
+    Iterates over JSON event lines, extracts candidate content from
+    each tool call, and returns the best match (largest ``tasks`` list).
+
+    Args:
+        agent_output: Raw newline-delimited JSON event stream.
+
+    Returns:
+        Parsed dict if found, else None.
+    """
+    best: Optional[dict] = None
+    best_score = -1
+
+    for line in agent_output.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            event = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+
+        if event.get("type") != "tool_use":
+            continue
+
+        part = event.get("part", {})
+        tool = part.get("tool", "")
+        state = part.get("state", {})
+
+        # Extract candidate content based on tool type
+        candidates: list[str] = []
+        if tool == "write":
+            content = state.get("input", {}).get("content", "")
+            if content:
+                candidates.append(content)
+        elif tool == "bash":
+            output = state.get("output", "")
+            if output:
+                candidates.append(output)
+            # Also check metadata.output (some event formats)
+            meta_output = state.get("metadata", {}).get("output", "")
+            if meta_output and meta_output != output:
+                candidates.append(meta_output)
+
+        for content in candidates:
+            candidate = _parse_ralph_json_from_content(content)
+            if candidate is None:
+                continue
+
+            # Score: prefer candidates with more recognized keys / larger task lists
+            score = len(set(candidate.keys()) & _RALPH_OUTPUT_KEYS)
+            tasks = candidate.get("tasks", [])
+            if isinstance(tasks, list):
+                score += len(tasks)
+
+            if score > best_score:
+                best = candidate
+                best_score = score
+
+    return best
+
+
+def _parse_ralph_json_from_content(content: str) -> Optional[dict]:
+    """Try to extract ralph output JSON from file content.
+
+    Handles two patterns:
+    1. Content contains [RALPH_OUTPUT]...json...[/RALPH_OUTPUT] markers
+    2. Content is or contains a JSON object with ralph output keys
+
+    Args:
+        content: The string content written to a file.
+
+    Returns:
+        Parsed dict if it looks like ralph output, else None.
+    """
+    # Pattern 1: markers inside written content
+    start = content.find(OUTPUT_MARKER)
+    end = content.find(OUTPUT_END_MARKER)
+    if start != -1 and end != -1:
+        json_str = content[start + len(OUTPUT_MARKER):end].strip()
+        try:
+            obj = json.loads(json_str)
+            if isinstance(obj, dict) and set(obj.keys()) & _RALPH_OUTPUT_KEYS:
+                return obj
+        except json.JSONDecodeError:
+            pass
+
+    # Pattern 2: content is raw JSON (or has a JSON prefix like "[RALPH_OUTPUT]\n{...")
+    # Try direct parse first
+    try:
+        obj = json.loads(content)
+        if isinstance(obj, dict) and set(obj.keys()) & _RALPH_OUTPUT_KEYS:
+            return obj
+    except json.JSONDecodeError:
+        pass
+
+    # Pattern 3: find JSON object within the content
+    obj = _find_last_json_object(content)
+    if obj is not None and set(obj.keys()) & _RALPH_OUTPUT_KEYS:
+        return obj
 
     return None
 
@@ -274,6 +447,7 @@ def reconcile_build(
     agent_output: str,
     task_id: str,
     stage_metrics: Optional[dict[str, Any]] = None,
+    spec_name: str = "",
 ) -> ReconcileResult:
     """Reconcile BUILD stage output.
 
@@ -290,6 +464,7 @@ def reconcile_build(
         task_id: The task ID that was being built.
         stage_metrics: Optional telemetry dict with keys like cost,
             tokens_in, tokens_out, iterations, model, retries, kill_count.
+        spec_name: Spec this build belongs to (stamped on any new tasks).
 
     Returns:
         ReconcileResult with actions taken.
@@ -343,7 +518,7 @@ def reconcile_build(
         result.ok = False
 
     # Process discovered issues
-    _add_issues(tix, data.get("issues", []), result)
+    _add_issues(tix, data.get("issues", []), result, spec_name=spec_name)
 
     return result
 
@@ -352,6 +527,7 @@ def reconcile_verify(
     tix: TixProtocol,
     agent_output: str,
     stage_metrics: Optional[dict[str, Any]] = None,
+    spec_name: str = "",
 ) -> ReconcileResult:
     """Reconcile VERIFY stage output.
 
@@ -374,6 +550,7 @@ def reconcile_verify(
         tix: Tix harness instance.
         agent_output: Full agent stdout.
         stage_metrics: Optional telemetry dict (cost, tokens, model, etc.).
+        spec_name: Spec this verify belongs to (stamped on any new tasks).
 
     Returns:
         ReconcileResult with accept/reject actions taken.
@@ -412,11 +589,11 @@ def reconcile_verify(
         _attach_stage_telemetry(tix, verified_ids, stage_metrics, "verify")
 
     # Process cross-cutting issues surfaced by VERIFY
-    _add_issues(tix, data.get("issues", []), result)
+    _add_issues(tix, data.get("issues", []), result, spec_name=spec_name)
 
     # Process new tasks from uncovered spec criteria
     for task_data in data.get("new_tasks", []):
-        _add_task(tix, task_data, result)
+        _add_task(tix, task_data, result, spec_name=spec_name)
 
     return result
 
@@ -426,6 +603,7 @@ def reconcile_investigate(
     agent_output: str,
     batch_issue_ids: Optional[list[str]] = None,
     stage_metrics: Optional[dict[str, Any]] = None,
+    spec_name: str = "",
 ) -> ReconcileResult:
     """Reconcile INVESTIGATE stage output.
 
@@ -449,6 +627,7 @@ def reconcile_investigate(
         batch_issue_ids: Issue IDs in the current batch to clear.
             If None, clears all issues (legacy fallback).
         stage_metrics: Optional telemetry dict (cost, tokens, model, etc.).
+        spec_name: Spec this investigation belongs to (stamped on new tasks).
 
     Returns:
         ReconcileResult with tasks added and issues cleared.
@@ -467,7 +646,7 @@ def reconcile_investigate(
 
     # Add all investigation tasks
     for task_data in data.get("tasks", []):
-        _add_task(tix, task_data, result)
+        _add_task(tix, task_data, result, spec_name=spec_name)
 
     # Attach investigate-stage telemetry to newly created tasks (best-effort).
     if stage_metrics and result.tasks_added:
@@ -496,6 +675,7 @@ def reconcile_decompose(
     original_task_id: str,
     parent_depth: int = 0,
     stage_metrics: Optional[dict[str, Any]] = None,
+    spec_name: str = "",
 ) -> ReconcileResult:
     """Reconcile DECOMPOSE stage output.
 
@@ -516,6 +696,7 @@ def reconcile_decompose(
         original_task_id: The task being decomposed.
         parent_depth: Decompose depth of the parent task.
         stage_metrics: Optional telemetry dict (cost, tokens, model, etc.).
+        spec_name: Spec this decompose belongs to (stamped on subtasks).
 
     Returns:
         ReconcileResult with subtasks added and original deleted.
@@ -543,7 +724,7 @@ def reconcile_decompose(
     for task_data in subtasks:
         task_data["parent"] = original_task_id
         task_data["decompose_depth"] = child_depth
-        _add_task(tix, task_data, result)
+        _add_task(tix, task_data, result, spec_name=spec_name)
 
     # Attach decompose-stage telemetry to subtasks (best-effort).
     if stage_metrics and result.tasks_added:
@@ -666,7 +847,12 @@ def reconcile_plan(
 # =============================================================================
 
 
-def _add_task(tix: TixProtocol, task_data: dict, result: ReconcileResult) -> None:
+def _add_task(
+    tix: TixProtocol,
+    task_data: dict,
+    result: ReconcileResult,
+    spec_name: str = "",
+) -> None:
     """Add a single task via tix, updating result.
 
     Validates the task before adding. Invalid tasks are rejected
@@ -688,6 +874,9 @@ def _add_task(tix: TixProtocol, task_data: dict, result: ReconcileResult) -> Non
 
     # Tag all tasks created by ralph so they can be filtered by assignee
     task_data.setdefault("assigned", "ralph")
+    # Stamp spec so construct-mode queries can scope to the active spec
+    if spec_name:
+        task_data.setdefault("spec", spec_name)
 
     try:
         resp = tix.task_add(task_data)
@@ -747,7 +936,10 @@ def _increment_reject_count(tix: TixProtocol, task_id: str) -> None:
 
 
 def _add_issues(
-    tix: TixProtocol, issues: list[dict], result: ReconcileResult
+    tix: TixProtocol,
+    issues: list[dict],
+    result: ReconcileResult,
+    spec_name: str = "",
 ) -> None:
     """Add discovered issues via tix, updating result.
 
@@ -764,7 +956,7 @@ def _add_issues(
             result.errors.append(f"Issue rejected by validation: {reasons}")
             continue
         try:
-            resp = tix.issue_add(desc)
+            resp = tix.issue_add(desc, spec=spec_name)
             issue_id = resp.get("id", "")
             if issue_id:
                 result.issues_added.append(issue_id)

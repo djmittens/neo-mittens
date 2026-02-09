@@ -130,6 +130,31 @@ def _load_spec_content(ralph_dir: Path, spec_name: str) -> str:
         return ""
 
 
+def _filter_by_spec(items: list[dict], spec_name: str) -> list[dict]:
+    """Filter task/issue dicts to only those belonging to *spec_name*.
+
+    Items with an empty ``spec`` field are kept so in-flight work
+    (e.g. issues created during BUILD) isn't silently dropped.
+    """
+    if not spec_name:
+        return items
+    return [t for t in items if t.get("spec", "") in (spec_name, "")]
+
+
+def _filter_full_by_spec(full: dict, spec_name: str) -> dict:
+    """Filter a query_full() result dict so every list is spec-scoped."""
+    if not spec_name:
+        return full
+    tasks = full.get("tasks", {})
+    return {
+        "tasks": {
+            status: _filter_by_spec(task_list, spec_name)
+            for status, task_list in tasks.items()
+        },
+        "issues": _filter_by_spec(full.get("issues", []), spec_name),
+    }
+
+
 _PRIORITY_ORDER = {"high": 0, "medium": 1, "low": 2}
 
 
@@ -187,24 +212,24 @@ def _build_stage_prompt_tix(
     """
     stage_name = stage.name.lower()
     spec_name = state.spec or ""
-    meta: dict = {}
+    meta: dict = {"spec_name": spec_name}
     spec_content = _load_spec_content(ralph_dir, spec_name)
     
     if stage == Stage.BUILD:
-        tasks = tix.query_tasks()
+        tasks = _filter_by_spec(tix.query_tasks(), spec_name)
         if not tasks:
             return None, None
         task = _pick_best_task(tasks)
         context = build_build_context(task, spec_name, spec_content)
         meta["task_id"] = task.get("id", "")
     elif stage == Stage.VERIFY:
-        full = tix.query_full()
+        full = _filter_full_by_spec(tix.query_full(), spec_name)
         done = full.get("tasks", {}).get("done", [])
         if not done:
             return None, None
         context = build_verify_context(done, spec_name, spec_content)
     elif stage == Stage.INVESTIGATE:
-        issues = tix.query_issues()
+        issues = _filter_by_spec(tix.query_issues(), spec_name)
         if not issues:
             return None, None
         # Filter to batch items if batching is active
@@ -220,7 +245,7 @@ def _build_stage_prompt_tix(
         target_id = state.decompose_target
         if not target_id:
             return None, None
-        full = tix.query_full()
+        full = _filter_full_by_spec(tix.query_full(), spec_name)
         all_tasks = (
             full.get("tasks", {}).get("pending", [])
             + full.get("tasks", {}).get("done", [])
@@ -261,23 +286,26 @@ def _reconcile_stage(
         ReconcileResult summarizing what was done.
     """
     sm = meta.get("stage_metrics")
+    spec = meta.get("spec_name", "")
     if stage == Stage.BUILD:
         return reconcile_build(
             tix, agent_output, meta.get("task_id", ""),
-            stage_metrics=sm,
+            stage_metrics=sm, spec_name=spec,
         )
     elif stage == Stage.VERIFY:
-        return reconcile_verify(tix, agent_output, stage_metrics=sm)
+        return reconcile_verify(
+            tix, agent_output, stage_metrics=sm, spec_name=spec,
+        )
     elif stage == Stage.INVESTIGATE:
         return reconcile_investigate(
             tix, agent_output, meta.get("batch_issue_ids"),
-            stage_metrics=sm,
+            stage_metrics=sm, spec_name=spec,
         )
     elif stage == Stage.DECOMPOSE:
         return reconcile_decompose(
             tix, agent_output, meta.get("task_id", ""),
             parent_depth=meta.get("parent_depth", 0),
-            stage_metrics=sm,
+            stage_metrics=sm, spec_name=spec,
         )
     else:
         return ReconcileResult(ok=False, errors=[f"Unknown stage: {stage}"])
@@ -316,7 +344,7 @@ def _execute_opencode(
     print_output: bool = True,
     stage_name: str = "",
     session_id: Optional[str] = None,
-) -> Tuple[int, str, bool, float, int, int, int, int, Optional[str]]:
+) -> Tuple[int, str, bool, float, int, int, int, int, Optional[str], int]:
     """Execute opencode with real-time streaming output.
 
     Args:
@@ -325,7 +353,8 @@ def _execute_opencode(
 
     Returns:
         Tuple of (return_code, output, timed_out, cost, tokens_in,
-                  tokens_cached, tokens_out, iterations, session_id).
+                  tokens_cached, tokens_out, iterations, session_id,
+                  last_context_size).
     """
     model = config.model_for_stage(stage_name) if stage_name else config.model
 
@@ -345,7 +374,7 @@ def _execute_opencode(
             result.metrics.total_cost, result.metrics.total_tokens_in,
             result.metrics.total_tokens_cached,
             result.metrics.total_tokens_out, result.metrics.total_iterations,
-            result.session_id)
+            result.session_id, result.metrics.last_context_size)
 
 
 def _run_stage(
@@ -377,7 +406,7 @@ def _run_stage(
     try:
         (return_code, stdout_output, timed_out, cost,
          tokens_in, tokens_cached, tokens_out, stage_iters,
-         session_id) = _execute_opencode(
+         session_id, last_ctx_size) = _execute_opencode(
             config, prompt, repo_root, stage_timeout_ms,
             print_output=print_output,
             stage_name=stage.name.lower(),
@@ -407,19 +436,24 @@ def _run_stage(
             task_id=stage_task_id,
         )
 
-    # Detect context pressure — if the stage used most of the context window,
-    # it likely hit the auto-compact plugin or was constrained. Log it.
+    # Detect context pressure — compare the *last turn's* context size
+    # (actual window occupancy) against the configured window, not the
+    # cumulative total_tokens_in which grows without bound.
     kill_pct = getattr(config, "context_kill_pct", 95)
     compact_pct = getattr(config, "context_compact_pct", 85)
     ctx_window = getattr(config, "context_window", 200_000)
-    if ctx_window > 0 and tokens_in > 0:
-        usage_pct = (tokens_in / ctx_window) * 100
+    if ctx_window > 0 and last_ctx_size > 0:
+        usage_pct = (last_ctx_size / ctx_window) * 100
         if usage_pct >= kill_pct:
             metrics.kills_context += 1
             metrics.last_kill_reason = "context_pressure"
-            print(f"  Context pressure: {usage_pct:.0f}% (kill threshold: {kill_pct}%)")
+            print(f"  Context pressure: {usage_pct:.0f}% "
+                  f"({last_ctx_size:,}/{ctx_window:,} tokens, "
+                  f"kill threshold: {kill_pct}%)")
         elif usage_pct >= compact_pct:
-            print(f"  Context pressure: {usage_pct:.0f}% (compact threshold: {compact_pct}%)")
+            print(f"  Context pressure: {usage_pct:.0f}% "
+                  f"({last_ctx_size:,}/{ctx_window:,} tokens, "
+                  f"compact threshold: {compact_pct}%)")
 
     # Build per-task telemetry for reconciliation
     stage_model = config.model_for_stage(stage.name.lower())
@@ -463,7 +497,7 @@ def _run_stage(
         feedback = _build_validation_feedback(validation_errors)
         try:
             (rc2, out2, to2, c2, ti2, tc2, to_out2, si2,
-             session_id) = _execute_opencode(
+             session_id, _) = _execute_opencode(
                 config, feedback, repo_root, stage_timeout_ms,
                 print_output=print_output,
                 stage_name=stage.name.lower(),

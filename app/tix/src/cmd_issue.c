@@ -10,8 +10,16 @@
 
 static tix_err_t issue_add(tix_ctx_t *ctx, int argc, char **argv) {
   if (argc < 1) {
-    fprintf(stderr, "usage: tix issue add \"description\"\n");
+    fprintf(stderr, "usage: tix issue add '<json>'\n");
     return TIX_ERR_INVALID_ARG;
+  }
+
+  const char *input = argv[0];
+  tix_json_obj_t obj;
+  tix_err_t err = tix_json_parse_line(input, &obj);
+  if (err != TIX_OK) {
+    fprintf(stderr, "error: invalid JSON: %s\n", tix_strerror(err));
+    return err;
   }
 
   tix_ticket_t ticket;
@@ -20,17 +28,19 @@ static tix_err_t issue_add(tix_ctx_t *ctx, int argc, char **argv) {
   ticket.created_at = (i64)time(NULL);
   ticket.updated_at = ticket.created_at;
 
-  tix_err_t err = tix_ticket_gen_id(TIX_TICKET_ISSUE, ticket.id,
-                                     sizeof(ticket.id));
+  err = tix_ticket_gen_id(TIX_TICKET_ISSUE, ticket.id, sizeof(ticket.id));
   if (err != TIX_OK) { return err; }
 
-  /* validate: description must not be empty */
-  if (argv[0][0] == '\0') {
-    fprintf(stderr, "error: issue requires a non-empty description\n");
+  /* desc is required for issues */
+  const char *desc = tix_json_get_str(&obj, "desc");
+  if (desc == NULL || desc[0] == '\0') {
+    fprintf(stderr, "error: issue requires a non-empty 'desc' field\n");
     return TIX_ERR_VALIDATION;
   }
+  tix_ticket_set_name(&ticket, desc);
 
-  tix_ticket_set_name(&ticket, argv[0]);
+  const char *spec = tix_json_get_str(&obj, "spec");
+  if (spec != NULL) { tix_ticket_set_spec(&ticket, spec); }
 
   /* auto-fill author from git user.name */
   tix_git_user_name(ticket.author, sizeof(ticket.author));

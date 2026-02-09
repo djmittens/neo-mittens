@@ -46,31 +46,13 @@ Read the spec file: `ralph/specs/{{SPEC_FILE}}`
 
 ## Output
 
-When done, output your result between markers EXACTLY like this:
+When done, output your result between markers as PLAIN TEXT (no code fences):
 
-```
 [RALPH_OUTPUT]
-{
-  "tasks": [
-    {
-      "name": "Add timeout parameter to aio/within builtin",
-      "notes": "In src/aio/aio_combinators.c: Add valk_builtin_aio_within() after aio_race. Pattern: race(handle, then(sleep(sys, ms), fail(timeout))). Register in valk_lenv_put_builtins() table.",
-      "accept": "grep -c 'aio/within' src/builtins.c returns 1",
-      "deps": [],
-      "priority": "high"
-    },
-    {
-      "name": "Add tests for aio/within",
-      "notes": "Create test/test_aio_within.valk: Test timeout before completion, completion before timeout, handle failure. Use aio/sleep for timing.",
-      "accept": "make test passes including test_aio_within",
-      "deps": ["t-PREV_ID"],
-      "priority": "medium"
-    }
-  ],
-  "drop": ["t-abc123"]
-}
+{"tasks": [{"name": "Add timeout parameter to aio/within builtin", "notes": "In src/aio/aio_combinators.c: Add valk_builtin_aio_within() after aio_race. Pattern: race(handle, then(sleep(sys, ms), fail(timeout))). Register in valk_lenv_put_builtins() table.", "accept": "grep -c 'aio/within' src/builtins.c returns 1", "deps": [], "priority": "high"}, {"name": "Add tests for aio/within", "notes": "Create test/test_aio_within.valk: Test timeout before completion, completion before timeout, handle failure. Use aio/sleep for timing.", "accept": "make test passes including test_aio_within", "deps": ["t-PREV_ID"], "priority": "medium"}], "drop": ["t-abc123"]}
 [/RALPH_OUTPUT]
-```
+
+**CRITICAL: Do NOT wrap the [RALPH_OUTPUT] block in markdown code fences (``` or ~~~). Output it as plain text.**
 
 Rules:
 - Each task should be completable in ONE iteration
@@ -119,27 +101,22 @@ Do NOT make design decisions yourself. If the spec is ambiguous or conflicts wit
 
 ## Output
 
-When done, output your result between markers EXACTLY like this:
+When done, output your result between markers as PLAIN TEXT (no code fences):
 
-```
 [RALPH_OUTPUT]
 {"verdict": "done", "summary": "what was implemented", "issues": []}
 [/RALPH_OUTPUT]
-```
 
 If you cannot complete the task:
 
-```
 [RALPH_OUTPUT]
 {"verdict": "blocked", "reason": "why it cannot be done", "issues": []}
 [/RALPH_OUTPUT]
-```
 
 The `issues` array is for problems you discovered during implementation (optional):
-```json
-{"issues": [{"desc": "Memory leak in foo.c:123"}, {"desc": "Test flaky: bar_test"}]}
-```
+  {"issues": [{"desc": "Memory leak in foo.c:123"}, {"desc": "Test flaky: bar_test"}]}
 
+**CRITICAL: Do NOT wrap the [RALPH_OUTPUT] block in markdown code fences (``` or ~~~). Output it as plain text.**
 **You MUST output the [RALPH_OUTPUT] block as your final action before exiting.**
 """
 

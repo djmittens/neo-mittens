@@ -270,7 +270,7 @@ VERIFY   Execute task     |
    - Identify gaps (missing features, incomplete implementations)
    - Identify new issues (bugs found, edge cases missed)
    - Create tasks for missing work: `ralph task add '{"name": "...", "accept": "..."}'`
-   - Create issues for problems found: `ralph issue add "description"`
+   - Create issues for problems found: `ralph issue add "description"` (wraps as JSON for tix)
 4. **Prioritize all pending tasks**: `ralph task prioritize`
    - Uses shared prioritization logic (same as PLAN stage)
    - Considers dependencies, complexity, and critical path

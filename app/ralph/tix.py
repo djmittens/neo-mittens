@@ -20,7 +20,7 @@ __all__ = [
 ]
 
 # Default tix binary location relative to repo root
-_DEFAULT_TIX_BIN = "powerplant/tix"
+_DEFAULT_TIX_BIN = "tix"
 
 
 class TixError(Exception):
@@ -61,7 +61,7 @@ class TixProtocol(Protocol):
     def task_reject(self, task_id: str, reason: str) -> dict: ...
     def task_delete(self, task_id: str) -> dict: ...
     def task_update(self, task_id: str, fields: dict) -> dict: ...
-    def issue_add(self, desc: str) -> dict: ...
+    def issue_add(self, desc: str, spec: str = "") -> dict: ...
     def issue_done(self) -> dict: ...
     def issue_done_all(self) -> dict: ...
     def issue_done_ids(self, ids: list[str]) -> dict: ...
@@ -85,7 +85,7 @@ class Tix:
         if tix_bin:
             self.bin = Path(tix_bin)
         else:
-            self.bin = repo_root / _DEFAULT_TIX_BIN
+            self.bin = Path(_DEFAULT_TIX_BIN)
         self.cwd = repo_root
 
     def _run(self, *args: str, parse_json: bool = True) -> TixResult:
@@ -134,29 +134,57 @@ class Tix:
 
     def query_tasks(self) -> list[dict]:
         """Get all pending tasks as list of dicts."""
-        result = self._run("query", "tasks")
+        result = self._run("q", "tasks | status=pending")
         if isinstance(result.data, list):
             return result.data
         return []
 
     def query_done_tasks(self) -> list[dict]:
         """Get all done (awaiting verification) tasks as list of dicts."""
-        result = self._run("query", "tasks", "--done")
+        result = self._run("q", "tasks | status=done")
         if isinstance(result.data, list):
             return result.data
         return []
 
     def query_issues(self) -> list[dict]:
         """Get all open issues as list of dicts."""
-        result = self._run("query", "issues")
+        result = self._run("q", "issues")
         if isinstance(result.data, list):
             return result.data
         return []
 
     def query_full(self) -> dict:
-        """Get full state as dict."""
-        result = self._run("query")
-        return result.data if isinstance(result.data, dict) else {}
+        """Get full state as dict with tasks grouped by status and issues.
+
+        Returns dict matching the format expected by the state machine:
+        {
+            "tasks": {"pending": [...], "done": [...], "accepted": [...]},
+            "issues": [...]
+        }
+        """
+        out: dict = {"tasks": {}, "issues": []}
+        try:
+            all_tasks = self._run("q", "tasks all")
+            if isinstance(all_tasks.data, list):
+                # tix returns numeric status: 0=pending, 1=done, 2=accepted
+                _STATUS_MAP = {0: "pending", 1: "done", 2: "accepted"}
+                by_status: dict[str, list] = {}
+                for t in all_tasks.data:
+                    if not isinstance(t, dict):
+                        continue
+                    raw = t.get("status", 0)
+                    s = _STATUS_MAP.get(raw, str(raw)) if isinstance(raw, int) else str(raw)
+                    by_status.setdefault(s, []).append(t)
+                out["tasks"] = by_status
+        except TixError:
+            pass
+        try:
+            issues = self._run("q", "issues")
+            if isinstance(issues.data, list):
+                out["issues"] = issues.data
+        except TixError:
+            pass
+        return out
 
     def query_tql(self, tql: str) -> list[dict]:
         """Run a TQL pipeline query and return results as list of dicts.
@@ -404,16 +432,20 @@ class Tix:
     # Issue mutations
     # =========================================================================
 
-    def issue_add(self, desc: str) -> dict:
+    def issue_add(self, desc: str, spec: str = "") -> dict:
         """Add a new issue.
 
         Args:
             desc: Issue description.
+            spec: Optional spec name to tag the issue with.
 
         Returns:
             Dict with id.
         """
-        result = self._run("issue", "add", desc)
+        issue_json: dict[str, str] = {"desc": desc}
+        if spec:
+            issue_json["spec"] = spec
+        result = self._run("issue", "add", json.dumps(issue_json))
         return result.data
 
     def issue_done(self) -> dict:
