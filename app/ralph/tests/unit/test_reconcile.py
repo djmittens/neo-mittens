@@ -9,10 +9,13 @@ from ralph.reconcile import (
     _find_similar_task,
     _infer_verdict_from_text,
     _reject_counts,
+    _reject_reasons,
     _sanitize_deps,
     _token_similarity,
     dedup_tasks,
     extract_structured_output,
+    get_reject_counts,
+    get_reject_reasons,
     reconcile_build,
     reconcile_verify,
     reconcile_investigate,
@@ -25,10 +28,12 @@ from ralph.tix import TixError
 
 @pytest.fixture(autouse=True)
 def _reset_reject_counts():
-    """Reset module-level _reject_counts between tests."""
+    """Reset module-level _reject_counts and _reject_reasons between tests."""
     _reject_counts.clear()
+    _reject_reasons.clear()
     yield
     _reject_counts.clear()
+    _reject_reasons.clear()
 
 
 @pytest.fixture
@@ -857,6 +862,49 @@ class TestRejectCounts:
         """Verify the autouse fixture resets _reject_counts per test."""
         # _reject_counts should be empty at start of each test
         assert len(_reject_counts) == 0
+
+
+class TestRejectReasons:
+    """Verify _reject_reasons accumulates rejection history."""
+
+    def test_single_rejection_records_reason(self, mock_tix):
+        """First rejection stores the reason string."""
+        mock_tix.task_update.return_value = {}
+        output = '[RALPH_OUTPUT]\n{"results": [{"task_id": "t-1", "passed": false, "reason": "test fails"}]}\n[/RALPH_OUTPUT]'
+        reconcile_verify(mock_tix, output)
+        assert _reject_reasons.get("t-1") == ["test fails"]
+
+    def test_multiple_rejections_accumulate(self, mock_tix):
+        """Multiple rejections build up ordered history."""
+        mock_tix.task_update.return_value = {}
+        out1 = '[RALPH_OUTPUT]\n{"results": [{"task_id": "t-1", "passed": false, "reason": "first fail"}]}\n[/RALPH_OUTPUT]'
+        out2 = '[RALPH_OUTPUT]\n{"results": [{"task_id": "t-1", "passed": false, "reason": "second fail"}]}\n[/RALPH_OUTPUT]'
+        reconcile_verify(mock_tix, out1)
+        reconcile_verify(mock_tix, out2)
+        assert _reject_reasons["t-1"] == ["first fail", "second fail"]
+
+    def test_get_reject_reasons_returns_copy(self, mock_tix):
+        """get_reject_reasons returns a copy, not the original."""
+        mock_tix.task_update.return_value = {}
+        output = '[RALPH_OUTPUT]\n{"results": [{"task_id": "t-1", "passed": false, "reason": "fail"}]}\n[/RALPH_OUTPUT]'
+        reconcile_verify(mock_tix, output)
+        reasons = get_reject_reasons()
+        reasons["t-1"].append("mutated")
+        # Original should not be affected
+        assert len(_reject_reasons["t-1"]) == 1
+
+    def test_get_reject_counts_returns_copy(self, mock_tix):
+        """get_reject_counts returns a copy, not the original."""
+        mock_tix.task_update.return_value = {}
+        output = '[RALPH_OUTPUT]\n{"results": [{"task_id": "t-1", "passed": false, "reason": "fail"}]}\n[/RALPH_OUTPUT]'
+        reconcile_verify(mock_tix, output)
+        counts = get_reject_counts()
+        counts["t-1"] = 999
+        assert _reject_counts["t-1"] == 1
+
+    def test_reset_fixture_clears_reasons(self, mock_tix):
+        """Verify the autouse fixture resets _reject_reasons per test."""
+        assert len(_reject_reasons) == 0
 
 
 # =============================================================================

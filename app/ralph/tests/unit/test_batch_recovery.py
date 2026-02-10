@@ -578,6 +578,42 @@ class TestPickBestTask:
         assert best["id"] == "t-b"
 
 
+    def test_parks_task_above_threshold(self):
+        """Task above park_threshold sorts after all non-parked tasks."""
+        tasks = [
+            {"id": "t-parked", "name": "Parked", "priority": "high"},
+            {"id": "t-fresh", "name": "Fresh", "priority": "low"},
+        ]
+        retry_counts = {"t-parked": 5, "t-fresh": 0}
+        best = _pick_best_task(
+            tasks, retry_counts=retry_counts, park_threshold=5,
+        )
+        assert best["id"] == "t-fresh"
+
+    def test_parked_picked_when_all_parked(self):
+        """When all tasks are parked, still picks the best one."""
+        tasks = [
+            {"id": "t-a", "name": "A", "priority": "high"},
+            {"id": "t-b", "name": "B", "priority": "low"},
+        ]
+        retry_counts = {"t-a": 7, "t-b": 10}
+        best = _pick_best_task(
+            tasks, retry_counts=retry_counts, park_threshold=5,
+        )
+        assert best["id"] == "t-a"
+
+    def test_park_threshold_default(self):
+        """Default park_threshold allows moderately-retried tasks."""
+        tasks = [
+            {"id": "t-retry", "name": "Retry", "priority": "high"},
+            {"id": "t-fresh", "name": "Fresh", "priority": "high"},
+        ]
+        retry_counts = {"t-retry": 4, "t-fresh": 0}
+        # Default threshold is 5, so 4 retries is not parked
+        best = _pick_best_task(tasks, retry_counts=retry_counts)
+        assert best["id"] == "t-fresh"  # Still picks fresh (lower retries)
+
+
 class TestEscalateStuckTasks:
     """Tests for _escalate_stuck_tasks pattern detection."""
 
@@ -1116,6 +1152,295 @@ class TestLoadSpecContent:
         """Missing specs directory returns empty string."""
         content = _load_spec_content(tmp_path / "nope", "feat.md")
         assert content == ""
+
+
+class TestRejectionHistory:
+    """Tests for ConstructStateMachine rejection history tracking."""
+
+    def test_record_rejection_stores_reason(self, tmp_path: Path):
+        """Single rejection is recorded for the task."""
+        repo_root = tmp_path
+        (repo_root / ".tix").mkdir(parents=True, exist_ok=True)
+        _write_orch_state(repo_root)
+        sm, _ = _make_state_machine(repo_root)
+
+        sm.record_rejection("t-1", "tests fail")
+        assert sm.get_rejection_history("t-1") == ["tests fail"]
+
+    def test_record_rejection_accumulates(self, tmp_path: Path):
+        """Multiple rejections accumulate in order."""
+        repo_root = tmp_path
+        (repo_root / ".tix").mkdir(parents=True, exist_ok=True)
+        _write_orch_state(repo_root)
+        sm, _ = _make_state_machine(repo_root)
+
+        sm.record_rejection("t-1", "first failure")
+        sm.record_rejection("t-1", "second failure")
+        sm.record_rejection("t-1", "third failure")
+        history = sm.get_rejection_history("t-1")
+        assert history == ["first failure", "second failure", "third failure"]
+
+    def test_record_rejection_caps_at_ten(self, tmp_path: Path):
+        """History is capped at 10 entries, oldest dropped."""
+        repo_root = tmp_path
+        (repo_root / ".tix").mkdir(parents=True, exist_ok=True)
+        _write_orch_state(repo_root)
+        sm, _ = _make_state_machine(repo_root)
+
+        for i in range(12):
+            sm.record_rejection("t-1", f"reason-{i}")
+
+        history = sm.get_rejection_history("t-1")
+        assert len(history) == 10
+        # Oldest two (reason-0, reason-1) should have been dropped
+        assert history[0] == "reason-2"
+        assert history[-1] == "reason-11"
+
+    def test_get_rejection_history_returns_copy(self, tmp_path: Path):
+        """Returned history is a copy — mutations don't affect internal state."""
+        repo_root = tmp_path
+        (repo_root / ".tix").mkdir(parents=True, exist_ok=True)
+        _write_orch_state(repo_root)
+        sm, _ = _make_state_machine(repo_root)
+
+        sm.record_rejection("t-1", "reason")
+        history = sm.get_rejection_history("t-1")
+        history.append("tampered")
+        assert sm.get_rejection_history("t-1") == ["reason"]
+
+    def test_get_rejection_history_unknown_task(self, tmp_path: Path):
+        """Unknown task returns empty list."""
+        repo_root = tmp_path
+        (repo_root / ".tix").mkdir(parents=True, exist_ok=True)
+        _write_orch_state(repo_root)
+        sm, _ = _make_state_machine(repo_root)
+
+        assert sm.get_rejection_history("t-unknown") == []
+
+    def test_get_retry_count(self, tmp_path: Path):
+        """get_retry_count reads from _retry_counts."""
+        repo_root = tmp_path
+        (repo_root / ".tix").mkdir(parents=True, exist_ok=True)
+        _write_orch_state(repo_root)
+        sm, _ = _make_state_machine(repo_root)
+
+        assert sm.get_retry_count("t-1") == 0
+        sm._retry_counts["t-1"] = 3
+        assert sm.get_retry_count("t-1") == 3
+
+    def test_separate_tasks_have_separate_history(self, tmp_path: Path):
+        """Different task IDs maintain independent histories."""
+        repo_root = tmp_path
+        (repo_root / ".tix").mkdir(parents=True, exist_ok=True)
+        _write_orch_state(repo_root)
+        sm, _ = _make_state_machine(repo_root)
+
+        sm.record_rejection("t-1", "reason-a")
+        sm.record_rejection("t-2", "reason-b")
+        assert sm.get_rejection_history("t-1") == ["reason-a"]
+        assert sm.get_rejection_history("t-2") == ["reason-b"]
+
+
+class TestRevertOnReject:
+    """Tests for _maybe_revert_on_reject and _revert_on_failure."""
+
+    def _make_sm_with_revert(
+        self,
+        repo_root: Path,
+        tix: _MockTix,
+    ) -> tuple[ConstructStateMachine, list[str], list[str]]:
+        """Create a state machine with snapshot/revert tracking.
+
+        Returns:
+            Tuple of (state_machine, snapshot_calls, revert_calls).
+        """
+        snapshot_calls: list[str] = []
+        revert_calls: list[str] = []
+
+        def fake_snapshot() -> str:
+            ref = f"snap-{len(snapshot_calls)}"
+            snapshot_calls.append(ref)
+            return ref
+
+        def fake_revert(ref: str) -> bool:
+            revert_calls.append(ref)
+            return True
+
+        config = GlobalConfig()
+        metrics = Metrics()
+        metrics.record_progress()
+
+        sm = ConstructStateMachine(
+            config=config,
+            metrics=metrics,
+            stage_timeout_ms=60000,
+            context_limit=100000,
+            run_stage_fn=lambda *a: StageResult(
+                stage=Stage.BUILD, outcome=StageOutcome.SUCCESS,
+            ),
+            load_state_fn=lambda: load_state(repo_root),
+            save_state_fn=lambda st: save_state(st, repo_root),
+            tix=tix,
+            snapshot_fn=fake_snapshot,
+            revert_fn=fake_revert,
+        )
+        return sm, snapshot_calls, revert_calls
+
+    def test_reverts_when_all_rejected(self, tmp_path: Path):
+        """Source reverted when VERIFY rejects all tasks (pending exist, no done)."""
+        repo_root = tmp_path
+        (repo_root / ".tix").mkdir(parents=True, exist_ok=True)
+        _write_orch_state(repo_root, stage="VERIFY")
+
+        mock_tix = _MockTix(
+            tasks=[{"id": "t-1", "name": "Rejected back"}],
+            done=[],
+        )
+        sm, snap_calls, revert_calls = self._make_sm_with_revert(
+            repo_root, mock_tix,
+        )
+        sm._pre_build_snapshot = "snap-0"
+
+        sm._maybe_revert_on_reject()
+
+        assert revert_calls == ["snap-0"]
+        assert sm._pre_build_snapshot is None
+
+    def test_no_revert_when_done_tasks_remain(self, tmp_path: Path):
+        """No revert when there are still done tasks (VERIFY not finished)."""
+        repo_root = tmp_path
+        (repo_root / ".tix").mkdir(parents=True, exist_ok=True)
+        _write_orch_state(repo_root, stage="VERIFY")
+
+        mock_tix = _MockTix(
+            tasks=[{"id": "t-1"}],
+            done=[{"id": "t-2"}],
+        )
+        sm, _, revert_calls = self._make_sm_with_revert(
+            repo_root, mock_tix,
+        )
+        sm._pre_build_snapshot = "snap-0"
+
+        sm._maybe_revert_on_reject()
+
+        assert revert_calls == []
+        assert sm._pre_build_snapshot == "snap-0"
+
+    def test_no_revert_when_all_accepted(self, tmp_path: Path):
+        """No revert when everything accepted (no pending, no done, no issues)."""
+        repo_root = tmp_path
+        (repo_root / ".tix").mkdir(parents=True, exist_ok=True)
+        _write_orch_state(repo_root, stage="VERIFY")
+
+        mock_tix = _MockTix(tasks=[], done=[], issues=[])
+        sm, _, revert_calls = self._make_sm_with_revert(
+            repo_root, mock_tix,
+        )
+        sm._pre_build_snapshot = "snap-0"
+
+        sm._maybe_revert_on_reject()
+
+        assert revert_calls == []
+        assert sm._pre_build_snapshot is None  # Cleared
+
+    def test_no_revert_without_snapshot(self, tmp_path: Path):
+        """No revert attempted when no snapshot was taken."""
+        repo_root = tmp_path
+        (repo_root / ".tix").mkdir(parents=True, exist_ok=True)
+        _write_orch_state(repo_root, stage="VERIFY")
+
+        mock_tix = _MockTix(tasks=[{"id": "t-1"}])
+        sm, _, revert_calls = self._make_sm_with_revert(
+            repo_root, mock_tix,
+        )
+        sm._pre_build_snapshot = None
+
+        sm._maybe_revert_on_reject()
+
+        assert revert_calls == []
+
+    def test_no_revert_without_revert_fn(self, tmp_path: Path):
+        """No revert when revert_fn is not provided."""
+        repo_root = tmp_path
+        (repo_root / ".tix").mkdir(parents=True, exist_ok=True)
+        _write_orch_state(repo_root, stage="VERIFY")
+
+        mock_tix = _MockTix(tasks=[{"id": "t-1"}])
+        sm, _ = _make_state_machine(repo_root, tix=mock_tix)
+        sm._pre_build_snapshot = "snap-0"
+
+        sm._maybe_revert_on_reject()
+        # Should not crash; snapshot just stays set
+        assert sm._pre_build_snapshot == "snap-0"
+
+    def test_revert_on_failure_reverts(self, tmp_path: Path):
+        """_revert_on_failure reverts and clears snapshot."""
+        repo_root = tmp_path
+        (repo_root / ".tix").mkdir(parents=True, exist_ok=True)
+        _write_orch_state(repo_root)
+
+        mock_tix = _MockTix()
+        sm, _, revert_calls = self._make_sm_with_revert(
+            repo_root, mock_tix,
+        )
+        sm._pre_build_snapshot = "snap-fail"
+
+        sm._revert_on_failure()
+
+        assert revert_calls == ["snap-fail"]
+        assert sm._pre_build_snapshot is None
+
+    def test_revert_on_failure_no_snapshot(self, tmp_path: Path):
+        """_revert_on_failure is a no-op without snapshot."""
+        repo_root = tmp_path
+        (repo_root / ".tix").mkdir(parents=True, exist_ok=True)
+        _write_orch_state(repo_root)
+
+        mock_tix = _MockTix()
+        sm, _, revert_calls = self._make_sm_with_revert(
+            repo_root, mock_tix,
+        )
+        sm._pre_build_snapshot = None
+
+        sm._revert_on_failure()
+
+        assert revert_calls == []
+
+    def test_build_takes_snapshot(self, tmp_path: Path):
+        """_run_build calls snapshot_fn before running BUILD."""
+        repo_root = tmp_path
+        (repo_root / ".tix").mkdir(parents=True, exist_ok=True)
+        _write_orch_state(repo_root, stage="BUILD")
+
+        mock_tix = _MockTix(tasks=[{"id": "t-1"}])
+        sm, snap_calls, _ = self._make_sm_with_revert(
+            repo_root, mock_tix,
+        )
+
+        sm._run_build(load_state(repo_root))
+
+        assert len(snap_calls) == 1
+        assert sm._pre_build_snapshot == "snap-0"
+
+    def test_revert_on_issues_after_reject(self, tmp_path: Path):
+        """Source reverted when pending tasks AND issues exist but no done."""
+        repo_root = tmp_path
+        (repo_root / ".tix").mkdir(parents=True, exist_ok=True)
+        _write_orch_state(repo_root, stage="VERIFY")
+
+        mock_tix = _MockTix(
+            tasks=[{"id": "t-1"}],
+            done=[],
+            issues=[{"id": "i-1", "desc": "problem"}],
+        )
+        sm, _, revert_calls = self._make_sm_with_revert(
+            repo_root, mock_tix,
+        )
+        sm._pre_build_snapshot = "snap-0"
+
+        sm._maybe_revert_on_reject()
+
+        assert revert_calls == ["snap-0"]
 
 
 class TestRunFormatCommand:

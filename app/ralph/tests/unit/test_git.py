@@ -14,6 +14,8 @@ from ralph.git import (
     has_uncommitted_plan,
     sync_with_remote,
     push_with_retry,
+    snapshot_source,
+    revert_source,
     IterationCommitInfo,
     TaskVerdict,
     has_uncommitted_changes,
@@ -681,3 +683,99 @@ class TestGetUncommittedDiff:
         assert diff_text in result
         # No stat header when stat fails
         assert "DIFF STAT" not in result
+
+
+class TestSnapshotSource:
+    """Tests for snapshot_source function."""
+
+    @patch("ralph.git.subprocess.run")
+    def test_returns_ref_when_dirty(self, mock_run):
+        """Returns stash ref when working tree has changes."""
+        mock_run.return_value = MagicMock(
+            returncode=0, stdout="abc123def\n"
+        )
+        ref = snapshot_source()
+        assert ref == "abc123def"
+
+    @patch("ralph.git.subprocess.run")
+    def test_returns_none_when_clean(self, mock_run):
+        """Returns None when working tree is clean."""
+        mock_run.return_value = MagicMock(returncode=0, stdout="\n")
+        ref = snapshot_source()
+        assert ref is None
+
+    @patch("ralph.git.subprocess.run")
+    def test_returns_none_on_timeout(self, mock_run):
+        """Returns None on timeout."""
+        mock_run.side_effect = subprocess.TimeoutExpired("git", 30)
+        ref = snapshot_source()
+        assert ref is None
+
+    @patch("ralph.git.subprocess.run")
+    def test_passes_cwd(self, mock_run):
+        """Passes cwd to subprocess."""
+        mock_run.return_value = MagicMock(returncode=0, stdout="ref\n")
+        snapshot_source(cwd=Path("/tmp/repo"))
+        mock_run.assert_called_once()
+        assert mock_run.call_args.kwargs.get("cwd") == Path("/tmp/repo")
+
+
+class TestRevertSource:
+    """Tests for revert_source function."""
+
+    @patch("ralph.git.subprocess.run")
+    def test_reverts_to_snapshot_ref(self, mock_run, tmp_path):
+        """Reverts files to snapshot ref, preserving .tix/."""
+        # Create .tix/ with plan data
+        tix_dir = tmp_path / ".tix"
+        tix_dir.mkdir()
+        (tix_dir / "plan.jsonl").write_text('{"t":"task"}\n')
+
+        mock_run.return_value = MagicMock(returncode=0, stdout="")
+        ok = revert_source("abc123", cwd=tmp_path)
+        assert ok is True
+        # .tix/ should survive
+        assert (tix_dir / "plan.jsonl").read_text() == '{"t":"task"}\n'
+
+    @patch("ralph.git.subprocess.run")
+    def test_reverts_to_head_when_no_ref(self, mock_run, tmp_path):
+        """Uses HEAD when snapshot_ref is None."""
+        mock_run.return_value = MagicMock(returncode=0, stdout="")
+        ok = revert_source(None, cwd=tmp_path)
+        assert ok is True
+        # Should use HEAD
+        checkout_call = mock_run.call_args_list[0]
+        assert "HEAD" in checkout_call.args[0]
+
+    @patch("ralph.git.subprocess.run")
+    def test_returns_false_on_checkout_failure(self, mock_run, tmp_path):
+        """Returns False if git checkout fails."""
+        mock_run.return_value = MagicMock(
+            returncode=1, stdout="", stderr="error"
+        )
+        ok = revert_source("abc123", cwd=tmp_path)
+        assert ok is False
+
+    @patch("ralph.git.subprocess.run")
+    def test_preserves_tix_after_revert(self, mock_run, tmp_path):
+        """Tix plan survives even if git checkout overwrites it."""
+        tix_dir = tmp_path / ".tix"
+        tix_dir.mkdir()
+        plan = tix_dir / "plan.jsonl"
+        plan.write_text('{"t":"task","id":"t-1"}\n')
+        (tix_dir / "cache.db").write_bytes(b"sqlite")
+
+        def side_effect(cmd, **kw):
+            # Simulate git checkout wiping .tix/
+            if "checkout" in cmd:
+                if tix_dir.exists():
+                    import shutil
+                    shutil.rmtree(tix_dir)
+            return MagicMock(returncode=0)
+
+        mock_run.side_effect = side_effect
+        ok = revert_source("ref123", cwd=tmp_path)
+        assert ok is True
+        assert plan.exists()
+        assert plan.read_text() == '{"t":"task","id":"t-1"}\n'
+        assert (tix_dir / "cache.db").read_bytes() == b"sqlite"

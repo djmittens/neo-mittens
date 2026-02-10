@@ -28,6 +28,8 @@ from ..git import (
     get_uncommitted_diff,
     push_with_retry,
     sync_with_remote,
+    snapshot_source,
+    revert_source,
     IterationCommitInfo,
     TaskVerdict,
     commit_iteration,
@@ -44,6 +46,7 @@ from ..ledger import (
     _generate_run_id,
     _get_worktree_root,
 )
+from ..acp import AcpClient, AcpError, AcpSessionResult
 from ..opencode import (
     spawn_opencode,
     spawn_opencode_continue,
@@ -66,6 +69,8 @@ from ..reconcile import (
     reconcile_investigate,
     reconcile_decompose,
     ReconcileResult,
+    get_reject_counts,
+    get_reject_reasons,
 )
 from ..tix import Tix, TixError, TixProtocol
 from ..stages.base import (
@@ -84,6 +89,33 @@ __all__ = ["cmd_construct"]
 # Set by _run_stage after reconciliation, read by the stage wrapper for
 # IterationRecord. Reset each iteration.
 _last_reconcile_result: dict[str, Optional[ReconcileResult]] = {"result": None}
+
+# Mutable containers for passing state machine retry/rejection data to prompt
+# construction. Set by the state machine via set_build_feedback(), read by
+# _build_stage_prompt_tix for BUILD context enrichment.
+_build_feedback: dict[str, Any] = {
+    "retry_counts": {},
+    "rejection_history": {},
+}
+
+
+def set_build_feedback(
+    retry_counts: dict[str, int],
+    rejection_history: dict[str, list[str]],
+) -> None:
+    """Update BUILD feedback data for the next prompt construction.
+
+    Called by the construct loop to expose state machine data to
+    ``_build_stage_prompt_tix`` without threading it through the
+    ``run_stage_fn`` signature.
+
+    Args:
+        retry_counts: Task ID -> retry count mapping.
+        rejection_history: Task ID -> list of rejection reasons.
+    """
+    _build_feedback["retry_counts"] = retry_counts
+    _build_feedback["rejection_history"] = rejection_history
+
 
 # Default values
 DEFAULT_MAX_FAILURES = 3
@@ -166,20 +198,26 @@ _PRIORITY_ORDER = {"high": 0, "medium": 1, "low": 2}
 def _pick_best_task(
     tasks: list[dict],
     retry_counts: Optional[dict[str, int]] = None,
+    park_threshold: int = 5,
 ) -> dict:
     """Select the highest-priority task from a list of pending tasks.
 
     Priority ordering:
-      0. Dependency readiness: tasks with unmet deps sort last
-      1. Priority field: high > medium > low > unset
-      2. Retry count: prefer fresher tasks (lower retries)
-      3. Original order preserved as tiebreaker
+      0. Parked: tasks at or above *park_threshold* retries sort last
+      1. Dependency readiness: tasks with unmet deps sort next-to-last
+      2. Priority field: high > medium > low > unset
+      3. Retry count: prefer fresher tasks (lower retries)
+      4. Original order preserved as tiebreaker
 
     A dep is "unmet" if its ID is still in the pending task list.
+    A task is "parked" if it has been retried *park_threshold* or
+    more times; parked tasks are only picked when nothing else is
+    available.
 
     Args:
         tasks: Non-empty list of task dicts from tix.
         retry_counts: In-memory retry counts from ConstructStateMachine.
+        park_threshold: Retry count at which a task is considered parked.
 
     Returns:
         The best task to build next.
@@ -187,15 +225,16 @@ def _pick_best_task(
     pending_ids = {t.get("id", "") for t in tasks}
     retries_map = retry_counts or {}
 
-    def sort_key(task: dict) -> tuple[int, int, int]:
+    def sort_key(task: dict) -> tuple[int, int, int, int]:
+        tid = task.get("id", "")
+        retries = retries_map.get(tid, 0)
+        parked = 1 if retries >= park_threshold else 0
         deps = task.get("deps") or []
         unmet = 1 if any(d in pending_ids for d in deps) else 0
         prio = _PRIORITY_ORDER.get(
             task.get("priority", ""), 3
         )
-        tid = task.get("id", "")
-        retries = retries_map.get(tid, 0)
-        return (unmet, prio, retries)
+        return (parked, unmet, prio, retries)
 
     return min(tasks, key=sort_key)
 
@@ -208,6 +247,8 @@ def _build_stage_prompt_tix(
     project_rules: Optional[str] = None,
     config: Optional[GlobalConfig] = None,
     repo_root: Optional[Path] = None,
+    retry_counts: Optional[dict[str, int]] = None,
+    rejection_history: Optional[dict[str, list[str]]] = None,
 ) -> Tuple[Optional[str], Optional[dict]]:
     """Build a prompt for a stage using tix for ticket data.
     
@@ -225,9 +266,18 @@ def _build_stage_prompt_tix(
         tasks = _filter_by_spec(tix.query_tasks(), spec_name)
         if not tasks:
             return None, None
-        task = _pick_best_task(tasks)
-        context = build_build_context(task, spec_name, spec_content)
-        meta["task_id"] = task.get("id", "")
+        rc = retry_counts or _build_feedback.get("retry_counts", {})
+        rh = rejection_history or _build_feedback.get("rejection_history", {})
+        task = _pick_best_task(tasks, retry_counts=rc)
+        task_id = task.get("id", "")
+        task_retries = rc.get(task_id, 0)
+        task_history = rh.get(task_id, [])
+        context = build_build_context(
+            task, spec_name, spec_content,
+            retry_count=task_retries,
+            rejection_history=task_history,
+        )
+        meta["task_id"] = task_id
     elif stage == Stage.VERIFY:
         full = _filter_full_by_spec(tix.query_full(), spec_name)
         done = full.get("tasks", {}).get("done", [])
@@ -358,6 +408,7 @@ def _execute_opencode(
     stage_name: str = "",
     session_id: Optional[str] = None,
     agent: Optional[str] = None,
+    acp_client: Optional[AcpClient] = None,
 ) -> Tuple[int, str, bool, float, int, int, int, int, Optional[str], int]:
     """Execute opencode with real-time streaming output.
 
@@ -366,6 +417,9 @@ def _execute_opencode(
             of starting a new one. Reuses cached context.
         agent: Optional opencode agent profile for tool sandboxing.
             Resolved from config if not provided.
+        acp_client: If provided, uses ACP protocol instead of spawning
+            a subprocess. Creates a fresh session per call for context
+            isolation.
 
     Returns:
         Tuple of (return_code, output, timed_out, cost, tokens_in,
@@ -376,6 +430,14 @@ def _execute_opencode(
     if agent is None and stage_name:
         agent = config.agent_for_stage(stage_name)
 
+    # ACP path: use persistent process with structured protocol
+    if acp_client is not None:
+        return _execute_via_acp(
+            acp_client, prompt, model, agent or "",
+            stage_timeout_ms, print_output,
+        )
+
+    # Subprocess path: spawn opencode run (original behavior)
     if session_id:
         proc = spawn_opencode_continue(
             session_id, prompt, cwd=repo_root, model=model, agent=agent,
@@ -396,6 +458,59 @@ def _execute_opencode(
             result.session_id, result.metrics.last_context_size)
 
 
+def _execute_via_acp(
+    client: AcpClient,
+    prompt: str,
+    model: str,
+    mode: str,
+    stage_timeout_ms: int,
+    print_output: bool,
+) -> Tuple[int, str, bool, float, int, int, int, int, Optional[str], int]:
+    """Execute a prompt via ACP client, returning the same tuple format.
+
+    Creates a fresh session per call for context isolation.
+    Converts AcpSessionResult to the 10-tuple expected by callers.
+
+    Args:
+        client: Active ACP client.
+        prompt: Prompt text.
+        model: Model ID.
+        mode: Agent mode/profile name.
+        stage_timeout_ms: Timeout in milliseconds.
+        print_output: Whether to print progress.
+
+    Returns:
+        Same 10-tuple as _execute_opencode.
+    """
+    timeout_s = stage_timeout_ms / 1000.0
+
+    try:
+        result = client.prompt(
+            text=prompt,
+            mode=mode,
+            model=model,
+            timeout_s=timeout_s,
+            print_output=print_output,
+        )
+    except AcpError as exc:
+        # Convert ACP errors to the same format as subprocess failures
+        return (-1, str(exc), False, 0.0, 0, 0, 0, 0, None, 0)
+
+    return_code = 0 if not result.timed_out else -1
+    return (
+        return_code,
+        result.text,
+        result.timed_out,
+        result.cost,
+        result.tokens_in,
+        result.tokens_cached,
+        result.tokens_out,
+        1,  # iterations (one prompt = one iteration)
+        result.session_id,
+        result.context_used,
+    )
+
+
 def _run_stage(
     config: GlobalConfig,
     stage: Stage,
@@ -409,6 +524,7 @@ def _run_stage(
     tix: TixProtocol,
     start_time: float,
     run_id: str = "",
+    acp_client: Optional[AcpClient] = None,
 ) -> StageResult:
     """Run a stage using tix for ticket data and reconcile after."""
     prompt, meta = _build_stage_prompt_tix(
@@ -430,6 +546,7 @@ def _run_stage(
             config, prompt, repo_root, stage_timeout_ms,
             print_output=print_output,
             stage_name=stage.name.lower(),
+            acp_client=acp_client,
         )
     except Exception as e:
         return _make_result(
@@ -963,6 +1080,7 @@ def _create_stage_wrapper(
     tix_instance: Optional[Tix] = None,
     run_id: str = "",
     log_dir: Optional[Path] = None,
+    acp_client: Optional[AcpClient] = None,
 ) -> Callable:
     """Create a stage wrapper function for the state machine."""
     if tix_instance is None:
@@ -1027,6 +1145,7 @@ def _create_stage_wrapper(
             repo_root, ralph_dir, project_rules,
             True, tix_instance, iter_start,
             run_id=run_id,
+            acp_client=acp_client,
         )
 
         iter_duration = time.time() - iter_start
@@ -1553,10 +1672,24 @@ def cmd_construct(
     git_sha_start = get_current_commit(cwd)
     session_start_time = time.time()
 
+    # ACP client: persistent opencode process for structured tool events
+    acp_client: Optional[AcpClient] = None
+    if getattr(global_config, "use_acp", True):
+        try:
+            acp_client = AcpClient(repo_root)
+            acp_client.start()
+            modes = acp_client.available_modes
+            print(f"ACP:    {Colors.GREEN}active{Colors.NC} "
+                  f"({len(modes)} modes available)")
+        except AcpError as exc:
+            print(f"{Colors.YELLOW}ACP init failed, falling back "
+                  f"to subprocess: {exc}{Colors.NC}")
+            acp_client = None
+
     # Create state machine
     stage_wrapper = _create_stage_wrapper(
         repo_root, ralph_dir, project_rules, tix_instance,
-        run_id=run_id, log_dir=log_dir,
+        run_id=run_id, log_dir=log_dir, acp_client=acp_client,
     )
 
     # LLM dedup callback: called after INVESTIGATE to remove duplicate tasks.
@@ -1564,6 +1697,17 @@ def cmd_construct(
         def llm_fn(prompt: str) -> Optional[str]:
             model = global_config.model_for_stage("investigate")
             dedup_agent = global_config.agent_for_stage("dedup")
+            if acp_client is not None:
+                try:
+                    result = acp_client.prompt(
+                        text=prompt, mode=dedup_agent or "",
+                        model=model,
+                        timeout_s=stage_timeout_ms / 1000.0,
+                        print_output=False,
+                    )
+                    return result.text if not result.timed_out else None
+                except AcpError:
+                    return None
             proc = spawn_opencode(
                 prompt, cwd=repo_root,
                 timeout=stage_timeout_ms, model=model,
@@ -1590,6 +1734,8 @@ def cmd_construct(
         tix=tix_instance,
         loop_detector=loop_detector,
         dedup_fn=_dedup_callback,
+        snapshot_fn=lambda: snapshot_source(cwd=repo_root),
+        revert_fn=lambda ref: revert_source(ref, cwd=repo_root),
     )
 
     # Run construct loop
@@ -1663,6 +1809,17 @@ def cmd_construct(
             print(f"{Colors.GREEN}║  ITERATION {iteration} - {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}{header_parts}{Colors.NC}")
             print(f"{Colors.GREEN}╚═══════════════════════════════════════════════════════════════╝{Colors.NC}")
             
+            # Sync rejection data from reconcile module into state machine,
+            # then expose it for prompt construction.
+            for tid, count in get_reject_counts().items():
+                state_machine._retry_counts[tid] = count
+            for tid, reasons in get_reject_reasons().items():
+                state_machine._rejection_history[tid] = reasons
+            set_build_feedback(
+                state_machine._retry_counts,
+                state_machine._rejection_history,
+            )
+
             # Run one iteration
             should_continue, spec_complete = state_machine.run_iteration(iteration)
             
@@ -1697,6 +1854,13 @@ def cmd_construct(
         exit_reason = "interrupted"
     
     finally:
+        # Shutdown ACP client if active
+        if acp_client is not None:
+            try:
+                acp_client.stop()
+            except Exception:
+                pass
+
         # Reload final state
         state = load_state(repo_root)
         

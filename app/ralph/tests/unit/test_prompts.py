@@ -268,6 +268,29 @@ class TestBuildBuildContext:
 
         assert context["spec_content"] == ""
 
+    def test_includes_retry_count(self):
+        task = {"id": "t-1", "name": "Task", "reject": "bad"}
+        context = build_build_context(task, retry_count=3)
+
+        assert context["retry_count"] == "3"
+
+    def test_includes_rejection_history(self):
+        task = {"id": "t-1", "name": "Task", "reject": "bad"}
+        history = ["First: missed file", "Second: broke tests"]
+        context = build_build_context(
+            task, rejection_history=history,
+        )
+
+        assert "Attempt 1: First: missed file" in context["rejection_history"]
+        assert "Attempt 2: Second: broke tests" in context["rejection_history"]
+
+    def test_empty_rejection_history(self):
+        task = {"id": "t-1", "name": "Task"}
+        context = build_build_context(task, retry_count=0)
+
+        assert context["rejection_history"] == ""
+        assert context["retry_count"] == "0"
+
 
 class TestBuildVerifyContext:
     """Tests for build_verify_context (tix dict-based)."""
@@ -327,16 +350,17 @@ class TestBuildInvestigateContext:
 
     def test_includes_pending_tasks(self):
         pending = [
-            {"id": "t-1", "name": "Fix bug", "notes": "...", "accept": "..."},
-            {"id": "t-2", "name": "Add feature", "notes": "...", "accept": "..."},
+            {"id": "t-1", "name": "Fix bug", "notes": "details", "accept": "grep test"},
+            {"id": "t-2", "name": "Add feature", "notes": "more", "accept": "make test"},
         ]
         context = build_investigate_context([], "s.md", pending_tasks=pending)
 
         assert context["pending_task_count"] == 2
         assert '"t-1"' in context["pending_tasks_json"]
         assert '"Fix bug"' in context["pending_tasks_json"]
-        # Notes/accept should NOT be in compact output
-        assert '"..."' not in context["pending_tasks_json"]
+        # Notes/accept SHOULD be in output for better dedup decisions
+        assert '"details"' in context["pending_tasks_json"]
+        assert '"grep test"' in context["pending_tasks_json"]
 
 
 class TestBuildDecomposeContext:

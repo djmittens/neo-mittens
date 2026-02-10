@@ -298,6 +298,108 @@ def push_with_retry(
 
 
 # =============================================================================
+# Source snapshot / revert (tix-safe)
+# =============================================================================
+
+
+def snapshot_source(cwd: Optional[Path] = None) -> Optional[str]:
+    """Capture a snapshot of the current working tree as a git tree object.
+
+    Uses ``git stash create`` to produce a commit ref that captures
+    the full working tree state (staged + unstaged) without modifying
+    it.  Returns ``None`` if the tree is clean.
+
+    This ref can later be passed to :func:`revert_source` to restore
+    only source files while preserving ``.tix/`` state.
+
+    Args:
+        cwd: Working directory for git commands.
+
+    Returns:
+        A commit-ish ref, or None if there is nothing to snapshot.
+    """
+    try:
+        result = subprocess.run(
+            ["git", "stash", "create"],
+            capture_output=True, text=True, cwd=cwd,
+            timeout=_GIT_LOCAL_TIMEOUT,
+        )
+        ref = result.stdout.strip()
+        return ref if ref else None
+    except subprocess.TimeoutExpired:
+        return None
+
+
+def revert_source(
+    snapshot_ref: Optional[str],
+    cwd: Optional[Path] = None,
+) -> bool:
+    """Revert source files to *snapshot_ref* while preserving ``.tix/``.
+
+    Strategy:
+      1. Save ``.tix/`` contents to a temp location.
+      2. ``git checkout <ref> -- .`` to restore the whole tree.
+      3. If *snapshot_ref* is None (tree was clean when snapshotted),
+         use ``git checkout HEAD -- .`` instead.
+      4. Copy ``.tix/`` back from the temp location.
+
+    This guarantees that all tix mutations (task_done, task_reject,
+    issue_add, etc.) survive the revert even though ``git checkout``
+    would overwrite them.
+
+    Args:
+        snapshot_ref: Ref from :func:`snapshot_source`, or ``None``
+            to revert to the last committed state.
+        cwd: Working directory for git commands.
+
+    Returns:
+        True if the revert succeeded, False on any error.
+    """
+    import shutil
+    import tempfile
+
+    work = Path(cwd) if cwd else Path.cwd()
+    tix_dir = work / ".tix"
+
+    # 1. Preserve .tix/ state
+    tix_backup = None
+    if tix_dir.is_dir():
+        tix_backup = Path(tempfile.mkdtemp(prefix="ralph-tix-"))
+        shutil.copytree(tix_dir, tix_backup / ".tix", dirs_exist_ok=True)
+
+    try:
+        # 2. Restore working tree from snapshot
+        ref = snapshot_ref or "HEAD"
+        result = subprocess.run(
+            ["git", "checkout", ref, "--", "."],
+            capture_output=True, text=True, cwd=cwd,
+            timeout=_GIT_LOCAL_TIMEOUT,
+        )
+        if result.returncode != 0:
+            return False
+
+        # 3. Clean untracked files left behind (agent may have created new files)
+        subprocess.run(
+            ["git", "clean", "-fd", "--exclude=.tix"],
+            capture_output=True, cwd=cwd,
+            timeout=_GIT_LOCAL_TIMEOUT,
+        )
+
+        # 4. Restore .tix/ from backup
+        if tix_backup and (tix_backup / ".tix").is_dir():
+            if tix_dir.exists():
+                shutil.rmtree(tix_dir)
+            shutil.copytree(tix_backup / ".tix", tix_dir)
+
+        return True
+    except (subprocess.TimeoutExpired, OSError):
+        return False
+    finally:
+        if tix_backup:
+            shutil.rmtree(tix_backup, ignore_errors=True)
+
+
+# =============================================================================
 # Iteration commit support
 # =============================================================================
 

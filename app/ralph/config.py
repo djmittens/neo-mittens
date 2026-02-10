@@ -110,6 +110,13 @@ class GlobalConfig:
     # Diff review limits
     diff_max_bytes: int = 200_000  # Max bytes of diff to inject into VERIFY prompt
 
+    # ACP (Agent Client Protocol) mode
+    # Uses a persistent opencode ACP subprocess instead of spawning a new
+    # 'opencode run' per stage. Provides structured tool events, ~300x
+    # faster session creation, and context utilization tracking.
+    # Set to false to fall back to the legacy subprocess-per-stage approach.
+    use_acp: bool = True
+
     # Directories (relative to repo root, or absolute)
     ralph_dir: str = "ralph"
     log_dir: str = "/tmp/ralph-logs"

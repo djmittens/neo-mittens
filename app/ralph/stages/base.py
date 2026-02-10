@@ -72,6 +72,8 @@ class ConstructStateMachine:
         tix: Optional["TixProtocol"] = None,
         loop_detector: Optional["LoopDetector"] = None,
         dedup_fn: Optional[Callable[[], int]] = None,
+        snapshot_fn: Optional[Callable[[], Optional[str]]] = None,
+        revert_fn: Optional[Callable[[Optional[str]], bool]] = None,
     ):
         """Initialize the state machine.
 
@@ -87,6 +89,10 @@ class ConstructStateMachine:
             loop_detector: Optional loop detector
             dedup_fn: Optional callable that deduplicates pending tasks
                 via LLM and returns the number of tasks dropped.
+            snapshot_fn: Callable to snapshot source state before BUILD.
+                Returns a ref string or None if tree is clean.
+            revert_fn: Callable to revert source to a snapshot ref,
+                preserving ``.tix/`` state. Returns True on success.
         """
         self.config = config
         self.metrics = metrics
@@ -98,14 +104,20 @@ class ConstructStateMachine:
         self.tix = tix
         self.loop_detector = loop_detector
         self._dedup_fn = dedup_fn
+        self._snapshot_fn = snapshot_fn
+        self._revert_fn = revert_fn
         self._last_stage_output: str = ""
         self._batch_failure_count: int = 0
         self._ticket_cache: Optional[dict] = None
+        # Snapshot ref captured before BUILD so VERIFY-reject can revert.
+        self._pre_build_snapshot: Optional[str] = None
         # In-memory tracking for retries and kills per task.
         # These are the authoritative source for escalation decisions.
         # Values are also written to ticket_meta for persistence/reporting.
         self._retry_counts: dict[str, int] = {}
         self._kill_counts: dict[str, int] = {}
+        # Rejection history: maps task_id -> list of past rejection reasons.
+        self._rejection_history: dict[str, list[str]] = {}
 
     # =========================================================================
     # Ticket queries (via tix, with per-iteration cache)
@@ -274,6 +286,92 @@ class ConstructStateMachine:
         current = self._retry_counts.get(task_id, 0)
         self._retry_counts[task_id] = current + 1
         return current + 1
+
+    def record_rejection(self, task_id: str, reason: str) -> None:
+        """Record a rejection reason in the history for a task.
+
+        Maintains an ordered list of past rejection reasons so
+        BUILD can see all previous attempts, not just the latest.
+
+        Args:
+            task_id: Task ID.
+            reason: Rejection reason text.
+        """
+        history = self._rejection_history.setdefault(task_id, [])
+        # Cap at 10 entries to avoid unbounded growth.
+        if len(history) >= 10:
+            history.pop(0)
+        history.append(reason)
+
+    def get_rejection_history(self, task_id: str) -> list[str]:
+        """Get the rejection history for a task.
+
+        Args:
+            task_id: Task ID.
+
+        Returns:
+            List of past rejection reason strings (oldest first).
+        """
+        return list(self._rejection_history.get(task_id, []))
+
+    def get_retry_count(self, task_id: str) -> int:
+        """Get the current retry count for a task.
+
+        Args:
+            task_id: Task ID.
+
+        Returns:
+            Number of times this task has been retried.
+        """
+        return self._retry_counts.get(task_id, 0)
+
+    # =========================================================================
+    # Source snapshot / revert
+    # =========================================================================
+
+    def _maybe_revert_on_reject(self) -> None:
+        """Revert source if VERIFY rejected all tasks this cycle.
+
+        Checks whether any tasks were accepted during this BUILD->VERIFY
+        cycle. If none were (all rejected or no done tasks remain), the
+        BUILD's source changes are reverted to the pre-BUILD snapshot.
+        This prevents damage accumulation from bad iterations.
+
+        The ``.tix/`` directory is preserved by the revert function.
+        """
+        if not self._revert_fn or self._pre_build_snapshot is None:
+            return
+
+        # If there are still done tasks, VERIFY hasn't finished yet.
+        if self._has_done_tasks():
+            return
+
+        # If there are no pending tasks either, everything was accepted.
+        if not self._has_pending_tasks() and not self._has_issues():
+            self._pre_build_snapshot = None
+            return
+
+        # There are pending/issues but no done tasks = rejection happened.
+        logger.info("VERIFY rejected — reverting source to pre-BUILD state")
+        if self._revert_fn(self._pre_build_snapshot):
+            print("  Reverted source to pre-BUILD snapshot (tix preserved)")
+        else:
+            logger.warning("Source revert failed — damage may accumulate")
+        self._pre_build_snapshot = None
+
+    def _revert_on_failure(self) -> None:
+        """Revert source after BUILD failure (timeout, context, etc.)."""
+        if not self._revert_fn:
+            return
+        ref = self._pre_build_snapshot
+        self._pre_build_snapshot = None
+        if ref is None:
+            return
+        logger.info("BUILD failed — reverting source to pre-BUILD state")
+        if self._revert_fn(ref):
+            print("  Reverted source to pre-BUILD snapshot (tix preserved)")
+        else:
+            logger.warning("Source revert failed — damage may accumulate")
 
     @staticmethod
     def _token_similarity(a: str, b: str) -> float:
@@ -581,9 +679,14 @@ class ConstructStateMachine:
             self._invalidate_ticket_cache()
 
         if self._has_pending_tasks():
+            # Snapshot source tree so VERIFY-reject can revert cleanly.
+            if self._snapshot_fn:
+                self._pre_build_snapshot = self._snapshot_fn()
+
             result = self._run_stage_with_state(Stage.BUILD, state)
 
             if result.outcome == StageOutcome.FAILURE:
+                self._revert_on_failure()
                 self._handle_task_failure(result)
                 return True, False
 
@@ -645,8 +748,17 @@ class ConstructStateMachine:
         return None
 
     def _finalize_verify_stage(self) -> tuple[bool, bool]:
-        """Route after VERIFY based on what work remains."""
+        """Route after VERIFY based on what work remains.
+
+        If VERIFY rejected tasks (no accepts this cycle), revert
+        source files to the pre-BUILD snapshot to undo damage.
+        """
         state = self.load_state()
+
+        # Revert source on rejection: if no tasks were accepted and
+        # there are pending tasks (i.e. something was rejected back),
+        # the BUILD's source changes are likely broken.
+        self._maybe_revert_on_reject()
 
         if self._has_issues():
             state.transition_to_investigate()
