@@ -81,7 +81,7 @@ from ..stages.base import (
 )
 from ..state import RalphState, load_state, save_state
 from ..commands.init import cmd_init
-from ..utils import Colors
+from ..utils import Colors, PipelineTimer
 
 __all__ = ["cmd_construct"]
 
@@ -525,12 +525,17 @@ def _run_stage(
     start_time: float,
     run_id: str = "",
     acp_client: Optional[AcpClient] = None,
+    timer: Optional[PipelineTimer] = None,
 ) -> StageResult:
     """Run a stage using tix for ticket data and reconcile after."""
+    t = timer
+    t0 = time.time()
     prompt, meta = _build_stage_prompt_tix(
         stage, tix, state, ralph_dir, project_rules, config,
         repo_root=repo_root,
     )
+    if t:
+        t.record("prompt_build", time.time() - t0)
     if not prompt or meta is None:
         return _make_result(
             stage, StageOutcome.SKIP,
@@ -607,7 +612,10 @@ def _run_stage(
     meta["stage_metrics"] = stage_metrics
 
     # Reconcile agent output through tix
+    t0 = time.time()
     reconcile_result = _reconcile_stage(stage, tix, stdout_output, meta)
+    if t:
+        t.record("reconcile", time.time() - t0)
     _last_reconcile_result["result"] = reconcile_result
 
     # Log reconciliation summary
@@ -1081,6 +1089,7 @@ def _create_stage_wrapper(
     run_id: str = "",
     log_dir: Optional[Path] = None,
     acp_client: Optional[AcpClient] = None,
+    timer: Optional[PipelineTimer] = None,
 ) -> Callable:
     """Create a stage wrapper function for the state machine."""
     if tix_instance is None:
@@ -1119,7 +1128,10 @@ def _create_stage_wrapper(
         # Pre-check: auto-accept done tasks whose acceptance criteria pass
         precheck_accepted = 0
         if stage == Stage.VERIFY:
+            t0_pre = time.time()
             accepted = _run_acceptance_precheck(tix_instance, repo_root)
+            if timer:
+                timer.record("precheck", time.time() - t0_pre)
             if accepted > 0:
                 met.tasks_completed += accepted
                 precheck_accepted = accepted
@@ -1146,6 +1158,7 @@ def _create_stage_wrapper(
             True, tix_instance, iter_start,
             run_id=run_id,
             acp_client=acp_client,
+            timer=timer,
         )
 
         iter_duration = time.time() - iter_start
@@ -1165,7 +1178,10 @@ def _create_stage_wrapper(
         # Post-BUILD: try auto-accepting the task immediately
         post_accepted = 0
         if stage == Stage.BUILD and result.outcome == StageOutcome.SUCCESS:
+            t0_post = time.time()
             post_accepted = _run_acceptance_precheck(tix_instance, repo_root)
+            if timer:
+                timer.record("precheck", time.time() - t0_post)
             if post_accepted > 0:
                 met.tasks_completed += post_accepted
                 precheck_accepted += post_accepted
@@ -1567,6 +1583,28 @@ def _write_run_record(
         pass  # Don't crash on ledger write failure
 
 
+def _timed_snapshot(
+    repo_root: Path, timer: Optional[PipelineTimer],
+) -> Optional[str]:
+    """Snapshot source with timing instrumentation."""
+    t0 = time.time()
+    result = snapshot_source(cwd=repo_root)
+    if timer:
+        timer.record("git_snapshot", time.time() - t0)
+    return result
+
+
+def _timed_revert(
+    ref: Optional[str], repo_root: Path, timer: Optional[PipelineTimer],
+) -> bool:
+    """Revert source with timing instrumentation."""
+    t0 = time.time()
+    result = revert_source(ref, cwd=repo_root)
+    if timer:
+        timer.record("git_revert", time.time() - t0)
+    return result
+
+
 def _get_spec_from_args(args: argparse.Namespace) -> Optional[str]:
     """Extract spec from args if present."""
     return args.spec if hasattr(args, "spec") else None
@@ -1686,10 +1724,16 @@ def cmd_construct(
                   f"to subprocess: {exc}{Colors.NC}")
             acp_client = None
 
+    # Pipeline timer: tracks overhead between GPU inference bursts
+    pipeline_timer = PipelineTimer()
+    if acp_client is not None:
+        acp_client.timer = pipeline_timer
+
     # Create state machine
     stage_wrapper = _create_stage_wrapper(
         repo_root, ralph_dir, project_rules, tix_instance,
         run_id=run_id, log_dir=log_dir, acp_client=acp_client,
+        timer=pipeline_timer,
     )
 
     # LLM dedup callback: called after INVESTIGATE to remove duplicate tasks.
@@ -1734,8 +1778,8 @@ def cmd_construct(
         tix=tix_instance,
         loop_detector=loop_detector,
         dedup_fn=_dedup_callback,
-        snapshot_fn=lambda: snapshot_source(cwd=repo_root),
-        revert_fn=lambda ref: revert_source(ref, cwd=repo_root),
+        snapshot_fn=lambda: _timed_snapshot(repo_root, pipeline_timer),
+        revert_fn=lambda ref: _timed_revert(ref, repo_root, pipeline_timer),
     )
 
     # Run construct loop
@@ -1787,7 +1831,9 @@ def cmd_construct(
             
             # Sync with remote before each iteration
             plan_file = tix_instance.plan_file()
+            t0_sync = time.time()
             sync_result = sync_with_remote(branch, plan_file, cwd)
+            pipeline_timer.record("git_sync", time.time() - t0_sync)
             if sync_result == "conflict":
                 print(f"{Colors.RED}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━{Colors.NC}")
                 print(f"{Colors.RED}GIT CONFLICT DETECTED{Colors.NC}")
@@ -1840,14 +1886,22 @@ def cmd_construct(
             commit_info = stage_wrapper.get_commit_info()  # type: ignore[attr-defined]
             commit_info.iteration = iteration
             commit_info.spec = load_state(repo_root).spec or ""
+            t0_commit = time.time()
             if commit_iteration(commit_info, cwd):
                 metrics.commits_made += 1
+            pipeline_timer.record("git_commit", time.time() - t0_commit)
             commit_info.reset(iteration)
             
             # Push changes with retry
             plan_file = tix_instance.plan_file()
+            t0_push = time.time()
             if not push_with_retry(branch, retries=2, plan_file=plan_file, cwd=cwd):
                 print(f"{Colors.YELLOW}Push failed - continuing without push{Colors.NC}")
+            pipeline_timer.record("git_push", time.time() - t0_push)
+
+            # Print iteration timing breakdown and reset for next iteration
+            pipeline_timer.print_summary()
+            pipeline_timer.reset()
 
     except KeyboardInterrupt:
         print(f"\n{Colors.YELLOW}Interrupted by user{Colors.NC}")

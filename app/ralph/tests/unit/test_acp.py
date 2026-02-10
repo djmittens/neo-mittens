@@ -567,6 +567,7 @@ class TestAcpClientPrompt:
         client._proc = MagicMock()
         client._proc.poll.return_value = None
         client._proc.stdin = MagicMock()
+        client.timer = None
         return client
 
     def test_prompt_calls_set_model(self):

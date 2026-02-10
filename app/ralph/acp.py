@@ -25,6 +25,7 @@ from pathlib import Path
 from typing import Callable, Optional
 
 from ralph.context import Metrics
+from ralph.utils import PipelineTimer
 
 logger = logging.getLogger(__name__)
 
@@ -172,6 +173,7 @@ class AcpClient:
         self._initialized = False
         self._modes: list[str] = []
         self._models: list[dict] = []
+        self.timer: Optional[PipelineTimer] = None
 
     @property
     def is_alive(self) -> bool:
@@ -318,12 +320,16 @@ class AcpClient:
             AcpError: On protocol or process errors.
         """
         self._ensure_alive()
+        t = self.timer
 
         # Create fresh session
+        t0 = time.monotonic()
         session_resp = self._request("session/new", {
             "cwd": self._cwd,
             "mcpServers": [],
         }, timeout=SESSION_TIMEOUT_S)
+        if t:
+            t.record("acp_session_new", time.monotonic() - t0)
 
         if "error" in session_resp:
             raise AcpError(
@@ -337,10 +343,13 @@ class AcpClient:
 
         # Set mode if requested
         if mode:
+            t0 = time.monotonic()
             mode_resp = self._request("session/set_mode", {
                 "sessionId": session_id,
                 "modeId": mode,
             }, timeout=SESSION_TIMEOUT_S)
+            if t:
+                t.record("acp_set_mode", time.monotonic() - t0)
 
             if "error" in mode_resp:
                 logger.warning(
@@ -351,10 +360,13 @@ class AcpClient:
         # Set model if requested (ACP uses session/set_model, not
         # a modelId field in the prompt request)
         if model:
+            t0 = time.monotonic()
             model_resp = self._request("session/set_model", {
                 "sessionId": session_id,
                 "modelId": model,
             }, timeout=SESSION_TIMEOUT_S)
+            if t:
+                t.record("acp_set_model", time.monotonic() - t0)
 
             if "error" in model_resp:
                 logger.warning(
@@ -369,9 +381,13 @@ class AcpClient:
         }
 
         # Send prompt and collect streaming response
-        return self._stream_prompt(
+        t0 = time.monotonic()
+        result = self._stream_prompt(
             session_id, prompt_params, timeout_s, print_output,
         )
+        if t:
+            t.record("acp_inference", time.monotonic() - t0)
+        return result
 
     def _stream_prompt(
         self,
