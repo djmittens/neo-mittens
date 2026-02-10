@@ -288,8 +288,9 @@ class AcpClient:
         """Send a prompt and collect the full response.
 
         Creates a fresh session for context isolation, optionally sets
-        agent mode, then sends the prompt and streams all notifications
-        until the response completes.
+        agent mode and model via session/set_mode and session/set_model,
+        then sends the prompt and streams all notifications until the
+        response completes.
 
         Args:
             text: Prompt text to send.
@@ -334,13 +335,25 @@ class AcpClient:
                     mode, mode_resp["error"],
                 )
 
+        # Set model if requested (ACP uses session/set_model, not
+        # a modelId field in the prompt request)
+        if model:
+            model_resp = self._request("session/set_model", {
+                "sessionId": session_id,
+                "modelId": model,
+            }, timeout=SESSION_TIMEOUT_S)
+
+            if "error" in model_resp:
+                logger.warning(
+                    "session/set_model failed for %s: %s",
+                    model, model_resp["error"],
+                )
+
         # Build prompt params
         prompt_params: dict = {
             "sessionId": session_id,
             "prompt": [{"type": "text", "text": text}],
         }
-        if model:
-            prompt_params["modelId"] = model
 
         # Send prompt and collect streaming response
         return self._stream_prompt(

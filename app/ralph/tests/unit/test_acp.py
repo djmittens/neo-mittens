@@ -530,6 +530,145 @@ class TestAcpClientRequest:
         assert "died" in result["error"]["message"]
 
 
+# ─── AcpClient.prompt model/mode tests ───
+
+
+class TestAcpClientPrompt:
+    """Tests for session/set_mode and session/set_model in prompt()."""
+
+    def _make_started_client(self):
+        """Create a client with mocked process ready for prompt()."""
+        client = AcpClient.__new__(AcpClient)
+        client._cwd = "/tmp"
+        client._msg_id = 0
+        client._lock = __import__("threading").Lock()
+        client._initialized = True
+        client._modes = []
+        client._models = []
+        client._proc = MagicMock()
+        client._proc.poll.return_value = None
+        client._proc.stdin = MagicMock()
+        return client
+
+    def test_prompt_calls_set_model(self):
+        """prompt() calls session/set_model when model is provided."""
+        client = self._make_started_client()
+
+        # Track all requests sent
+        sent_messages = []
+
+        def capture_write(line):
+            try:
+                sent_messages.append(json.loads(line.strip()))
+            except (json.JSONDecodeError, TypeError):
+                pass
+
+        client._proc.stdin.write.side_effect = capture_write
+
+        # Responses: session/new, set_mode, set_model, then prompt
+        responses = [
+            json.dumps({"jsonrpc": "2.0", "id": i + 1, "result": r})
+            for i, r in enumerate([
+                {"sessionId": "s1"},                    # session/new
+                {},                                      # set_mode
+                {},                                      # set_model
+                {"stopReason": "end_turn"},              # session/prompt
+            ])
+        ]
+        client._proc.stdout.readline.side_effect = responses
+
+        result = client.prompt(
+            text="test", mode="ralph-build",
+            model="llamacpp/devstral", timeout_s=5,
+            print_output=False,
+        )
+
+        # Verify session/set_model was called
+        methods = [m.get("method") for m in sent_messages]
+        assert "session/set_model" in methods, (
+            f"session/set_model not called, sent: {methods}"
+        )
+
+        # Find the set_model message and verify params
+        set_model_msg = next(
+            m for m in sent_messages
+            if m.get("method") == "session/set_model"
+        )
+        assert set_model_msg["params"]["sessionId"] == "s1"
+        assert set_model_msg["params"]["modelId"] == "llamacpp/devstral"
+
+    def test_prompt_skips_set_model_when_empty(self):
+        """prompt() does not call session/set_model when model is empty."""
+        client = self._make_started_client()
+
+        sent_messages = []
+
+        def capture_write(line):
+            try:
+                sent_messages.append(json.loads(line.strip()))
+            except (json.JSONDecodeError, TypeError):
+                pass
+
+        client._proc.stdin.write.side_effect = capture_write
+
+        # Responses: session/new, then prompt (no set_mode/set_model)
+        responses = [
+            json.dumps({"jsonrpc": "2.0", "id": i + 1, "result": r})
+            for i, r in enumerate([
+                {"sessionId": "s1"},                    # session/new
+                {"stopReason": "end_turn"},              # session/prompt
+            ])
+        ]
+        client._proc.stdout.readline.side_effect = responses
+
+        result = client.prompt(
+            text="test", mode="", model="",
+            timeout_s=5, print_output=False,
+        )
+
+        methods = [m.get("method") for m in sent_messages]
+        assert "session/set_model" not in methods
+        assert "session/set_mode" not in methods
+
+    def test_prompt_no_model_id_in_prompt_params(self):
+        """prompt() does not pass modelId in session/prompt params."""
+        client = self._make_started_client()
+
+        sent_messages = []
+
+        def capture_write(line):
+            try:
+                sent_messages.append(json.loads(line.strip()))
+            except (json.JSONDecodeError, TypeError):
+                pass
+
+        client._proc.stdin.write.side_effect = capture_write
+
+        responses = [
+            json.dumps({"jsonrpc": "2.0", "id": i + 1, "result": r})
+            for i, r in enumerate([
+                {"sessionId": "s1"},                    # session/new
+                {},                                      # set_model
+                {"stopReason": "end_turn"},              # session/prompt
+            ])
+        ]
+        client._proc.stdout.readline.side_effect = responses
+
+        result = client.prompt(
+            text="test", model="llamacpp/devstral",
+            timeout_s=5, print_output=False,
+        )
+
+        # Find the session/prompt message
+        prompt_msg = next(
+            m for m in sent_messages
+            if m.get("method") == "session/prompt"
+        )
+        assert "modelId" not in prompt_msg.get("params", {}), (
+            "modelId should not be in session/prompt params"
+        )
+
+
 # ─── Environment setup tests ───
 
 
