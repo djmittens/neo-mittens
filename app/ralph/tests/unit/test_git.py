@@ -724,28 +724,25 @@ class TestRevertSource:
     """Tests for revert_source function."""
 
     @patch("ralph.git.subprocess.run")
-    def test_reverts_to_snapshot_ref(self, mock_run, tmp_path):
-        """Reverts files to snapshot ref, preserving .tix/."""
-        # Create .tix/ with plan data
-        tix_dir = tmp_path / ".tix"
-        tix_dir.mkdir()
-        (tix_dir / "plan.jsonl").write_text('{"t":"task"}\n')
-
+    def test_restores_to_snapshot_ref(self, mock_run, tmp_path):
+        """Restores files to snapshot ref, excluding .tix/."""
         mock_run.return_value = MagicMock(returncode=0, stdout="")
         ok = revert_source("abc123", cwd=tmp_path)
         assert ok is True
-        # .tix/ should survive
-        assert (tix_dir / "plan.jsonl").read_text() == '{"t":"task"}\n'
+        # Should pass ':!.tix' pathspec to exclude tix dir
+        checkout_call = mock_run.call_args_list[0]
+        assert ":!.tix" in checkout_call.args[0]
+        assert "abc123" in checkout_call.args[0]
 
     @patch("ralph.git.subprocess.run")
-    def test_reverts_to_head_when_no_ref(self, mock_run, tmp_path):
+    def test_restores_to_head_when_no_ref(self, mock_run, tmp_path):
         """Uses HEAD when snapshot_ref is None."""
         mock_run.return_value = MagicMock(returncode=0, stdout="")
         ok = revert_source(None, cwd=tmp_path)
         assert ok is True
-        # Should use HEAD
         checkout_call = mock_run.call_args_list[0]
         assert "HEAD" in checkout_call.args[0]
+        assert ":!.tix" in checkout_call.args[0]
 
     @patch("ralph.git.subprocess.run")
     def test_returns_false_on_checkout_failure(self, mock_run, tmp_path):
@@ -757,25 +754,10 @@ class TestRevertSource:
         assert ok is False
 
     @patch("ralph.git.subprocess.run")
-    def test_preserves_tix_after_revert(self, mock_run, tmp_path):
-        """Tix plan survives even if git checkout overwrites it."""
-        tix_dir = tmp_path / ".tix"
-        tix_dir.mkdir()
-        plan = tix_dir / "plan.jsonl"
-        plan.write_text('{"t":"task","id":"t-1"}\n')
-        (tix_dir / "cache.db").write_bytes(b"sqlite")
-
-        def side_effect(cmd, **kw):
-            # Simulate git checkout wiping .tix/
-            if "checkout" in cmd:
-                if tix_dir.exists():
-                    import shutil
-                    shutil.rmtree(tix_dir)
-            return MagicMock(returncode=0)
-
-        mock_run.side_effect = side_effect
-        ok = revert_source("ref123", cwd=tmp_path)
-        assert ok is True
-        assert plan.exists()
-        assert plan.read_text() == '{"t":"task","id":"t-1"}\n'
-        assert (tix_dir / "cache.db").read_bytes() == b"sqlite"
+    def test_cleans_untracked_excluding_tix(self, mock_run, tmp_path):
+        """Runs git clean with --exclude=.tix after checkout."""
+        mock_run.return_value = MagicMock(returncode=0, stdout="")
+        revert_source("abc123", cwd=tmp_path)
+        clean_call = mock_run.call_args_list[1]
+        assert "clean" in clean_call.args[0]
+        assert "--exclude=.tix" in clean_call.args[0]

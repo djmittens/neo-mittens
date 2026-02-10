@@ -334,69 +334,41 @@ def revert_source(
     snapshot_ref: Optional[str],
     cwd: Optional[Path] = None,
 ) -> bool:
-    """Revert source files to *snapshot_ref* while preserving ``.tix/``.
+    """Restore source files to *snapshot_ref* while preserving ``.tix/``.
 
-    Strategy:
-      1. Save ``.tix/`` contents to a temp location.
-      2. ``git checkout <ref> -- .`` to restore the whole tree.
-      3. If *snapshot_ref* is None (tree was clean when snapshotted),
-         use ``git checkout HEAD -- .`` instead.
-      4. Copy ``.tix/`` back from the temp location.
-
-    This guarantees that all tix mutations (task_done, task_reject,
-    issue_add, etc.) survive the revert even though ``git checkout``
-    would overwrite them.
+    Uses ``git checkout <ref> -- . ':!.tix'`` to restore all tracked
+    files except ``.tix/``, which contains append-only ticket state
+    that must survive the restore.  Also cleans untracked files the
+    agent may have created, again excluding ``.tix/``.
 
     Args:
         snapshot_ref: Ref from :func:`snapshot_source`, or ``None``
-            to revert to the last committed state.
+            to restore to the last committed state.
         cwd: Working directory for git commands.
 
     Returns:
-        True if the revert succeeded, False on any error.
+        True if the restore succeeded, False on any error.
     """
-    import shutil
-    import tempfile
-
-    work = Path(cwd) if cwd else Path.cwd()
-    tix_dir = work / ".tix"
-
-    # 1. Preserve .tix/ state
-    tix_backup = None
-    if tix_dir.is_dir():
-        tix_backup = Path(tempfile.mkdtemp(prefix="ralph-tix-"))
-        shutil.copytree(tix_dir, tix_backup / ".tix", dirs_exist_ok=True)
-
     try:
-        # 2. Restore working tree from snapshot
         ref = snapshot_ref or "HEAD"
         result = subprocess.run(
-            ["git", "checkout", ref, "--", "."],
+            ["git", "checkout", ref, "--", ".", ":!.tix"],
             capture_output=True, text=True, cwd=cwd,
             timeout=_GIT_LOCAL_TIMEOUT,
         )
         if result.returncode != 0:
             return False
 
-        # 3. Clean untracked files left behind (agent may have created new files)
+        # Clean untracked files left behind (agent may have created new files)
         subprocess.run(
             ["git", "clean", "-fd", "--exclude=.tix"],
             capture_output=True, cwd=cwd,
             timeout=_GIT_LOCAL_TIMEOUT,
         )
 
-        # 4. Restore .tix/ from backup
-        if tix_backup and (tix_backup / ".tix").is_dir():
-            if tix_dir.exists():
-                shutil.rmtree(tix_dir)
-            shutil.copytree(tix_backup / ".tix", tix_dir)
-
         return True
     except (subprocess.TimeoutExpired, OSError):
         return False
-    finally:
-        if tix_backup:
-            shutil.rmtree(tix_backup, ignore_errors=True)
 
 
 # =============================================================================
