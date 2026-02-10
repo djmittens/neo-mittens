@@ -75,6 +75,10 @@ def _assemble_text_content(agent_output: str) -> str:
     carry already-decoded strings (no JSON escaping), so searching this
     concatenated text for ``[RALPH_OUTPUT]`` markers works even when the
     model wraps them in markdown fences.
+
+    When the output is plain text (ACP mode), no JSON events are found
+    and the function returns empty — callers fall through to raw text
+    search.
     """
     parts: list[str] = []
     for line in agent_output.splitlines():
@@ -84,6 +88,8 @@ def _assemble_text_content(agent_output: str) -> str:
         try:
             event = json.loads(line)
         except json.JSONDecodeError:
+            continue
+        if not isinstance(event, dict):
             continue
         if event.get("type") == "text":
             text = event.get("part", {}).get("text", "")
@@ -242,6 +248,8 @@ def _extract_from_tool_events(agent_output: str) -> Optional[dict]:
         try:
             event = json.loads(line)
         except json.JSONDecodeError:
+            continue
+        if not isinstance(event, dict):
             continue
 
         if event.get("type") != "tool_use":
