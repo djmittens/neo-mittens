@@ -238,17 +238,29 @@ class AcpClient:
 
         result = resp.get("result", {})
         caps = result.get("agentCapabilities", {})
-        self._modes = [
-            m.get("id", "") for m in result.get("modes", [])
-        ]
         self._initialized = True
 
         logger.info(
-            "ACP initialized: server=%s modes=%s loadSession=%s",
+            "ACP initialized: server=%s loadSession=%s",
             result.get("agentInfo", {}).get("name"),
-            self._modes,
             caps.get("loadSession"),
         )
+
+        # Modes and models are returned by session/new, not initialize.
+        # Create a throwaway session to discover them, then close it.
+        probe = self._request("session/new", {
+            "cwd": self._cwd,
+            "mcpServers": [],
+        }, timeout=SESSION_TIMEOUT_S)
+        probe_result = probe.get("result", {})
+        modes_state = probe_result.get("modes", {})
+        self._modes = [
+            m.get("id", "") for m in
+            modes_state.get("availableModes", [])
+        ]
+        models_state = probe_result.get("models", {})
+        self._models = models_state.get("availableModels", [])
+        logger.info("ACP modes=%s models=%d", self._modes, len(self._models))
 
     def stop(self) -> None:
         """Stop the ACP subprocess gracefully."""
@@ -318,7 +330,8 @@ class AcpClient:
                 f"session/new failed: {session_resp['error']}"
             )
 
-        session_id = session_resp["result"].get("sessionId", "")
+        new_result = session_resp.get("result", {})
+        session_id = new_result.get("sessionId", "")
         if not session_id:
             raise AcpError("session/new returned no sessionId")
 

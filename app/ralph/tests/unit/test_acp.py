@@ -363,7 +363,7 @@ class TestAcpClientLifecycle:
         mock_proc.poll.return_value = None  # Process alive
         mock_proc.stdin = MagicMock()
 
-        # Initialize response
+        # start() sends initialize (id=1) then probes session/new (id=2)
         init_response = json.dumps({
             "jsonrpc": "2.0",
             "id": 1,
@@ -373,7 +373,20 @@ class TestAcpClientLifecycle:
                 "agentInfo": {"name": "OpenCode", "version": "1.1.53"},
             },
         })
-        mock_proc.stdout.readline.return_value = init_response
+        probe_response = json.dumps({
+            "jsonrpc": "2.0",
+            "id": 2,
+            "result": {
+                "sessionId": "probe",
+                "modes": {"availableModes": [
+                    {"id": "build", "name": "build"},
+                    {"id": "ralph-build", "name": "ralph-build"},
+                ]},
+            },
+        })
+        mock_proc.stdout.readline.side_effect = [
+            init_response, probe_response,
+        ]
 
         mock_popen.return_value = mock_proc
 
@@ -391,6 +404,10 @@ class TestAcpClientLifecycle:
         sent = json.loads(write_calls[0][0][0].strip())
         assert sent["method"] == "initialize"
         assert sent["params"]["protocolVersion"] == ACP_PROTOCOL_VERSION
+
+        # Verify modes were discovered from session/new probe
+        assert "build" in client.available_modes
+        assert "ralph-build" in client.available_modes
 
         client.stop()
 
@@ -433,14 +450,16 @@ class TestAcpClientLifecycle:
             None,  # After kill
         ]
 
-        init_response = json.dumps({
-            "jsonrpc": "2.0", "id": 1,
-            "result": {
-                "protocolVersion": 1,
-                "agentCapabilities": {},
-            },
-        })
-        mock_proc.stdout.readline.return_value = init_response
+        mock_proc.stdout.readline.side_effect = [
+            json.dumps({
+                "jsonrpc": "2.0", "id": 1,
+                "result": {"protocolVersion": 1, "agentCapabilities": {}},
+            }),
+            json.dumps({
+                "jsonrpc": "2.0", "id": 2,
+                "result": {"sessionId": "probe", "modes": {}},
+            }),
+        ]
         mock_popen.return_value = mock_proc
 
         client = AcpClient("/tmp")
@@ -675,6 +694,19 @@ class TestAcpClientPrompt:
 class TestAcpEnvironment:
     """Tests for ACP subprocess environment configuration."""
 
+    def _make_start_responses(self):
+        """Responses for start(): initialize + session/new probe."""
+        return [
+            json.dumps({
+                "jsonrpc": "2.0", "id": 1,
+                "result": {"protocolVersion": 1, "agentCapabilities": {}},
+            }),
+            json.dumps({
+                "jsonrpc": "2.0", "id": 2,
+                "result": {"sessionId": "probe", "modes": {}},
+            }),
+        ]
+
     @patch("ralph.acp.subprocess.Popen")
     @patch("ralph.acp.time.sleep")
     def test_xdg_state_home_set(self, mock_sleep, mock_popen):
@@ -682,10 +714,7 @@ class TestAcpEnvironment:
         mock_proc = MagicMock()
         mock_proc.poll.return_value = None
         mock_proc.stdin = MagicMock()
-        mock_proc.stdout.readline.return_value = json.dumps({
-            "jsonrpc": "2.0", "id": 1,
-            "result": {"protocolVersion": 1, "agentCapabilities": {}},
-        })
+        mock_proc.stdout.readline.side_effect = self._make_start_responses()
         mock_popen.return_value = mock_proc
 
         client = AcpClient("/tmp")
@@ -703,10 +732,7 @@ class TestAcpEnvironment:
         mock_proc = MagicMock()
         mock_proc.poll.return_value = None
         mock_proc.stdin = MagicMock()
-        mock_proc.stdout.readline.return_value = json.dumps({
-            "jsonrpc": "2.0", "id": 1,
-            "result": {"protocolVersion": 1, "agentCapabilities": {}},
-        })
+        mock_proc.stdout.readline.side_effect = self._make_start_responses()
         mock_popen.return_value = mock_proc
 
         client = AcpClient("/tmp")
