@@ -38,13 +38,31 @@ function M.mason_setup()
   for _, server in ipairs(mason_lspconfig.get_installed_servers()) do
     if server == 'clangd' then
       vim.lsp.config('clangd', {
-        cmd = { 'clangd', '--clang-tidy', '--fallback-style=Google', '--background-index', '--completion-style=detailed', '--header-insertion=iwyu' },
+        cmd = { 'clangd', '--clang-tidy', '--fallback-style=Google', '--background-index', '--completion-style=bundled', '--header-insertion=iwyu' },
         init_options = { clangdFileStatus = true },
       })
     end
     vim.lsp.enable(server)
   end
 end
+
+-- Valkyria LSP (Valk script)
+vim.lsp.config('valk', {
+  cmd = { vim.fn.expand('~/src/valkyria/build/valk'), vim.fn.expand('~/src/valkyria/src/lsp.valk') },
+  filetypes = { 'valk' },
+  root_markers = { '.git', 'CMakeLists.txt' },
+})
+vim.lsp.enable('valk')
+
+-- Enable inlay hints for valk files
+vim.api.nvim_create_autocmd('LspAttach', {
+  callback = function(args)
+    local client = vim.lsp.get_client_by_id(args.data.client_id)
+    if client and client.name == 'valk' then
+      vim.lsp.inlay_hint.enable(true, { bufnr = args.buf })
+    end
+  end,
+})
 
 -- Vulkan documentation helper
 -- Opens official Vulkan docs for function under cursor with gK
