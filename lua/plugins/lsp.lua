@@ -48,7 +48,7 @@ end
 
 -- Valkyria LSP (Valk script)
 vim.lsp.config('valk', {
-  cmd = { vim.fn.expand('~/src/valkyria/build/valk'), vim.fn.expand('~/src/valkyria/src/lsp.valk') },
+  cmd = { vim.fn.expand('~/src/valkyria/build/valk'), vim.fn.expand('~/src/valkyria/src/lsp-main.valk') },
   filetypes = { 'valk' },
   root_markers = { '.git', 'CMakeLists.txt' },
 })
