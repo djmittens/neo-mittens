@@ -47,7 +47,7 @@ vim.api.nvim_create_autocmd("FileType", {
 
 vim.filetype.add({
   extension = {
-    valk = "clojure"
+    valk = "valk"
   }
 })
 
@@ -154,6 +154,17 @@ vim.o.splitright = true
 vim.o.ignorecase = true
 vim.o.smartcase = true
 vim.o.signcolumn = 'yes'  -- Single sign column normally, debug.lua sets yes:2 when debugging
+
+vim.diagnostic.config({
+  signs = {
+    text = {
+      [vim.diagnostic.severity.ERROR] = 'E',
+      [vim.diagnostic.severity.WARN]  = 'W',
+      [vim.diagnostic.severity.INFO]  = 'I',
+      [vim.diagnostic.severity.HINT]  = 'H',
+    },
+  },
+})
 
 vim.o.wrap = false
 vim.o.modeline = true
@@ -459,3 +470,21 @@ else
   vim.keymap.set({ 'i', 'n' }, '<M-k>', function() nvim_nav('k') end, { noremap = true, silent = true, desc = "Navigate up" })
   vim.keymap.set({ 'i', 'n' }, '<M-l>', function() nvim_nav('l') end, { noremap = true, silent = true, desc = "Navigate right" })
 end
+
+-- Focus follows mouse - consistent with Hyprland (follow_mouse=1) and tmux (focus-follows-mouse)
+vim.o.mousemoveevent = true
+
+vim.keymap.set('n', '<MouseMove>', function()
+  local pos = vim.fn.getmousepos()
+  local current_win = vim.api.nvim_get_current_win()
+
+  if pos.winid > 0 and pos.winid ~= current_win then
+    -- Skip floating windows (telescope, hover popups, completion, etc.)
+    local target_config = vim.api.nvim_win_get_config(pos.winid)
+    local current_config = vim.api.nvim_win_get_config(current_win)
+
+    if target_config.relative == '' and current_config.relative == '' then
+      vim.api.nvim_set_current_win(pos.winid)
+    end
+  end
+end, { silent = true, desc = "Focus follows mouse (match tmux/hyprland)" })

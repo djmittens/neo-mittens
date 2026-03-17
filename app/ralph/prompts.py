@@ -96,7 +96,11 @@ def build_plan_context(
 
 
 def build_build_context(
-    task: dict, spec_name: str = "", spec_content: str = ""
+    task: dict,
+    spec_name: str = "",
+    spec_content: str = "",
+    retry_count: int = 0,
+    rejection_history: Optional[list[str]] = None,
 ) -> dict[str, Any]:
     """Build context dict for BUILD stage prompt.
 
@@ -104,10 +108,21 @@ def build_build_context(
         task: Task dict from tix query output.
         spec_name: Spec file name.
         spec_content: Content of the spec file.
+        retry_count: How many times this task has been attempted.
+        rejection_history: Ordered list of past rejection reasons.
 
     Returns:
         Context dict for prompt injection.
     """
+    history = rejection_history or []
+    if history:
+        history_text = "\n".join(
+            f"  Attempt {i + 1}: {reason}"
+            for i, reason in enumerate(history)
+        )
+    else:
+        history_text = ""
+
     return {
         "task_json": json.dumps(task, indent=2),
         "task_name": task.get("name", ""),
@@ -118,6 +133,8 @@ def build_build_context(
         "spec_file": spec_name or task.get("spec", ""),
         "spec_content": spec_content,
         "is_retry": "true" if task.get("reject") else "false",
+        "retry_count": str(retry_count),
+        "rejection_history": history_text,
     }
 
 
@@ -164,10 +181,17 @@ def build_investigate_context(
     Returns:
         Context dict for prompt injection.
     """
-    # Compact task summary: just id + name to keep token count low.
+    # Include id, name, notes, and accept criteria so INVESTIGATE can
+    # properly assess whether an existing task already covers a new issue.
+    # Notes contain file paths and approach details that are critical for
+    # dedup decisions — name-only matching misses too many duplicates.
     if pending_tasks:
         compact = [
-            {"id": t.get("id", ""), "name": t.get("name", "")}
+            {
+                k: t[k]
+                for k in ("id", "name", "notes", "accept")
+                if k in t and t[k]
+            }
             for t in pending_tasks
         ]
         pending_json = json.dumps(compact, indent=2)

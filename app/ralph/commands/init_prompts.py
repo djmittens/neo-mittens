@@ -78,6 +78,9 @@ Implement the assigned task.
 - **Notes**: {{TASK_NOTES}}
 - **Acceptance criteria**: {{TASK_ACCEPT}}
 - **Rejected reason** (if retry): {{TASK_REJECT}}
+- **Attempt**: {{RETRY_COUNT}} (0 = first attempt)
+
+{{REJECTION_HISTORY}}
 
 ## Spec Content
 
@@ -85,7 +88,7 @@ Implement the assigned task.
 
 ## Instructions
 
-1. If this is a **retry** (reject field is set): the code is already there. Read the rejection reason, fix the specific gap. Do NOT re-explore the whole codebase.
+1. If this is a **retry** (reject field is set): the codebase has been **reverted** to its pre-attempt state. Your previous changes were rolled back. Read the rejection reason and the rejection history carefully — avoid repeating the same mistakes. Make **only mechanical, minimal changes** to fix the specific gap.
 
 2. **Use subagents for research** (Task tool). Your context window is limited. Never read more than 2-3 files yourself. Spawn subagents for any exploration.
 

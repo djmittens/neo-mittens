@@ -72,6 +72,8 @@ class ConstructStateMachine:
         tix: Optional["TixProtocol"] = None,
         loop_detector: Optional["LoopDetector"] = None,
         dedup_fn: Optional[Callable[[], int]] = None,
+        snapshot_fn: Optional[Callable[[], Optional[str]]] = None,
+        revert_fn: Optional[Callable[[Optional[str]], bool]] = None,
     ):
         """Initialize the state machine.
 
@@ -87,6 +89,10 @@ class ConstructStateMachine:
             loop_detector: Optional loop detector
             dedup_fn: Optional callable that deduplicates pending tasks
                 via LLM and returns the number of tasks dropped.
+            snapshot_fn: Callable to snapshot source state before BUILD.
+                Returns a ref string or None if tree is clean.
+            revert_fn: Callable to revert source to a snapshot ref,
+                preserving ``.tix/`` state. Returns True on success.
         """
         self.config = config
         self.metrics = metrics
@@ -98,119 +104,94 @@ class ConstructStateMachine:
         self.tix = tix
         self.loop_detector = loop_detector
         self._dedup_fn = dedup_fn
+        self._snapshot_fn = snapshot_fn
+        self._revert_fn = revert_fn
         self._last_stage_output: str = ""
         self._batch_failure_count: int = 0
-        self._ticket_cache: Optional[dict] = None
+        # Active spec name, set at the start of each iteration for
+        # scoping tix queries.  Avoids threading state through every
+        # helper.
+        self._active_spec: str = ""
+        # Snapshot ref captured before BUILD so VERIFY-reject can revert.
+        self._pre_build_snapshot: Optional[str] = None
         # In-memory tracking for retries and kills per task.
         # These are the authoritative source for escalation decisions.
         # Values are also written to ticket_meta for persistence/reporting.
         self._retry_counts: dict[str, int] = {}
         self._kill_counts: dict[str, int] = {}
+        # Rejection history: maps task_id -> list of past rejection reasons.
+        self._rejection_history: dict[str, list[str]] = {}
 
     # =========================================================================
-    # Ticket queries (via tix, with per-iteration cache)
+    # Ticket queries (via tix — direct, no cache)
     # =========================================================================
 
-    def _refresh_ticket_cache(self) -> None:
-        """Refresh the cached ticket state from tix.
+    def _query_full(self) -> dict:
+        """Query full ticket state from tix, scoped to active spec.
 
-        Call once at the start of each iteration (or after mutations)
-        to avoid redundant subprocess calls. All _has_* and _get_*
-        methods read from this cache.
+        Every call hits the tix binary which reads the current
+        ``plan.jsonl`` on disk.  This avoids stale-cache bugs — tix
+        already maintains its own SQLite cache with mtime-based
+        invalidation, so a second Python-layer cache is unnecessary.
 
-        On transient failure, retries once. If both attempts fail,
-        keeps the previous cache (stale data is safer than empty data
-        which could trigger premature COMPLETE).
-        """
-        if not self.tix:
-            self._ticket_cache = {}
-            return
-        for attempt in range(2):
-            try:
-                self._ticket_cache = self.tix.query_full()
-                return
-            except Exception as exc:
-                if attempt == 0:
-                    logger.warning(
-                        "tix query_full failed (attempt 1/2): %s", exc
-                    )
-                else:
-                    logger.error(
-                        "tix query_full failed (attempt 2/2): %s — "
-                        "keeping previous cache",
-                        exc,
-                    )
-                    # Keep self._ticket_cache as-is (may be None or stale).
-                    # _get_cached_full() handles None by retrying, and
-                    # stale data is safer than empty data.
-
-    def _scope_cache_to_spec(self, spec_name: str) -> None:
-        """Filter the ticket cache to only items belonging to *spec_name*.
-
-        Called after loading state so all ``_has_*`` / ``_get_*`` helpers
-        only see work scoped to the active spec.  Items without a ``spec``
-        field are excluded.
-
-        NOTE: issues created via ``tix issue add`` during BUILD/VERIFY
-        stages may lack a ``spec`` field if the caller omitted it.
-        These are kept to avoid silently dropping in-flight issues.
-        """
-        if not spec_name or not self._ticket_cache:
-            return
-
-        def _belongs(item: dict) -> bool:
-            s = item.get("spec", "")
-            return s == spec_name or s == ""
-
-        tasks = self._ticket_cache.get("tasks", {})
-        self._ticket_cache["tasks"] = {
-            status: [t for t in task_list if _belongs(t)]
-            for status, task_list in tasks.items()
-        }
-        issues = self._ticket_cache.get("issues", [])
-        self._ticket_cache["issues"] = [i for i in issues if _belongs(i)]
-
-    def _invalidate_ticket_cache(self) -> None:
-        """Invalidate the cache so the next query re-fetches from tix."""
-        self._ticket_cache = None
-
-    def _get_cached_full(self) -> dict:
-        """Get cached full ticket state, refreshing if needed.
+        Items without a ``spec`` field are kept (issues created during
+        BUILD/VERIFY may lack one).
 
         Returns:
-            Full ticket state dict from tix.
+            Dict with ``tasks`` (by status) and ``issues``.
         """
-        if self._ticket_cache is None:
-            self._refresh_ticket_cache()
-        return self._ticket_cache or {}
+        if not self.tix:
+            return {"tasks": {}, "issues": []}
+
+        try:
+            full = self.tix.query_full()
+        except Exception as exc:
+            logger.warning("tix query_full failed: %s", exc)
+            return {"tasks": {}, "issues": []}
+
+        spec = self._active_spec
+        if spec:
+            def _belongs(item: dict) -> bool:
+                s = item.get("spec", "")
+                return s == spec or s == ""
+
+            tasks = full.get("tasks", {})
+            full["tasks"] = {
+                status: [t for t in task_list if _belongs(t)]
+                for status, task_list in tasks.items()
+            }
+            issues = full.get("issues", [])
+            full["issues"] = [i for i in issues if _belongs(i)]
+
+        return full
 
     def _has_pending_tasks(self) -> bool:
-        """Check if there are pending tasks (from cache)."""
-        full = self._get_cached_full()
+        """Check if there are pending tasks."""
+        full = self._query_full()
         pending = full.get("tasks", {}).get("pending", [])
         return len(pending) > 0
 
     def _has_done_tasks(self) -> bool:
-        """Check if there are done tasks (from cache)."""
-        full = self._get_cached_full()
+        """Check if there are done tasks."""
+        full = self._query_full()
         done = full.get("tasks", {}).get("done", [])
         return len(done) > 0
 
     def _get_done_task_ids(self) -> list[str]:
-        """Get IDs of done tasks (from cache)."""
-        full = self._get_cached_full()
+        """Get IDs of done tasks."""
+        full = self._query_full()
         done = full.get("tasks", {}).get("done", [])
         return [t.get("id", "") for t in done]
 
     def _has_issues(self) -> bool:
-        """Check if there are open issues (from cache)."""
-        full = self._get_cached_full()
+        """Check if there are open issues."""
+        full = self._query_full()
         issues = full.get("issues", [])
         return len(issues) > 0
 
     def _get_issue_ids(self) -> list[str]:
-        """Get IDs of open issues (from cache)."""
-        full = self._get_cached_full()
+        """Get IDs of open issues."""
+        full = self._query_full()
         issues = full.get("issues", [])
         return [i.get("id", "") for i in issues]
 
@@ -229,7 +210,7 @@ class ConstructStateMachine:
         if not self.tix:
             return 0
         max_retries = getattr(self.config, "max_retries_per_task", 3)
-        full = self._get_cached_full()
+        full = self._query_full()
         tasks = full.get("tasks", {}).get("pending", [])
 
         escalated = 0
@@ -275,6 +256,92 @@ class ConstructStateMachine:
         self._retry_counts[task_id] = current + 1
         return current + 1
 
+    def record_rejection(self, task_id: str, reason: str) -> None:
+        """Record a rejection reason in the history for a task.
+
+        Maintains an ordered list of past rejection reasons so
+        BUILD can see all previous attempts, not just the latest.
+
+        Args:
+            task_id: Task ID.
+            reason: Rejection reason text.
+        """
+        history = self._rejection_history.setdefault(task_id, [])
+        # Cap at 10 entries to avoid unbounded growth.
+        if len(history) >= 10:
+            history.pop(0)
+        history.append(reason)
+
+    def get_rejection_history(self, task_id: str) -> list[str]:
+        """Get the rejection history for a task.
+
+        Args:
+            task_id: Task ID.
+
+        Returns:
+            List of past rejection reason strings (oldest first).
+        """
+        return list(self._rejection_history.get(task_id, []))
+
+    def get_retry_count(self, task_id: str) -> int:
+        """Get the current retry count for a task.
+
+        Args:
+            task_id: Task ID.
+
+        Returns:
+            Number of times this task has been retried.
+        """
+        return self._retry_counts.get(task_id, 0)
+
+    # =========================================================================
+    # Source snapshot / revert
+    # =========================================================================
+
+    def _maybe_revert_on_reject(self) -> None:
+        """Revert source if VERIFY rejected all tasks this cycle.
+
+        Checks whether any tasks were accepted during this BUILD->VERIFY
+        cycle. If none were (all rejected or no done tasks remain), the
+        BUILD's source changes are reverted to the pre-BUILD snapshot.
+        This prevents damage accumulation from bad iterations.
+
+        The ``.tix/`` directory is preserved by the revert function.
+        """
+        if not self._revert_fn or self._pre_build_snapshot is None:
+            return
+
+        # If there are still done tasks, VERIFY hasn't finished yet.
+        if self._has_done_tasks():
+            return
+
+        # If there are no pending tasks either, everything was accepted.
+        if not self._has_pending_tasks() and not self._has_issues():
+            self._pre_build_snapshot = None
+            return
+
+        # There are pending/issues but no done tasks = rejection happened.
+        logger.info("VERIFY rejected — reverting source to pre-BUILD state")
+        if self._revert_fn(self._pre_build_snapshot):
+            print("  Reverted source to pre-BUILD snapshot (tix preserved)")
+        else:
+            logger.warning("Source revert failed — damage may accumulate")
+        self._pre_build_snapshot = None
+
+    def _revert_on_failure(self) -> None:
+        """Revert source after BUILD failure (timeout, context, etc.)."""
+        if not self._revert_fn:
+            return
+        ref = self._pre_build_snapshot
+        self._pre_build_snapshot = None
+        if ref is None:
+            return
+        logger.info("BUILD failed — reverting source to pre-BUILD state")
+        if self._revert_fn(ref):
+            print("  Reverted source to pre-BUILD snapshot (tix preserved)")
+        else:
+            logger.warning("Source revert failed — damage may accumulate")
+
     @staticmethod
     def _token_similarity(a: str, b: str) -> float:
         """Jaccard similarity over word tokens.
@@ -311,7 +378,7 @@ class ConstructStateMachine:
         """
         if not self.tix:
             return 0
-        full = self._get_cached_full()
+        full = self._query_full()
         issues = full.get("issues", [])
         if len(issues) < 2:
             return 0
@@ -390,14 +457,12 @@ class ConstructStateMachine:
         Returns:
             Tuple of (should_continue, spec_complete)
         """
-        # Refresh ticket cache once per iteration
-        self._refresh_ticket_cache()
         state = self.load_state()
 
         if not state.spec:
             return False, False
 
-        self._scope_cache_to_spec(state.spec)
+        self._active_spec = state.spec
 
         if state.stage == "COMPLETE":
             return False, True
@@ -421,8 +486,7 @@ class ConstructStateMachine:
 
         for _step in range(max_steps):
             state = self.load_state()
-            self._refresh_ticket_cache()
-            self._scope_cache_to_spec(state.spec or "")
+            self._active_spec = state.spec or ""
 
             if state.stage == "COMPLETE":
                 return False, True
@@ -505,9 +569,7 @@ class ConstructStateMachine:
 
     def _run_investigate(self, state: "RalphState") -> tuple[bool, bool]:
         """Run INVESTIGATE stage with bounded batching."""
-        deduped = self._deduplicate_issues()
-        if deduped > 0:
-            self._invalidate_ticket_cache()
+        self._deduplicate_issues()
         issue_ids = self._get_issue_ids()
         if issue_ids:
             batch_size = self._effective_batch_size(
@@ -549,7 +611,6 @@ class ConstructStateMachine:
         # Deduplicate tasks after INVESTIGATE adds new ones
         deduped = self._deduplicate_tasks()
         if deduped > 0:
-            self._invalidate_ticket_cache()
             logger.info("Task dedup: removed %d duplicate(s)", deduped)
 
         # INVESTIGATE -> BUILD
@@ -576,14 +637,17 @@ class ConstructStateMachine:
 
     def _run_build(self, state: "RalphState") -> tuple[bool, bool]:
         """Run BUILD stage. Transitions to VERIFY."""
-        escalated = self._escalate_stuck_tasks()
-        if escalated > 0:
-            self._invalidate_ticket_cache()
+        self._escalate_stuck_tasks()
 
         if self._has_pending_tasks():
+            # Snapshot source tree so VERIFY-reject can revert cleanly.
+            if self._snapshot_fn:
+                self._pre_build_snapshot = self._snapshot_fn()
+
             result = self._run_stage_with_state(Stage.BUILD, state)
 
             if result.outcome == StageOutcome.FAILURE:
+                self._revert_on_failure()
                 self._handle_task_failure(result)
                 return True, False
 
@@ -645,8 +709,17 @@ class ConstructStateMachine:
         return None
 
     def _finalize_verify_stage(self) -> tuple[bool, bool]:
-        """Route after VERIFY based on what work remains."""
+        """Route after VERIFY based on what work remains.
+
+        If VERIFY rejected tasks (no accepts this cycle), revert
+        source files to the pre-BUILD snapshot to undo damage.
+        """
         state = self.load_state()
+
+        # Revert source on rejection: if no tasks were accepted and
+        # there are pending tasks (i.e. something was rejected back),
+        # the BUILD's source changes are likely broken.
+        self._maybe_revert_on_reject()
 
         if self._has_issues():
             state.transition_to_investigate()
@@ -674,9 +747,6 @@ class ConstructStateMachine:
             self.stage_timeout_ms,
             self.context_limit,
         )
-
-        # Invalidate cache after any stage run (agent may have mutated tickets)
-        self._invalidate_ticket_cache()
 
         if self.loop_detector and result.outcome == StageOutcome.SUCCESS:
             # Include ticket state in fingerprint so runs on different
@@ -763,7 +833,7 @@ class ConstructStateMachine:
         """Get the decompose_depth of a task (from cache)."""
         if not self.tix or task_id == "__stage_failure__":
             return 0
-        full = self._get_cached_full()
+        full = self._query_full()
         all_tasks = (
             full.get("tasks", {}).get("pending", [])
             + full.get("tasks", {}).get("done", [])
@@ -871,9 +941,9 @@ class ConstructStateMachine:
 
         Includes pending/done/issue IDs so that runs on different tickets
         in the same stage don't hash identically (which would cause
-        false-positive loop detection). Uses cached ticket state.
+        false-positive loop detection).
         """
-        full = self._get_cached_full()
+        full = self._query_full()
         pending_ids = sorted(
             t.get("id", "") for t in full.get("tasks", {}).get("pending", [])
         )

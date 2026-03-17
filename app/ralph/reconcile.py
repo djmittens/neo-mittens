@@ -75,6 +75,10 @@ def _assemble_text_content(agent_output: str) -> str:
     carry already-decoded strings (no JSON escaping), so searching this
     concatenated text for ``[RALPH_OUTPUT]`` markers works even when the
     model wraps them in markdown fences.
+
+    When the output is plain text (ACP mode), no JSON events are found
+    and the function returns empty — callers fall through to raw text
+    search.
     """
     parts: list[str] = []
     for line in agent_output.splitlines():
@@ -84,6 +88,8 @@ def _assemble_text_content(agent_output: str) -> str:
         try:
             event = json.loads(line)
         except json.JSONDecodeError:
+            continue
+        if not isinstance(event, dict):
             continue
         if event.get("type") == "text":
             text = event.get("part", {}).get("text", "")
@@ -242,6 +248,8 @@ def _extract_from_tool_events(agent_output: str) -> Optional[dict]:
         try:
             event = json.loads(line)
         except json.JSONDecodeError:
+            continue
+        if not isinstance(event, dict):
             continue
 
         if event.get("type") != "tool_use":
@@ -1263,25 +1271,47 @@ def _reject_task(
         result.errors.append(f"Failed to reject {task_id}: {e}")
         return
 
-    _increment_reject_count(tix, task_id)
+    _increment_reject_count(tix, task_id, reason)
 
 
-# Module-level reject counter for the current session.
+# Module-level reject counter and history for the current session.
 # Persists to tix meta so TQL queries can aggregate retry counts.
 # Reset per-process; the ConstructStateMachine's _retry_counts is
 # the authoritative source for escalation decisions.
 _reject_counts: dict[str, int] = {}
+_reject_reasons: dict[str, list[str]] = {}
 
 
-def _increment_reject_count(tix: TixProtocol, task_id: str) -> None:
+def get_reject_counts() -> dict[str, int]:
+    """Return current session reject counts (task_id -> count)."""
+    return dict(_reject_counts)
+
+
+def get_reject_reasons() -> dict[str, list[str]]:
+    """Return current session rejection history (task_id -> reasons)."""
+    return {k: list(v) for k, v in _reject_reasons.items()}
+
+
+def _increment_reject_count(
+    tix: TixProtocol, task_id: str, reason: str = "",
+) -> None:
     """Increment retries on a task for pattern detection.
 
     Writes the accumulated count to ``meta.retries`` in ticket_meta
     so TQL queries can aggregate retry counts (``sum meta.retries``).
+    Also records the rejection reason in session-local history.
     Best-effort: failure here does not affect reconciliation.
     """
     current = _reject_counts.get(task_id, 0) + 1
     _reject_counts[task_id] = current
+
+    # Record reason in history (capped at 10)
+    if reason:
+        history = _reject_reasons.setdefault(task_id, [])
+        if len(history) >= 10:
+            history.pop(0)
+        history.append(reason)
+
     try:
         tix.task_update(task_id, {"meta": {"retries": current}})
     except (TixError, Exception):

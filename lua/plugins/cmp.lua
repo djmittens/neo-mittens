@@ -70,7 +70,20 @@ function M.setup()
       expandable_indicator = true,
       format = function(entry, vim_item)
         vim_item.kind = string.format('%s %s', kind_icons[vim_item.kind], vim_item.kind)
-        vim_item.menu = ({ buffer = '[Buffer]', nvim_lsp = '[LSP]', luasnip = '[LuaSnipz]', nvim_lua = '[Lua]', latex_symbols = '[LaTeX]' })[entry.source.name]
+        local source = ({ buffer = '[Buffer]', nvim_lsp = '[LSP]', luasnip = '[LuaSnipz]', nvim_lua = '[Lua]', latex_symbols = '[LaTeX]' })[entry.source.name]
+        local max_abbr = math.floor(vim.o.columns * 0.4)
+        if #vim_item.abbr > max_abbr then
+          vim_item.abbr = vim_item.abbr:sub(1, max_abbr) .. '…'
+        end
+        if vim_item.menu and vim_item.menu ~= '' then
+          local max_menu = math.floor(vim.o.columns * 0.25)
+          if #vim_item.menu > max_menu then
+            vim_item.menu = vim_item.menu:sub(1, max_menu) .. '…'
+          end
+          vim_item.menu = vim_item.menu .. ' ' .. (source or '')
+        else
+          vim_item.menu = source
+        end
         return vim_item
       end,
     },

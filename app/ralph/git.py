@@ -298,6 +298,80 @@ def push_with_retry(
 
 
 # =============================================================================
+# Source snapshot / revert (tix-safe)
+# =============================================================================
+
+
+def snapshot_source(cwd: Optional[Path] = None) -> Optional[str]:
+    """Capture a snapshot of the current working tree as a git tree object.
+
+    Uses ``git stash create`` to produce a commit ref that captures
+    the full working tree state (staged + unstaged) without modifying
+    it.  Returns ``None`` if the tree is clean.
+
+    This ref can later be passed to :func:`revert_source` to restore
+    only source files while preserving ``.tix/`` state.
+
+    Args:
+        cwd: Working directory for git commands.
+
+    Returns:
+        A commit-ish ref, or None if there is nothing to snapshot.
+    """
+    try:
+        result = subprocess.run(
+            ["git", "stash", "create"],
+            capture_output=True, text=True, cwd=cwd,
+            timeout=_GIT_LOCAL_TIMEOUT,
+        )
+        ref = result.stdout.strip()
+        return ref if ref else None
+    except subprocess.TimeoutExpired:
+        return None
+
+
+def revert_source(
+    snapshot_ref: Optional[str],
+    cwd: Optional[Path] = None,
+) -> bool:
+    """Restore source files to *snapshot_ref* while preserving ``.tix/``.
+
+    Uses ``git checkout <ref> -- . ':!.tix'`` to restore all tracked
+    files except ``.tix/``, which contains append-only ticket state
+    that must survive the restore.  Also cleans untracked files the
+    agent may have created, again excluding ``.tix/``.
+
+    Args:
+        snapshot_ref: Ref from :func:`snapshot_source`, or ``None``
+            to restore to the last committed state.
+        cwd: Working directory for git commands.
+
+    Returns:
+        True if the restore succeeded, False on any error.
+    """
+    try:
+        ref = snapshot_ref or "HEAD"
+        result = subprocess.run(
+            ["git", "checkout", ref, "--", ".", ":!.tix"],
+            capture_output=True, text=True, cwd=cwd,
+            timeout=_GIT_LOCAL_TIMEOUT,
+        )
+        if result.returncode != 0:
+            return False
+
+        # Clean untracked files left behind (agent may have created new files)
+        subprocess.run(
+            ["git", "clean", "-fd", "--exclude=.tix"],
+            capture_output=True, cwd=cwd,
+            timeout=_GIT_LOCAL_TIMEOUT,
+        )
+
+        return True
+    except (subprocess.TimeoutExpired, OSError):
+        return False
+
+
+# =============================================================================
 # Iteration commit support
 # =============================================================================
 

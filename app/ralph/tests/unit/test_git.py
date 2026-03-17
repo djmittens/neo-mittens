@@ -14,6 +14,8 @@ from ralph.git import (
     has_uncommitted_plan,
     sync_with_remote,
     push_with_retry,
+    snapshot_source,
+    revert_source,
     IterationCommitInfo,
     TaskVerdict,
     has_uncommitted_changes,
@@ -681,3 +683,81 @@ class TestGetUncommittedDiff:
         assert diff_text in result
         # No stat header when stat fails
         assert "DIFF STAT" not in result
+
+
+class TestSnapshotSource:
+    """Tests for snapshot_source function."""
+
+    @patch("ralph.git.subprocess.run")
+    def test_returns_ref_when_dirty(self, mock_run):
+        """Returns stash ref when working tree has changes."""
+        mock_run.return_value = MagicMock(
+            returncode=0, stdout="abc123def\n"
+        )
+        ref = snapshot_source()
+        assert ref == "abc123def"
+
+    @patch("ralph.git.subprocess.run")
+    def test_returns_none_when_clean(self, mock_run):
+        """Returns None when working tree is clean."""
+        mock_run.return_value = MagicMock(returncode=0, stdout="\n")
+        ref = snapshot_source()
+        assert ref is None
+
+    @patch("ralph.git.subprocess.run")
+    def test_returns_none_on_timeout(self, mock_run):
+        """Returns None on timeout."""
+        mock_run.side_effect = subprocess.TimeoutExpired("git", 30)
+        ref = snapshot_source()
+        assert ref is None
+
+    @patch("ralph.git.subprocess.run")
+    def test_passes_cwd(self, mock_run):
+        """Passes cwd to subprocess."""
+        mock_run.return_value = MagicMock(returncode=0, stdout="ref\n")
+        snapshot_source(cwd=Path("/tmp/repo"))
+        mock_run.assert_called_once()
+        assert mock_run.call_args.kwargs.get("cwd") == Path("/tmp/repo")
+
+
+class TestRevertSource:
+    """Tests for revert_source function."""
+
+    @patch("ralph.git.subprocess.run")
+    def test_restores_to_snapshot_ref(self, mock_run, tmp_path):
+        """Restores files to snapshot ref, excluding .tix/."""
+        mock_run.return_value = MagicMock(returncode=0, stdout="")
+        ok = revert_source("abc123", cwd=tmp_path)
+        assert ok is True
+        # Should pass ':!.tix' pathspec to exclude tix dir
+        checkout_call = mock_run.call_args_list[0]
+        assert ":!.tix" in checkout_call.args[0]
+        assert "abc123" in checkout_call.args[0]
+
+    @patch("ralph.git.subprocess.run")
+    def test_restores_to_head_when_no_ref(self, mock_run, tmp_path):
+        """Uses HEAD when snapshot_ref is None."""
+        mock_run.return_value = MagicMock(returncode=0, stdout="")
+        ok = revert_source(None, cwd=tmp_path)
+        assert ok is True
+        checkout_call = mock_run.call_args_list[0]
+        assert "HEAD" in checkout_call.args[0]
+        assert ":!.tix" in checkout_call.args[0]
+
+    @patch("ralph.git.subprocess.run")
+    def test_returns_false_on_checkout_failure(self, mock_run, tmp_path):
+        """Returns False if git checkout fails."""
+        mock_run.return_value = MagicMock(
+            returncode=1, stdout="", stderr="error"
+        )
+        ok = revert_source("abc123", cwd=tmp_path)
+        assert ok is False
+
+    @patch("ralph.git.subprocess.run")
+    def test_cleans_untracked_excluding_tix(self, mock_run, tmp_path):
+        """Runs git clean with --exclude=.tix after checkout."""
+        mock_run.return_value = MagicMock(returncode=0, stdout="")
+        revert_source("abc123", cwd=tmp_path)
+        clean_call = mock_run.call_args_list[1]
+        assert "clean" in clean_call.args[0]
+        assert "--exclude=.tix" in clean_call.args[0]
