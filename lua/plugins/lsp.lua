@@ -29,6 +29,28 @@ function M.on_lsp_attach()
       vim.keymap.set('n', '<leader>vts', function() vim.lsp.buf.typehierarchy('subtypes') end, opts)
       vim.keymap.set('n', '<leader>vtr', function() vim.lsp.buf.typehierarchy('supertypes') end, opts)
       vim.keymap.set('n', '<leader>vd', function() vim.diagnostic.open_float() end, opts)
+
+      if vim.lsp.inlay_hint then
+        vim.lsp.inlay_hint.enable(true, { bufnr = event.buf })
+        vim.keymap.set('n', '<leader>vh', function()
+          vim.lsp.inlay_hint.enable(not vim.lsp.inlay_hint.is_enabled({ bufnr = event.buf }), { bufnr = event.buf })
+        end, opts)
+      end
+
+      local client = vim.lsp.get_client_by_id(event.data.client_id)
+      if client and client.supports_method('textDocument/documentHighlight') then
+        local hl_group = vim.api.nvim_create_augroup('lsp_document_highlight_' .. event.buf, { clear = true })
+        vim.api.nvim_create_autocmd({ 'CursorHold', 'CursorHoldI' }, {
+          group = hl_group,
+          buffer = event.buf,
+          callback = vim.lsp.buf.document_highlight,
+        })
+        vim.api.nvim_create_autocmd({ 'CursorMoved', 'CursorMovedI' }, {
+          group = hl_group,
+          buffer = event.buf,
+          callback = vim.lsp.buf.clear_references,
+        })
+      end
     end,
   })
 end
@@ -47,22 +69,21 @@ function M.mason_setup()
 end
 
 -- Valkyria LSP (Valk script)
-vim.lsp.config('valk', {
-  cmd = { vim.fn.expand('~/src/valkyria/build/valk'), vim.fn.expand('~/src/valkyria/src/lsp-main.valk') },
-  filetypes = { 'valk' },
-  root_markers = { '.git', 'CMakeLists.txt' },
-})
-vim.lsp.enable('valk')
-
--- Enable inlay hints for valk files
-vim.api.nvim_create_autocmd('LspAttach', {
-  callback = function(args)
-    local client = vim.lsp.get_client_by_id(args.data.client_id)
-    if client and client.name == 'valk' then
-      vim.lsp.inlay_hint.enable(true, { bufnr = args.buf })
-    end
-  end,
-})
+local valk_binary = vim.fn.expand('~/src/valkyria/build/valk')
+if vim.loop.fs_stat(valk_binary) then
+  vim.lsp.config('valk', {
+    cmd = { valk_binary, vim.fn.expand('~/src/valkyria/scripts/lsp/main.valk') },
+    cmd_env = { VALK_HEAP_HARD_LIMIT = '4294967296' },
+    filetypes = { 'valk' },
+    root_markers = { '.git', 'CMakeLists.txt' },
+    on_attach = function(client, bufnr)
+      if vim.lsp.inlay_hint then
+        vim.lsp.inlay_hint.enable(true, { bufnr = bufnr })
+      end
+    end,
+  })
+  vim.lsp.enable('valk')
+end
 
 -- Vulkan documentation helper
 -- Opens official Vulkan docs for function under cursor with gK

@@ -5,11 +5,6 @@ function M.setup()
   local dapui = require('dapui')
 
   dapui.setup()
-  require('dap.ext.vscode').load_launchjs(nil, {
-    cppdbg = { 'vscode' }, lldb = { 'vscode' }, coreclr = { 'vscode' }, go = { 'vscode' },
-    python = { 'vscode' }, node2 = { 'vscode' }, pwa_node = { 'vscode' }, pwa_chrome = { 'vscode' },
-    java = { 'vscode' }, rust = { 'vscode' },
-  })
 
   local function set_debug_keymaps()
     local o = { noremap = true, silent = true }

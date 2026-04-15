@@ -4,7 +4,13 @@ local M = {}
 local install_languages = { 'c', 'cpp', 'python', 'lua', 'vim', 'vimdoc', 'query', 'javascript', 'html', 'markdown', 'markdown_inline' }
 
 -- Languages to enable treesitter features for (includes locally-installed parsers)
-local enable_languages = vim.list_extend(vim.list_extend({}, install_languages), { 'valk' })
+local enable_languages = vim.list_extend({}, install_languages)
+
+-- Only add valk if the parser .so is installed
+local valk_parser = vim.fn.stdpath('data') .. '/site/parser/valk.so'
+if vim.loop.fs_stat(valk_parser) then
+  table.insert(enable_languages, 'valk')
+end
 
 function M.setup()
   local treesitter = require('nvim-treesitter')
@@ -32,7 +38,9 @@ function M.setup()
   end
 
   -- Register valk parser (installed locally via editors/ plugin)
-  vim.treesitter.language.register('valk', 'valk')
+  if vim.loop.fs_stat(valk_parser) then
+    vim.treesitter.language.register('valk', 'valk')
+  end
 end
 
 return M
