@@ -86,7 +86,11 @@ tix_err_t tix_ctx_ensure_cache(tix_ctx_t *ctx) {
 
   if (strcmp(mtime_str, cached_mtime) != 0 ||
       strcmp(size_str, cached_size) != 0) {
-    TIX_DEBUG("plan.jsonl changed, replaying from %s", ctx->plan_path);
+    TIX_DEBUG("plan.jsonl changed, rebuilding cache from %s", ctx->plan_path);
+    /* Full rebuild (clear + replay) instead of incremental replay.
+       Incremental replay uses additive upserts which leave stale tickets
+       in the cache when plan.jsonl is reset (e.g. git reset --hard). */
+    tix_db_clear_tickets(&ctx->db);
     tix_err_t err = tix_db_replay_jsonl_file(&ctx->db, ctx->plan_path);
     if (err != TIX_OK) { return err; }
     tix_db_set_meta(&ctx->db, "plan_mtime", mtime_str);

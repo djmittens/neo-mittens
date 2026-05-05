@@ -1,0 +1,25 @@
+# packages-aur.txt — AUR/foreign explicit packages on RedBox
+# Generated 2026-04-30T02:30:32-07:00 from `pacman -Qqem`.
+# install-gaming.sh runs: yay -S --needed --noconfirm $(grep -v '^#' packages-aur.txt)
+
+1password
+clipman
+gf2-git
+greenclip
+koboldcpp-cuda
+legcord-bin
+llama.cpp-cuda-git
+lmstudio-beta
+lmstudio-bin
+nsight-graphics
+openai-codex-bin
+opencode-bin
+pinokio-bin
+pureref
+python312
+qimgv
+r8125-dkms
+rr
+sillytavern-git
+sqlite-vec
+tmux-git

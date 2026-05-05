@@ -1,0 +1,33 @@
+[package]
+name = "bnetswitch"
+version = "0.1.0"
+edition = "2021"
+description = "Battle.net account switcher for Linux (Wine/Lutris)"
+
+[dependencies]
+anyhow = "1"
+crossterm = "0.28"
+dirs = "5"
+ratatui = "0.29"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.8"
+# Sync HTTP client for fetching player ranks from OverFast API.
+# Pulled with rustls-tls to avoid OpenSSL system dep.
+ureq = { version = "2", default-features = false, features = ["json", "tls"] }
+# Reading Lutris game config files (YAML). serde_norway is the maintained
+# fork of the unmaintained serde_yaml crate.
+serde_norway = "0.9"
+# Tiny synchronous HTTP server for the LFG userscript bridge. Localhost-only,
+# no TLS, no async runtime overhead. ~500 LOC dep, single thread per request.
+tiny_http = "0.12"
+# Image loading for embedded OW rank icons. Used with ratatui-image to
+# render real PNGs in graphics-capable terminals (Kitty/Ghostty/WezTerm).
+# Default features include PNG which is all we ship; we strip the rest
+# to keep the dep tree small.
+image = { version = "0.25", default-features = false, features = ["png"] }
+# Inline image rendering inside ratatui. Auto-detects Kitty graphics
+# protocol, Sixel, iTerm2 inline images. Falls through to halfblock
+# rendering or plain Unicode in unsupported terminals (we use our own
+# Unicode glyph fallback in that case).
+ratatui-image = { version = "8", default-features = false, features = ["crossterm"] }

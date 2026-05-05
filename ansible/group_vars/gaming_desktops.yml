@@ -1,0 +1,42 @@
+---
+# Variables applied to the gaming_desktops group only.
+
+# ============================================================================
+# Kernel cmdline
+#
+# Documented in roles/gaming_kernel/templates/kernel-cmdline.j2. Each token
+# explained there; this var is what gets rendered into the file.
+#
+# resume= UUID is filled in at task time from the active swap partition
+# (see roles/gaming_kernel/tasks/main.yml).
+# ============================================================================
+kernel_cmdline_tokens:
+  - quiet
+  - nvidia_drm.modeset=1
+  - nvidia_drm.fbdev=1
+  - mitigations=off
+  - tsc=reliable
+  - clocksource=tsc
+  - nowatchdog
+  - nmi_watchdog=0
+  - apparmor=1
+  - "processor.max_cstate=5"
+  - idle=nomwait
+  - amd_pstate=active
+  - security=apparmor
+  - udev.log_priority=3
+
+# ============================================================================
+# NVIDIA modprobe options (Blackwell / RTX 5090 specific)
+# ============================================================================
+nvidia_modprobe_options:
+  NVreg_UsePageAttributeTable: "1"
+  NVreg_InitializeSystemMemoryAllocations: "0"
+  NVreg_PreserveVideoMemoryAllocations: "1"
+  NVreg_TemporaryFilePath: "/var/tmp"
+
+# ============================================================================
+# Gamemode helper paths -- used by the polkit rule template
+# ============================================================================
+gamemode_helper_path_prefix: /usr/lib/gamemode/
+gamemode_split_lock_path: /proc/sys/kernel/split_lock_mitigate

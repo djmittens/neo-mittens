@@ -1,0 +1,122 @@
+---
+# gaming_kernel role
+# Manages /etc/kernel/cmdline (systemd-boot) and /etc/modprobe.d/nvidia-perf.conf.
+# Triggers initramfs regen via handler.
+
+# ----------------------------------------------------------------------
+# Detect bootloader -- systemd-boot vs GRUB. We support both, but the
+# user said "switch to systemd-boot" for fresh installs. GRUB path is
+# kept for migration scenarios.
+# ----------------------------------------------------------------------
+- name: Detect bootloader (systemd-boot)
+  ansible.builtin.stat:
+    path: /boot/loader/loader.conf
+  register: sdboot_stat
+
+- name: Detect bootloader (GRUB)
+  ansible.builtin.stat:
+    path: /etc/default/grub
+  register: grub_stat
+
+- name: Set bootloader fact
+  ansible.builtin.set_fact:
+    bootloader: >-
+      {{
+        'systemd-boot' if sdboot_stat.stat.exists
+        else ('grub' if grub_stat.stat.exists else 'unknown')
+      }}
+
+- name: Show detected bootloader
+  ansible.builtin.debug:
+    msg: "Bootloader: {{ bootloader }}"
+
+- name: Fail if no bootloader detected
+  ansible.builtin.fail:
+    msg: >
+      Couldn't detect a supported bootloader. Expected /boot/loader/loader.conf
+      (systemd-boot) or /etc/default/grub (GRUB). If you're using rEFInd or
+      another bootloader, edit your kernel cmdline by hand to include:
+      {{ kernel_cmdline_tokens | join(' ') }}
+  when: bootloader == 'unknown'
+
+# ----------------------------------------------------------------------
+# Resume UUID lookup -- needed for the resume= cmdline token. Read from
+# the active swap partition; if no swap, omit the resume= token entirely.
+# ----------------------------------------------------------------------
+- name: Find active swap source
+  ansible.builtin.command: swapon --show=NAME --noheadings
+  register: swap_show
+  changed_when: false
+  failed_when: false
+
+- name: Resolve resume UUID from swap source
+  ansible.builtin.command: blkid -s UUID -o value {{ swap_show.stdout_lines[0] }}
+  register: resume_uuid_lookup
+  changed_when: false
+  when: swap_show.stdout_lines | length > 0
+
+- name: Set resume_uuid fact
+  ansible.builtin.set_fact:
+    resume_uuid: "{{ resume_uuid_lookup.stdout | default('') }}"
+
+- name: Show resume UUID
+  ansible.builtin.debug:
+    msg: "Resume UUID: {{ resume_uuid if resume_uuid else 'none (no swap; hibernate disabled)' }}"
+
+# ----------------------------------------------------------------------
+# Compose final cmdline by joining tokens + appending resume= if available.
+# This expression is the single source of truth for the cmdline string.
+# ----------------------------------------------------------------------
+- name: Build effective kernel cmdline
+  ansible.builtin.set_fact:
+    effective_cmdline: >-
+      {{
+        kernel_cmdline_tokens | join(' ')
+        + (' resume=UUID=' + resume_uuid if resume_uuid else '')
+      }}
+
+- name: Show effective cmdline
+  ansible.builtin.debug:
+    msg: "{{ effective_cmdline }}"
+
+# ----------------------------------------------------------------------
+# Apply cmdline based on bootloader.
+# ----------------------------------------------------------------------
+- name: Write /etc/kernel/cmdline (systemd-boot)
+  ansible.builtin.copy:
+    content: "{{ effective_cmdline }}\n"
+    dest: /etc/kernel/cmdline
+    owner: root
+    group: root
+    mode: "0644"
+    backup: true
+  become: true
+  when: bootloader == 'systemd-boot'
+  notify: regenerate initramfs
+
+- name: Update GRUB_CMDLINE_LINUX_DEFAULT (GRUB)
+  ansible.builtin.lineinfile:
+    path: /etc/default/grub
+    regexp: '^GRUB_CMDLINE_LINUX_DEFAULT='
+    line: "GRUB_CMDLINE_LINUX_DEFAULT='{{ effective_cmdline }}'"
+    backup: true
+  become: true
+  when: bootloader == 'grub'
+  notify:
+    - regenerate grub config
+    - regenerate initramfs
+
+# ----------------------------------------------------------------------
+# NVIDIA modprobe options. Templated from the dict in group_vars so adding
+# new options is a one-line change in YAML, not a file edit.
+# ----------------------------------------------------------------------
+- name: Render /etc/modprobe.d/nvidia-perf.conf
+  ansible.builtin.template:
+    src: nvidia-perf.conf.j2
+    dest: /etc/modprobe.d/nvidia-perf.conf
+    owner: root
+    group: root
+    mode: "0644"
+    backup: true
+  become: true
+  notify: regenerate initramfs

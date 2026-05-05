@@ -1,0 +1,179 @@
+#!/bin/bash
+# gamewatcher - reactive game-process detection daemon
+#
+# Polls /proc every 2 seconds for new processes matching configured
+# patterns. When found, applies:
+#   1. gamemoded RegisterGame via dbus  (-> governor flip, ioprio, pinning)
+#   2. taskset -p to CCD0                (-> avoid cross-CCD cache misses)
+#
+# Why polling instead of netlink CN_PROC: needs root + libnl, ~50x more
+# code, and we only care about long-running game processes anyway. A 2s
+# polling interval has negligible CPU cost (~0.01% on a 9900X) and adds
+# at most 2s of latency to gamemode activation, which is irrelevant for
+# multi-hour gaming sessions.
+#
+# Run via systemd user unit:
+#   systemctl --user enable --now gamewatcher
+#
+# Logs go to systemd journal:
+#   journalctl --user -u gamewatcher -f
+
+set -u
+
+CONFIG_FILE="${XDG_CONFIG_HOME:-$HOME/.config}/gamewatcher/games.conf"
+POLL_INTERVAL=2
+
+# Tracked PIDs we've already activated -- avoid reactivating on every
+# poll. Cleared automatically when a tracked PID exits.
+declare -A TRACKED
+
+# ============================================================================
+# Detect higher-binned CCD on AMD chiplet CPUs (same logic as gamelaunch).
+# Returns "0-5,12-17" style range string, or empty if single-CCD.
+# Computed once at startup; topology doesn't change at runtime.
+# ============================================================================
+detect_ccd0() {
+    python3 - <<'PY' 2>/dev/null
+import os, glob
+domains = {}
+for cpudir in glob.glob("/sys/devices/system/cpu/cpu[0-9]*"):
+    cpu = int(os.path.basename(cpudir)[3:])
+    p = os.path.join(cpudir, "cache/index3/shared_cpu_list")
+    if os.path.exists(p):
+        domains.setdefault(open(p).read().strip(), []).append(cpu)
+
+if len(domains) < 2:
+    raise SystemExit  # single-CCD
+
+best = (-1, [])
+for _, cpus in domains.items():
+    perfs = []
+    for c in cpus:
+        f = f"/sys/devices/system/cpu/cpu{c}/cpufreq/amd_pstate_highest_perf"
+        if os.path.exists(f):
+            perfs.append(int(open(f).read()))
+    if not perfs:
+        continue
+    median = sorted(perfs)[len(perfs)//2]
+    if median > best[0]:
+        best = (median, sorted(cpus))
+
+if best[1]:
+    cpus = best[1]
+    ranges, i = [], 0
+    while i < len(cpus):
+        s = e = cpus[i]
+        while i+1 < len(cpus) and cpus[i+1] == e+1:
+            e = cpus[i+1]; i += 1
+        ranges.append(f"{s}-{e}" if s != e else str(s))
+        i += 1
+    print(",".join(ranges))
+PY
+}
+
+CCD0_CPUS="$(detect_ccd0)"
+echo "[startup] CCD0 cpu list: ${CCD0_CPUS:-<single-CCD or detection failed>}"
+
+# ============================================================================
+# Read patterns from config file (skip blanks + comments).
+# ============================================================================
+load_patterns() {
+    if [[ ! -f "$CONFIG_FILE" ]]; then
+        echo "[error] config file not found: $CONFIG_FILE" >&2
+        return 1
+    fi
+    PATTERNS=()
+    while IFS= read -r line; do
+        # Strip leading whitespace
+        line="${line#"${line%%[![:space:]]*}"}"
+        # Skip blanks and comments
+        [[ -z "$line" || "$line" =~ ^# ]] && continue
+        PATTERNS+=("$line")
+    done < "$CONFIG_FILE"
+    echo "[startup] loaded ${#PATTERNS[@]} game patterns"
+}
+
+# ============================================================================
+# Activate gamemode + CCD pin for a single PID.
+# Idempotent -- gamemoded ignores duplicate registrations gracefully.
+# ============================================================================
+activate_pid() {
+    local pid="$1"
+    local cmdline
+    cmdline=$(tr '\0' ' ' < "/proc/$pid/cmdline" 2>/dev/null | head -c 200)
+    [[ -z "$cmdline" ]] && return  # process exited mid-flight
+
+    echo "[activate] pid=$pid cmd=$cmdline"
+
+    # 1. Register with gamemoded via session dbus.
+    # Interface name is `com.feralinteractive.GameMode` (no `1` suffix).
+    # Method `RegisterGame` takes int32 pid, returns int32 status code.
+    # Failure is non-fatal (gamemoded might be down, user hasn't logged in).
+    if ! gdbus call --session \
+        --dest com.feralinteractive.GameMode \
+        --object-path /com/feralinteractive/GameMode \
+        --method com.feralinteractive.GameMode.RegisterGame "$pid" \
+        > /dev/null 2>&1
+    then
+        echo "  [warn] gamemoded register failed (daemon down?)"
+    fi
+
+    # 2. Pin to CCD0. taskset -p sets affinity on a running PID.
+    if [[ -n "$CCD0_CPUS" ]]; then
+        if taskset -pc "$CCD0_CPUS" "$pid" > /dev/null 2>&1; then
+            echo "  [pin] pid=$pid -> cpus=$CCD0_CPUS"
+        else
+            echo "  [warn] taskset failed for pid=$pid (process exited?)"
+        fi
+    fi
+}
+
+# ============================================================================
+# One poll iteration: find matching PIDs, activate new ones, prune dead ones.
+# ============================================================================
+poll_once() {
+    # Collect currently-matching PIDs across all patterns.
+    local current_pids=()
+    for pat in "${PATTERNS[@]}"; do
+        # pgrep -f matches against full cmdline.
+        # -u $UID limits to our processes (skip system services).
+        while IFS= read -r pid; do
+            [[ -n "$pid" ]] && current_pids+=("$pid")
+        done < <(pgrep -u "$UID" -f "$pat" 2>/dev/null)
+    done
+
+    # Activate any new PIDs.
+    for pid in "${current_pids[@]}"; do
+        if [[ -z "${TRACKED[$pid]:-}" ]]; then
+            activate_pid "$pid"
+            TRACKED[$pid]=1
+        fi
+    done
+
+    # Prune tracked PIDs that no longer exist (process exited).
+    # gamemoded auto-cleans its registrations on process exit, so we just
+    # need to clear our local tracking.
+    for pid in "${!TRACKED[@]}"; do
+        if ! [[ -d "/proc/$pid" ]]; then
+            unset 'TRACKED[$pid]'
+            echo "[exit] pid=$pid no longer tracked"
+        fi
+    done
+}
+
+# ============================================================================
+# Main loop
+# ============================================================================
+load_patterns || exit 1
+
+trap 'echo "[shutdown] gamewatcher stopping"; exit 0' SIGINT SIGTERM
+
+# SIGHUP -> reload config
+trap 'echo "[reload] re-reading $CONFIG_FILE"; load_patterns' SIGHUP
+
+echo "[startup] poll_interval=${POLL_INTERVAL}s pid=$$ uid=$UID"
+
+while true; do
+    poll_once
+    sleep "$POLL_INTERVAL"
+done

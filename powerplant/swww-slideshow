@@ -1,31 +1,71 @@
 #!/bin/bash
+# Wallpaper slideshow for Hyprland.
+#
+# Uses awww (a maintained fork of swww that ships in Manjaro/AUR with
+# the original swww name dropped from the binary). The CLI is otherwise
+# identical to swww. If you replace awww with the upstream swww package
+# later, set WALLPAPER_CLI=swww in your shell env (or just edit the
+# default below).
 
 # Exit if already running
 pidof -x -o $$ "$(basename "$0")" >/dev/null && exit 0
 
-WALL_DIR="$HOME/Pictures/Waifu"
-INTERVAL=300  # seconds
-TRANSITION="random"
+WALL_DIR="${WALL_DIR:-$HOME/Pictures/Waifu}"
+INTERVAL=${INTERVAL:-300}  # seconds
+TRANSITION=${TRANSITION:-random}
 
-# Kill and restart swww daemon for clean state
-pkill -x swww-daemon 2>/dev/null
+# Auto-detect the wallpaper-daemon CLI: prefer awww, fall back to swww.
+# Both have identical command interfaces (`<cli> img`, `<cli> query`,
+# `<cli>-daemon`).
+if [ -z "$WALLPAPER_CLI" ]; then
+    if command -v awww >/dev/null; then
+        WALLPAPER_CLI=awww
+    elif command -v swww >/dev/null; then
+        WALLPAPER_CLI=swww
+    else
+        echo "swww-slideshow: neither awww nor swww is installed" >&2
+        exit 1
+    fi
+fi
+DAEMON="${WALLPAPER_CLI}-daemon"
+
+# Kill and restart daemon for clean state. Using -x to match the exact
+# binary name (so we don't murder the old swww-daemon-from-deleted-binary
+# and miss it because of the rename).
+pkill -x "$DAEMON" 2>/dev/null
+pkill -x "swww-daemon" 2>/dev/null   # cleanup if user previously ran upstream swww
 sleep 0.5
-swww-daemon 2>/dev/null &
+"$DAEMON" 2>/dev/null &
 sleep 1  # Wait for daemon to initialize
 
 set_wallpaper() {
     local img="$1"
-    for output in $(swww query | cut -d: -f1); do
-        swww img -o "$output" "$img" --resize fit --transition-type "$TRANSITION" 2>/dev/null
+    # awww query format: ": <output>: <res>, scale: <n>, currently ..."
+    # swww  query format: "<output>: <res>, scale: <n>, currently ..."
+    # Take the output name from field 2 split by ": " — works for both
+    # since awww has a leading empty field but swww doesn't, and the
+    # output name lands in position 2 either way (or in position 1 for
+    # swww, but ": " split also handles that). Robust to either tool.
+    for output in $("$WALLPAPER_CLI" query | awk -F': ' '{
+        # If first field is empty (awww style), use $2; else $1 (swww).
+        if ($1 == "") print $2; else print $1;
+    }'); do
+        "$WALLPAPER_CLI" img -o "$output" "$img" \
+            --resize fit \
+            --transition-type "$TRANSITION" 2>/dev/null
     done
 }
 
 # Pick ONE image and set it
-IMG="$(find "$WALL_DIR" -type f \( -name '*.jpg' -o -name '*.png' -o -name '*.webp' \) | shuf -n 1)"
+IMG="$(find "$WALL_DIR" -type f \( -name '*.jpg' -o -name '*.jpeg' -o -name '*.png' -o -name '*.webp' \) | shuf -n 1)"
+if [ -z "$IMG" ]; then
+    echo "swww-slideshow: no images found in $WALL_DIR" >&2
+    exit 1
+fi
 set_wallpaper "$IMG"
 
 while true; do
     sleep $INTERVAL
-    IMG="$(find "$WALL_DIR" -type f \( -name '*.jpg' -o -name '*.png' -o -name '*.webp' \) | shuf -n 1)"
-    set_wallpaper "$IMG"
+    IMG="$(find "$WALL_DIR" -type f \( -name '*.jpg' -o -name '*.jpeg' -o -name '*.png' -o -name '*.webp' \) | shuf -n 1)"
+    [ -n "$IMG" ] && set_wallpaper "$IMG"
 done

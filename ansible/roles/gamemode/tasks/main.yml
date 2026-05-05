@@ -1,0 +1,48 @@
+---
+# gamemode role
+# Installs gamemode + lib32-gamemode, deploys /etc/gamemode.ini and the
+# polkit rule, ensures the user is in the gamemode group, restarts polkit
+# so the new rule is honored.
+
+- name: Install gamemode packages
+  community.general.pacman:
+    name:
+      - gamemode
+      - lib32-gamemode
+    state: present
+  become: true
+
+- name: Install /etc/gamemode.ini
+  ansible.builtin.copy:
+    src: gamemode.ini
+    dest: /etc/gamemode.ini
+    owner: root
+    group: root
+    mode: "0644"
+    backup: true
+  become: true
+
+- name: Render polkit rule for gamemode helpers
+  ansible.builtin.template:
+    src: 49-gamemode-polkit.rules.j2
+    dest: /etc/polkit-1/rules.d/49-gamemode-polkit.rules
+    owner: root
+    group: root
+    mode: "0644"
+    backup: true
+  become: true
+  notify: restart polkit
+
+- name: Ensure gamemode group exists
+  ansible.builtin.group:
+    name: gamemode
+    system: true
+    state: present
+  become: true
+
+- name: Add target user to gamemode group
+  ansible.builtin.user:
+    name: "{{ target_user }}"
+    groups: gamemode
+    append: true
+  become: true
