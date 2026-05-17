@@ -18,9 +18,11 @@ ureq = { version = "2", default-features = false, features = ["json", "tls"] }
 # Reading Lutris game config files (YAML). serde_norway is the maintained
 # fork of the unmaintained serde_yaml crate.
 serde_norway = "0.9"
-# Tiny synchronous HTTP server for the LFG userscript bridge. Localhost-only,
-# no TLS, no async runtime overhead. ~500 LOC dep, single thread per request.
-tiny_http = "0.12"
+axum = { version = "0.7", features = ["macros"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "sync", "time"] }
+tokio-stream = { version = "0.1", features = ["sync"] }
+async-stream = "0.3"
+tower-http = { version = "0.5", features = ["cors"] }
 # Image loading for embedded OW rank icons. Used with ratatui-image to
 # render real PNGs in graphics-capable terminals (Kitty/Ghostty/WezTerm).
 # Default features include PNG which is all we ship; we strip the rest

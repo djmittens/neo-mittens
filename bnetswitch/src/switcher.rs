@@ -1143,3 +1143,24 @@ pub fn is_bnet_running() -> bool {
         .output();
     matches!(output, Ok(o) if o.status.success())
 }
+
+/// Check if a Blizzard game process (Overwatch, etc.) is currently running.
+/// Used to gate destructive actions with a confirmation prompt -- switching
+/// accounts or killing Battle.net while a match is in progress is almost
+/// never intentional.
+pub fn is_game_running() -> bool {
+    for pattern in &["Overwatch.exe"] {
+        let status = Command::new("pgrep")
+            .args(["-f", pattern])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
+        if let Ok(s) = status {
+            if s.success() {
+                return true;
+            }
+        }
+    }
+    false
+}

@@ -55,12 +55,23 @@
 //! - `GET /health`       — sanity check
 
 use anyhow::{Context, Result};
+use axum::{
+    extract::{Query, State},
+    http::{HeaderMap, Method, StatusCode},
+    response::{
+        sse::{Event, Sse},
+        IntoResponse, Response,
+    },
+    routing::{get, post},
+    Router,
+};
 use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
+use std::convert::Infallible;
 use std::sync::{Arc, Mutex, OnceLock};
-use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
-use tiny_http::{Method, Response, Server, StatusCode};
+use tokio::sync::broadcast;
+use tower_http::cors::{Any, CorsLayer};
 
 /// Per-process random ID exposed via `/health` so the userscript can
 /// detect bnetswitch restarts and re-trigger LFG history backfill.
@@ -386,340 +397,516 @@ impl LfgState {
     }
 }
 
+// ============================================================================
+// Axum app state
+// ============================================================================
+
+/// Shared state passed to all axum handlers via State extractor.
+#[derive(Clone)]
+struct AppState {
+    lfg: Arc<Mutex<LfgState>>,
+    notify_tx: broadcast::Sender<()>,
+}
+
 /// Handle to the running LFG server. Holds the shared state so other
 /// modules (TUI, switcher) can read messages and enqueue actions.
-///
-/// `#[allow(dead_code)]` until Phase 4 wires this into `main.rs` —
-/// during incremental build the type and methods are referenced only
-/// from tests, which doesn't satisfy the unused-code lint.
-#[allow(dead_code)]
 pub struct LfgServer {
     pub state: Arc<Mutex<LfgState>>,
-    /// Joined when bnetswitch exits; not used in normal flow because
-    /// the server runs forever.
-    _server_thread: thread::JoinHandle<()>,
+    pub notify_tx: broadcast::Sender<()>,
+    _runtime: tokio::runtime::Runtime,
 }
 
 impl LfgServer {
-    /// Start the HTTP server in a background thread. Returns immediately;
-    /// the server runs until the process exits. If the port is already
-    /// in use (e.g., another bnetswitch instance), returns an error and
-    /// LFG features stay disabled — TUI continues to work.
+    /// Start the HTTP server in a background tokio runtime. Returns
+    /// immediately; the server runs until the process exits. If the
+    /// port is already in use (e.g., another bnetswitch instance),
+    /// returns an error and LFG features stay disabled — TUI continues
+    /// to work.
     pub fn start() -> Result<Self> {
         let state = Arc::new(Mutex::new(LfgState::new()));
-        let bind = format!("127.0.0.1:{}", LFG_PORT);
+        let (notify_tx, _) = broadcast::channel::<()>(16);
 
-        let server = Server::http(&bind)
-            .map_err(|e| anyhow::anyhow!("LFG server bind failed on {}: {}", bind, e))?;
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .thread_name("lfg-tokio")
+            .build()
+            .context("failed to build tokio runtime for LFG server")?;
 
-        let state_for_thread = state.clone();
-        let handle = thread::Builder::new()
-            .name("lfg-http".into())
-            .spawn(move || {
-                serve_loop(server, state_for_thread);
-            })
-            .context("failed to spawn LFG HTTP server thread")?;
+        let app_state = AppState {
+            lfg: state.clone(),
+            notify_tx: notify_tx.clone(),
+        };
+
+        // Try to bind before spawning, so we can report port-in-use immediately.
+        let listener = runtime.block_on(async {
+            tokio::net::TcpListener::bind(format!("127.0.0.1:{}", LFG_PORT)).await
+        })
+        .map_err(|e| anyhow::anyhow!("LFG server bind failed on 127.0.0.1:{}: {}", LFG_PORT, e))?;
+
+        let router = build_router(app_state);
+
+        runtime.spawn(async move {
+            axum::serve(listener, router).await.ok();
+        });
 
         Ok(Self {
             state,
-            _server_thread: handle,
+            notify_tx,
+            _runtime: runtime,
         })
     }
 }
 
 // ============================================================================
-// Request loop
+// Router
 // ============================================================================
 
-fn serve_loop(server: Server, state: Arc<Mutex<LfgState>>) {
-    for request in server.incoming_requests() {
-        // Each request is processed inline. tiny_http spawns one thread
-        // per accepted connection internally so we don't block on slow
-        // clients. For a localhost loopback API with one client this is
-        // overkill but free.
-        if let Err(e) = handle_request(request, &state) {
-            eprintln!("[lfg] request handling error: {}", e);
-        }
-    }
+fn build_router(state: AppState) -> Router {
+    let cors = CorsLayer::new()
+        .allow_origin(Any)
+        .allow_methods([Method::GET, Method::POST, Method::OPTIONS])
+        .allow_headers([
+            axum::http::header::AUTHORIZATION,
+            axum::http::header::CONTENT_TYPE,
+            axum::http::HeaderName::from_static("x-bnet-session"),
+        ]);
+
+    Router::new()
+        .route("/health", get(handle_health))
+        .route("/userscript", get(handle_userscript_main))
+        .route("/userscript.user.js", get(handle_userscript_main))
+        .route("/bnetswitch-lfg.user.js", get(handle_userscript_main))
+        .route("/loader", get(handle_userscript_loader))
+        .route("/loader.user.js", get(handle_userscript_loader))
+        .route("/bnetswitch-lfg-loader.user.js", get(handle_userscript_loader))
+        .route("/lfg/message", post(handle_lfg_message))
+        .route("/lfg/remove", post(handle_lfg_remove))
+        .route("/lfg/active", get(handle_lfg_active))
+        .route("/actions", get(handle_actions))
+        .route("/actions/ack", post(handle_actions_ack))
+        .route("/register", post(handle_register))
+        .route("/status", post(handle_status))
+        .route("/voice/deleted", post(handle_voice_deleted))
+        .route("/voice/state", post(handle_voice_state))
+        .route("/events", get(handle_events))
+        .layer(cors)
+        .with_state(state)
 }
 
-/// Dispatch a single request to the appropriate handler.
-fn handle_request(
-    mut request: tiny_http::Request,
-    state: &Arc<Mutex<LfgState>>,
-) -> Result<()> {
-    // ---- auth gate ----
-    // Public endpoints (no auth required) are listed here. /userscript
-    // is public because Tampermonkey's update-check fetch can't supply
-    // custom headers; localhost-only is its actual security boundary.
-    let is_public_endpoint = matches!(
-        (request.method(), request.url()),
-        (Method::Get, "/userscript")
-            | (Method::Get, "/userscript.user.js")
-            | (Method::Get, "/bnetswitch-lfg.user.js")
-            | (Method::Get, "/loader")
-            | (Method::Get, "/loader.user.js")
-            | (Method::Get, "/bnetswitch-lfg-loader.user.js")
-    );
-    if !is_public_endpoint && !is_authorized(&request) {
-        respond(request, 401, r#"{"error":"missing or bad bearer token"}"#)?;
-        return Ok(());
-    }
+// ============================================================================
+// Auth helpers
+// ============================================================================
 
-    // Register / refresh session on every authenticated request that
-    // carries X-Bnet-Session. Saves an explicit /register handshake
-    // and naturally rotates "primary" to whoever's most active.
-    if let Some(sid) = request_session_id(&request) {
-        let ua = request_user_agent(&request);
+fn is_authorized(headers: &HeaderMap) -> bool {
+    headers
+        .get("authorization")
+        .and_then(|v| v.to_str().ok())
+        .map(|v| v == format!("Bearer {}", LFG_AUTH_TOKEN))
+        .unwrap_or(false)
+}
+
+fn extract_session_id(headers: &HeaderMap) -> Option<String> {
+    headers
+        .get("x-bnet-session")
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.to_string())
+}
+
+fn extract_user_agent(headers: &HeaderMap) -> String {
+    headers
+        .get("user-agent")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("")
+        .to_string()
+}
+
+/// Register session from headers if X-Bnet-Session is present.
+fn maybe_register_session(state: &Arc<Mutex<LfgState>>, headers: &HeaderMap) {
+    if let Some(sid) = extract_session_id(headers) {
+        let ua = extract_user_agent(headers);
         state.lock().unwrap().register_session(sid, ua);
     }
+}
 
-    let url = request.url().to_string();
-    let method = request.method().clone();
+/// JSON error response helper.
+fn json_error(status: StatusCode, msg: &str) -> Response {
+    (
+        status,
+        [(axum::http::header::CONTENT_TYPE, "application/json")],
+        format!(r#"{{"error":"{}"}}"#, msg),
+    )
+        .into_response()
+}
 
-    match (method, url.as_str()) {
-        (Method::Get, "/health") => {
-            // Include a boot_id so the userscript can detect bnetswitch
-            // restarts and re-trigger the LFG history backfill. The id
-            // is generated once per process via OnceLock.
-            let boot_id = process_boot_id();
-            let body = format!(r#"{{"ok":true,"boot_id":"{}"}}"#, boot_id);
-            respond(request, 200, &body)?;
-        }
-        (Method::Get, "/userscript")
-        | (Method::Get, "/userscript.user.js")
-        | (Method::Get, "/bnetswitch-lfg.user.js") => {
-            // Serve the main userscript code. Two install paths:
-            //
-            //   1) Direct install (legacy):  user installs this in TM, TM
-            //      runs the auto-update check on its own (~daily) cadence.
-            //   2) Via loader (preferred): the loader userscript fetches
-            //      this URL on every page load, caches via GM_setValue,
-            //      eval's at document-start. No TM update prompts ever.
-            //
-            // Auth gate BYPASSED -- TM update-check fetches can't supply
-            // headers; the loader uses GM_xmlhttpRequest which also can't
-            // realistically supply custom auth without leaking the token.
-            // Localhost-only binding is the security boundary.
-            return serve_userscript(request, "bnetswitch-lfg.user.js");
-        }
-        (Method::Get, "/loader")
-        | (Method::Get, "/loader.user.js")
-        | (Method::Get, "/bnetswitch-lfg-loader.user.js") => {
-            // Tiny loader script: install once in Tampermonkey, then
-            // never touch it again. It auto-fetches the main script
-            // on every page load and caches it across sessions.
-            //
-            // The loader's @updateURL points at this same endpoint, so
-            // even the loader self-updates -- though the loader changes
-            // very rarely (it's ~280 lines of pure plumbing).
-            return serve_userscript(request, "bnetswitch-lfg-loader.user.js");
-        }
-        (Method::Post, "/lfg/message") => {
-            let body = read_body(&mut request)?;
-            let msg: LfgMessage = serde_json::from_str(&body)
-                .map_err(|e| anyhow::anyhow!("bad message body: {}", e))?;
-            state.lock().unwrap().upsert_message(msg);
-            respond(request, 202, r#"{"ok":true}"#)?;
-        }
-        (Method::Post, "/lfg/remove") => {
-            let body = read_body(&mut request)?;
-            #[derive(Deserialize)]
-            struct R {
-                message_id: String,
+/// JSON success response helper.
+fn json_ok(body: &str) -> Response {
+    (
+        StatusCode::OK,
+        [(axum::http::header::CONTENT_TYPE, "application/json")],
+        body.to_string(),
+    )
+        .into_response()
+}
+
+// ============================================================================
+// Handlers
+// ============================================================================
+
+async fn handle_health(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Response {
+    // Health is accessible without auth for basic connectivity checks,
+    // but we still register sessions if the header is present.
+    maybe_register_session(&state.lfg, &headers);
+    let boot_id = process_boot_id();
+    json_ok(&format!(r#"{{"ok":true,"boot_id":"{}"}}"#, boot_id))
+}
+
+async fn handle_userscript_main() -> Response {
+    serve_userscript("bnetswitch-lfg.user.js")
+}
+
+async fn handle_userscript_loader() -> Response {
+    serve_userscript("bnetswitch-lfg-loader.user.js")
+}
+
+async fn handle_lfg_message(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    body: String,
+) -> Response {
+    if !is_authorized(&headers) {
+        return json_error(StatusCode::UNAUTHORIZED, "missing or bad bearer token");
+    }
+    maybe_register_session(&state.lfg, &headers);
+    let msg: LfgMessage = match serde_json::from_str(&body) {
+        Ok(m) => m,
+        Err(e) => return json_error(StatusCode::BAD_REQUEST, &format!("bad message body: {}", e)),
+    };
+    state.lfg.lock().unwrap().upsert_message(msg);
+    (
+        StatusCode::ACCEPTED,
+        [(axum::http::header::CONTENT_TYPE, "application/json")],
+        r#"{"ok":true}"#.to_string(),
+    )
+        .into_response()
+}
+
+async fn handle_lfg_remove(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    body: String,
+) -> Response {
+    if !is_authorized(&headers) {
+        return json_error(StatusCode::UNAUTHORIZED, "missing or bad bearer token");
+    }
+    maybe_register_session(&state.lfg, &headers);
+    #[derive(Deserialize)]
+    struct R {
+        message_id: String,
+    }
+    let r: R = match serde_json::from_str(&body) {
+        Ok(r) => r,
+        Err(e) => return json_error(StatusCode::BAD_REQUEST, &format!("bad remove body: {}", e)),
+    };
+    state.lfg.lock().unwrap().remove_message(&r.message_id);
+    json_ok(r#"{"ok":true}"#)
+}
+
+async fn handle_lfg_active(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Response {
+    if !is_authorized(&headers) {
+        return json_error(StatusCode::UNAUTHORIZED, "missing or bad bearer token");
+    }
+    maybe_register_session(&state.lfg, &headers);
+    let s = state.lfg.lock().unwrap();
+    let body = serde_json::to_string(&s.messages).unwrap_or_else(|_| "[]".to_string());
+    json_ok(&body)
+}
+
+async fn handle_actions(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Response {
+    if !is_authorized(&headers) {
+        return json_error(StatusCode::UNAUTHORIZED, "missing or bad bearer token");
+    }
+    maybe_register_session(&state.lfg, &headers);
+    let session_id = extract_session_id(&headers);
+    let mut s = state.lfg.lock().unwrap();
+    s.prune_expired_actions();
+    let allow_drain = if s.sessions.is_empty() {
+        true
+    } else {
+        session_id
+            .as_deref()
+            .map(|sid| s.is_primary(sid))
+            .unwrap_or(false)
+    };
+    let actions: Vec<_> = if allow_drain {
+        s.action_queue.drain(..).collect()
+    } else {
+        Vec::new()
+    };
+    let body = serde_json::to_string(&actions).unwrap_or_else(|_| "[]".to_string());
+    json_ok(&body)
+}
+
+async fn handle_actions_ack(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    body: String,
+) -> Response {
+    if !is_authorized(&headers) {
+        return json_error(StatusCode::UNAUTHORIZED, "missing or bad bearer token");
+    }
+    maybe_register_session(&state.lfg, &headers);
+    #[derive(Deserialize)]
+    struct Ack {
+        id: String,
+        success: bool,
+        #[serde(default)]
+        error: Option<String>,
+    }
+    let ack: Ack = match serde_json::from_str(&body) {
+        Ok(a) => a,
+        Err(e) => return json_error(StatusCode::BAD_REQUEST, &format!("bad ack body: {}", e)),
+    };
+    if !ack.success {
+        eprintln!(
+            "[lfg] action {} failed: {}",
+            ack.id,
+            ack.error.unwrap_or_default()
+        );
+    }
+    json_ok(r#"{"ok":true}"#)
+}
+
+async fn handle_register(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    body: String,
+) -> Response {
+    if !is_authorized(&headers) {
+        return json_error(StatusCode::UNAUTHORIZED, "missing or bad bearer token");
+    }
+    #[derive(Deserialize)]
+    struct Reg {
+        session_id: String,
+        #[serde(default)]
+        user_agent: String,
+    }
+    let reg: Reg = match serde_json::from_str(&body) {
+        Ok(r) => r,
+        Err(e) => return json_error(StatusCode::BAD_REQUEST, &format!("bad register body: {}", e)),
+    };
+    let mut s = state.lfg.lock().unwrap();
+    s.register_session(reg.session_id.clone(), reg.user_agent);
+    let primary_id = s.primary_session().map(|p| p.session_id.clone());
+    let count = s.sessions.len();
+    drop(s);
+    let body = format!(
+        r#"{{"ok":true,"is_primary":{},"session_count":{}}}"#,
+        primary_id.as_deref() == Some(reg.session_id.as_str()),
+        count
+    );
+    json_ok(&body)
+}
+
+async fn handle_status(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    body: String,
+) -> Response {
+    if !is_authorized(&headers) {
+        return json_error(StatusCode::UNAUTHORIZED, "missing or bad bearer token");
+    }
+    maybe_register_session(&state.lfg, &headers);
+    let status: VoiceStatus = match serde_json::from_str(&body) {
+        Ok(s) => s,
+        Err(e) => return json_error(StatusCode::BAD_REQUEST, &format!("bad status body: {}", e)),
+    };
+    state.lfg.lock().unwrap().voice_status = status;
+    json_ok(r#"{"ok":true}"#)
+}
+
+async fn handle_voice_deleted(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    body: String,
+) -> Response {
+    if !is_authorized(&headers) {
+        return json_error(StatusCode::UNAUTHORIZED, "missing or bad bearer token");
+    }
+    maybe_register_session(&state.lfg, &headers);
+    #[derive(Deserialize)]
+    struct VoiceDeleted {
+        channel_id: String,
+    }
+    let upd: VoiceDeleted = match serde_json::from_str(&body) {
+        Ok(u) => u,
+        Err(e) => return json_error(StatusCode::BAD_REQUEST, &format!("bad voice/deleted body: {}", e)),
+    };
+    let mut s = state.lfg.lock().unwrap();
+    let before = s.messages.len();
+    s.messages
+        .retain(|m| m.voice_channel_id.as_deref() != Some(&upd.channel_id));
+    let removed = before - s.messages.len();
+    json_ok(&format!(r#"{{"ok":true,"removed":{}}}"#, removed))
+}
+
+async fn handle_voice_state(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    body: String,
+) -> Response {
+    if !is_authorized(&headers) {
+        return json_error(StatusCode::UNAUTHORIZED, "missing or bad bearer token");
+    }
+    maybe_register_session(&state.lfg, &headers);
+    #[derive(Deserialize)]
+    struct VoiceUpdate {
+        channel_id: String,
+        #[serde(default)]
+        users: Option<u32>,
+        #[serde(default)]
+        capacity: Option<u32>,
+    }
+    let upd: VoiceUpdate = match serde_json::from_str(&body) {
+        Ok(u) => u,
+        Err(e) => return json_error(StatusCode::BAD_REQUEST, &format!("bad voice/state body: {}", e)),
+    };
+    let mut s = state.lfg.lock().unwrap();
+    let mut updated = 0;
+    for msg in s.messages.iter_mut() {
+        if msg.voice_channel_id.as_deref() == Some(&upd.channel_id) {
+            msg.voice_channel_users = upd.users;
+            if upd.capacity.is_some() {
+                msg.voice_channel_capacity = upd.capacity;
             }
-            let r: R = serde_json::from_str(&body)
-                .map_err(|e| anyhow::anyhow!("bad remove body: {}", e))?;
-            state.lock().unwrap().remove_message(&r.message_id);
-            respond(request, 200, r#"{"ok":true}"#)?;
-        }
-        (Method::Get, "/lfg/active") => {
-            let s = state.lock().unwrap();
-            let body = serde_json::to_string(&s.messages)?;
-            respond(request, 200, &body)?;
-        }
-        (Method::Get, "/actions") => {
-            // Multi-browser leader election: the most recently active
-            // userscript session is the "primary" tab and it alone
-            // receives queued actions. Other tabs get an empty array.
-            //
-            // If no sessions are registered (older userscript without
-            // the X-Bnet-Session header), fall back to first-poller-
-            // wins so the system still works for single-browser use.
-            let session_id = request_session_id(&request);
-            let mut s = state.lock().unwrap();
-            s.prune_expired_actions();
-            let allow_drain = if s.sessions.is_empty() {
-                true
-            } else {
-                session_id.as_deref().map(|sid| s.is_primary(sid)).unwrap_or(false)
-            };
-            let actions: Vec<_> = if allow_drain {
-                s.action_queue.drain(..).collect()
-            } else {
-                Vec::new()
-            };
-            let body = serde_json::to_string(&actions)?;
-            respond(request, 200, &body)?;
-        }
-        (Method::Post, "/register") => {
-            // Userscript announces itself on boot + at intervals so we
-            // can elect the most-recently-active browser as primary.
-            let body = read_body(&mut request)?;
-            #[derive(Deserialize)]
-            struct Reg {
-                session_id: String,
-                #[serde(default)]
-                user_agent: String,
-            }
-            let reg: Reg = serde_json::from_str(&body)?;
-            let mut s = state.lock().unwrap();
-            s.register_session(reg.session_id.clone(), reg.user_agent);
-            let primary_id = s.primary_session().map(|p| p.session_id.clone());
-            let count = s.sessions.len();
-            drop(s);
-            let body = format!(
-                r#"{{"ok":true,"is_primary":{},"session_count":{}}}"#,
-                primary_id.as_deref() == Some(reg.session_id.as_str()),
-                count
-            );
-            respond(request, 200, &body)?;
-        }
-        (Method::Post, "/actions/ack") => {
-            let body = read_body(&mut request)?;
-            #[derive(Deserialize)]
-            struct Ack {
-                id: String,
-                success: bool,
-                #[serde(default)]
-                error: Option<String>,
-            }
-            let ack: Ack = serde_json::from_str(&body)?;
-            if !ack.success {
-                eprintln!(
-                    "[lfg] action {} failed: {}",
-                    ack.id,
-                    ack.error.unwrap_or_default()
-                );
-            }
-            respond(request, 200, r#"{"ok":true}"#)?;
-        }
-        (Method::Post, "/status") => {
-            let body = read_body(&mut request)?;
-            let status: VoiceStatus = serde_json::from_str(&body)?;
-            state.lock().unwrap().voice_status = status;
-            respond(request, 200, r#"{"ok":true}"#)?;
-        }
-        (Method::Post, "/voice/deleted") => {
-            // Voice channel was deleted on Discord (CHANNEL_DELETE
-            // gateway event). For LFG groups this almost always means
-            // "group disbanded" -- Discord auto-cleans empty VCs after
-            // the LFG bot's lifecycle ends. The associated LFG
-            // messages are no longer joinable; drop them from state
-            // so the TUI doesn't show stale rows for VCs that don't
-            // exist anymore.
-            //
-            // We also remove any voice_channel_users counts that the
-            // userscript already pushed; without this, a user could
-            // see "5/5" forever for a VC that no longer exists.
-            let body = read_body(&mut request)?;
-            #[derive(Deserialize)]
-            struct VoiceDeleted { channel_id: String }
-            let upd: VoiceDeleted = serde_json::from_str(&body)?;
-            let mut s = state.lock().unwrap();
-            let before = s.messages.len();
-            s.messages.retain(|m| {
-                m.voice_channel_id.as_deref() != Some(&upd.channel_id)
-            });
-            let removed = before - s.messages.len();
-            let body = format!(r#"{{"ok":true,"removed":{}}}"#, removed);
-            respond(request, 200, &body)?;
-        }
-        (Method::Post, "/voice/state") => {
-            // Real-time VC member-count updates streamed from the
-            // userscript's gateway tap. Keeps `voice_channel_users` /
-            // `voice_channel_capacity` on every LFG message that
-            // references this channel synced with live joins/leaves.
-            //
-            // Userscript pushes one of these per VOICE_STATE_UPDATE
-            // gateway event (filtered to channels we have outstanding
-            // LFG messages for, to keep traffic minimal).
-            let body = read_body(&mut request)?;
-            #[derive(Deserialize)]
-            struct VoiceUpdate {
-                channel_id: String,
-                #[serde(default)]
-                users: Option<u32>,
-                #[serde(default)]
-                capacity: Option<u32>,
-            }
-            let upd: VoiceUpdate = serde_json::from_str(&body)?;
-            let mut s = state.lock().unwrap();
-            let mut updated = 0;
-            for msg in s.messages.iter_mut() {
-                if msg.voice_channel_id.as_deref() == Some(&upd.channel_id) {
-                    msg.voice_channel_users = upd.users;
-                    if upd.capacity.is_some() {
-                        msg.voice_channel_capacity = upd.capacity;
-                    }
-                    updated += 1;
-                }
-            }
-            let body = format!(r#"{{"ok":true,"updated":{}}}"#, updated);
-            respond(request, 200, &body)?;
-        }
-        (Method::Options, _) => {
-            // CORS preflight from the userscript (tiny_http doesn't set
-            // CORS headers automatically). Allow everything localhost.
-            cors_respond(request, 204, "")?;
-        }
-        _ => {
-            respond(request, 404, r#"{"error":"not found"}"#)?;
+            updated += 1;
         }
     }
-    Ok(())
+    json_ok(&format!(r#"{{"ok":true,"updated":{}}}"#, updated))
 }
 
-fn is_authorized(req: &tiny_http::Request) -> bool {
-    req.headers().iter().any(|h| {
-        h.field.as_str().as_str().eq_ignore_ascii_case("authorization")
-            && h.value.as_str() == format!("Bearer {}", LFG_AUTH_TOKEN)
-    })
+// ============================================================================
+// SSE endpoint
+// ============================================================================
+
+/// Query parameters for the /events endpoint.
+#[derive(Deserialize, Default)]
+struct EventsQuery {
+    #[serde(default)]
+    token: Option<String>,
+    #[serde(default)]
+    session: Option<String>,
 }
 
-/// Extract the X-Bnet-Session header (userscript instance ID).
-fn request_session_id(req: &tiny_http::Request) -> Option<String> {
-    req.headers().iter().find_map(|h| {
-        if h.field.as_str().as_str().eq_ignore_ascii_case("x-bnet-session") {
-            Some(h.value.as_str().to_string())
-        } else {
-            None
+async fn handle_events(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(query): Query<EventsQuery>,
+) -> Response {
+    // Auth: check query param token OR Authorization header.
+    let authed_via_query = query
+        .token
+        .as_deref()
+        .map(|t| t == LFG_AUTH_TOKEN)
+        .unwrap_or(false);
+    if !authed_via_query && !is_authorized(&headers) {
+        return json_error(StatusCode::UNAUTHORIZED, "missing or bad bearer token");
+    }
+
+    // Register session from query param or header.
+    let session_id = query
+        .session
+        .clone()
+        .or_else(|| extract_session_id(&headers));
+    if let Some(ref sid) = session_id {
+        let ua = extract_user_agent(&headers);
+        state.lfg.lock().unwrap().register_session(sid.clone(), ua);
+    }
+
+    let lfg_state = state.lfg.clone();
+    let mut notify_rx = state.notify_tx.subscribe();
+
+    let stream = async_stream::stream! {
+        // Send initial boot event.
+        let boot_id = process_boot_id();
+        let boot_data = format!(r#"{{"boot_id":"{}"}}"#, boot_id);
+        yield Ok::<_, Infallible>(Event::default().event("boot").data(boot_data));
+
+        let keepalive_interval = Duration::from_secs(15);
+
+        loop {
+            // Wait for either a notification or keepalive timeout.
+            let _ = tokio::time::timeout(keepalive_interval, notify_rx.recv()).await;
+
+            // Touch session to prevent GC while SSE is live.
+            if let Some(ref sid) = session_id {
+                if let Ok(mut s) = lfg_state.lock() {
+                    if let Some(sess) = s.sessions.get_mut(sid) {
+                        sess.last_seen_at = now_ms();
+                    }
+                }
+            }
+
+            // Drain actions for the primary session.
+            let actions: Vec<LfgAction> = {
+                let mut s = match lfg_state.lock() {
+                    Ok(g) => g,
+                    Err(_) => break, // Mutex poisoned
+                };
+
+                s.prune_expired_actions();
+
+                let is_primary = if s.sessions.is_empty() {
+                    true
+                } else {
+                    session_id
+                        .as_deref()
+                        .map(|sid| s.is_primary(sid))
+                        .unwrap_or(false)
+                };
+
+                if is_primary {
+                    s.action_queue.drain(..).collect()
+                } else {
+                    Vec::new()
+                }
+            };
+
+            // Push each action as an SSE event.
+            for action in &actions {
+                if let Ok(json) = serde_json::to_string(action) {
+                    yield Ok::<_, Infallible>(Event::default().event("action").data(json));
+                }
+            }
+
+            // If no actions, send a keepalive comment.
+            if actions.is_empty() {
+                yield Ok::<_, Infallible>(Event::default().comment("keepalive"));
+            }
         }
-    })
+    };
+
+    Sse::new(stream).into_response()
 }
 
-fn request_user_agent(req: &tiny_http::Request) -> String {
-    req.headers()
-        .iter()
-        .find(|h| h.field.as_str().as_str().eq_ignore_ascii_case("user-agent"))
-        .map(|h| h.value.as_str().to_string())
-        .unwrap_or_default()
-}
-
-fn read_body(req: &mut tiny_http::Request) -> Result<String> {
-    // tiny_http's Request::as_reader returns a concrete type with its own
-    // read_to_string -- no need to bring std::io::Read into scope.
-    let mut buf = String::new();
-    std::io::Read::read_to_string(req.as_reader(), &mut buf)
-        .context("read request body")?;
-    Ok(buf)
-}
+// ============================================================================
+// Userscript serving
+// ============================================================================
 
 /// Locate the userscript file on disk and return it with proper
 /// JavaScript content-type. Tries several candidate paths to handle
 /// both development (run from source tree) and deployed (binary symlinked
 /// into ~/.local/bin) usage.
-fn serve_userscript(request: tiny_http::Request, filename: &str) -> Result<()> {
+fn serve_userscript(filename: &str) -> Response {
     let candidates = [
         // When running from the bnetswitch source tree directly:
         //   target/release/bnetswitch -> userscripts/<filename>
@@ -737,76 +924,24 @@ fn serve_userscript(request: tiny_http::Request, filename: &str) -> Result<()> {
 
     for path in &candidates {
         if let Ok(content) = std::fs::read_to_string(path) {
-            let response = Response::from_string(content)
-                .with_status_code(StatusCode(200))
-                .with_header(
-                    tiny_http::Header::from_bytes(
-                        "Content-Type",
-                        "application/javascript; charset=utf-8",
-                    )
-                    .unwrap(),
-                )
-                // Tampermonkey checks Content-Type to recognize userscripts.
-                // Also expose CORS so other tools can fetch it.
-                .with_header(
-                    tiny_http::Header::from_bytes("Access-Control-Allow-Origin", "*").unwrap(),
-                )
-                // Disable caching so Tampermonkey always sees fresh content.
-                .with_header(
-                    tiny_http::Header::from_bytes(
-                        "Cache-Control",
-                        "no-store, no-cache, must-revalidate",
-                    )
-                    .unwrap(),
-                );
-            request
-                .respond(response)
-                .context("respond /userscript")?;
-            return Ok(());
+            return (
+                StatusCode::OK,
+                [
+                    (axum::http::header::CONTENT_TYPE, "application/javascript; charset=utf-8"),
+                    (axum::http::header::CACHE_CONTROL, "no-store, no-cache, must-revalidate"),
+                ],
+                content,
+            )
+                .into_response();
         }
     }
 
-    let response = Response::from_string(r#"{"error":"userscript file not found on disk"}"#)
-        .with_status_code(StatusCode(404))
-        .with_header(
-            tiny_http::Header::from_bytes("Content-Type", "application/json").unwrap(),
-        );
-    request.respond(response).context("respond 404")?;
-    Ok(())
-}
-
-#[allow(dead_code)]  // referenced by handle_request, false-positive without main wire-in
-fn respond(req: tiny_http::Request, code: u16, body: &str) -> Result<()> {
-    let response = Response::from_string(body)
-        .with_status_code(StatusCode(code))
-        .with_header(
-            tiny_http::Header::from_bytes("Content-Type", "application/json").unwrap(),
-        )
-        // CORS: userscript runs in discord.com origin; we need to allow it.
-        .with_header(
-            tiny_http::Header::from_bytes("Access-Control-Allow-Origin", "*").unwrap(),
-        )
-        .with_header(
-            tiny_http::Header::from_bytes(
-                "Access-Control-Allow-Headers",
-                "authorization, content-type",
-            )
-            .unwrap(),
-        )
-        .with_header(
-            tiny_http::Header::from_bytes(
-                "Access-Control-Allow-Methods",
-                "GET, POST, OPTIONS",
-            )
-            .unwrap(),
-        );
-    req.respond(response).context("respond")?;
-    Ok(())
-}
-
-#[allow(dead_code)]
-fn cors_respond(req: tiny_http::Request, code: u16, body: &str) -> Result<()> {
-    respond(req, code, body)
+    (
+        StatusCode::NOT_FOUND,
+        [(axum::http::header::CONTENT_TYPE, "application/json")],
+        r#"{"error":"userscript file not found on disk"}"#.to_string(),
+    )
+        .into_response()
 }
 
 // ============================================================================

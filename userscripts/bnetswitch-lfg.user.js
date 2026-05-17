@@ -171,17 +171,16 @@
   // self has arrived, we're confidently NOT in voice (joining voice
   // generates a self VSU within ~1s; 12s is enough margin for slow
   // boot races). Flip undefined -> false then.
-  setTimeout(() => {
-    try {
-      if (unsafeWindow.__bnet_self_in_voice === undefined) {
-        unsafeWindow.__bnet_self_in_voice = false;
-        console.log(
-          "[bnetswitch-lfg] in-voice flag defaulted to false " +
-          "(no self VSU after 12s; likely RESUME without READY)"
-        );
-      }
-    } catch (_) {}
-  }, 12000);
+  // NOTE: we intentionally do NOT default __bnet_self_in_voice to false
+  // on a timeout. The previous 12s timeout was causing mid-call reloads
+  // when the gateway reconnect (forced 4000 close + RESUME) took longer
+  // than 12s -- the flag defaulted to false, the loader saw "not in
+  // voice", and reloaded the page, dropping the user from their call.
+  //
+  // Instead, we leave it `undefined` until an authoritative source sets
+  // it: READY processing (line ~309), RESUMED processing (line ~356),
+  // or a self-VSU event. The loader's isInVoice() treats `undefined` as
+  // `true` (safe/don't-reload), which is the correct conservative default.
 
   // ============================================================================
   // HTTP helper (talks to bnetswitch on localhost)
@@ -1725,9 +1724,16 @@
         __bnet_backfill_in_progress = false;
         return;
       }
-      // Wait for both auth token AND gateway to know about each watched channel.
+      // Wait for both auth token AND gateway to have populated the guild's
+      // channel cache (text AND voice channels). WATCHED_CHANNEL_IDS being
+      // known means the text channel exists, but voice channels referenced
+      // by LFG embeds are separate IDs populated by GUILD_CREATE. We use
+      // a heuristic: require at least 20 channels known (a healthy guild
+      // has hundreds) to avoid backfilling before voice channel metadata
+      // is available, which causes "#unknown" VC names and "?/?" capacity.
       const allKnown = WATCHED_CHANNEL_IDS.every((cid) => GW.channels.has(cid));
-      if (!__bnet_auth_token || !allKnown) {
+      const enoughChannels = GW.channels.size >= 20;
+      if (!__bnet_auth_token || !allKnown || !enoughChannels) {
         setTimeout(tryBackfill, 1000);
         return;
       }
@@ -1952,29 +1958,144 @@
   // setting up the action poller and voice status reporter.
   // ============================================================================
 
+  // ============================================================================
+  // SSE (Server-Sent Events) connection for push-based action delivery.
+  //
+  // Replaces the 2-second polling of GET /actions. The server holds the
+  // connection open and pushes events as they occur:
+  //   - "action" events: actions to execute (join VC, set nickname, etc.)
+  //   - "boot" events: server restart detection (triggers re-backfill)
+  //
+  // Falls back to HTTP polling if EventSource isn't available or the
+  // connection fails repeatedly (bnetswitch not running).
+  // ============================================================================
+  let sseRetryCount = 0;
+  const SSE_MAX_RETRY_DELAY_MS = 30000;
+  let sseSource = null;
+  let sseFallbackInterval = null;
+
+  function connectSSE() {
+    const url = `${BNETSWITCH_HOST}/events?token=${encodeURIComponent(BNETSWITCH_TOKEN)}&session=${encodeURIComponent(SESSION_ID)}`;
+
+    // EventSource from discord.com (HTTPS) to http://127.0.0.1 may be
+    // blocked by mixed-content policy in some browsers. We try it; if
+    // it fails, the fallback path enables HTTP polling which uses
+    // GM_xmlhttpRequest (bypasses CORS + mixed-content).
+    try {
+      sseSource = new EventSource(url);
+    } catch (e) {
+      warn("EventSource constructor failed:", e.message, "-- using HTTP polling fallback");
+      enablePollingFallback();
+      return;
+    }
+
+    sseSource.addEventListener("action", (event) => {
+      try {
+        const action = JSON.parse(event.data);
+        executeAction(action);
+      } catch (e) {
+        warn("SSE action parse/execute error:", e.message);
+      }
+    });
+
+    sseSource.addEventListener("boot", (event) => {
+      try {
+        const data = JSON.parse(event.data);
+        const boot = data.boot_id;
+        if (!boot) return;
+        const isFirstConnect = __bnet_last_boot_id === null;
+        const isRestart = !isFirstConnect && boot !== __bnet_last_boot_id;
+        __bnet_last_boot_id = boot;
+        if (isFirstConnect) {
+          // First SSE connect: bnetswitch's state is empty (it just
+          // started or we just connected). Trigger backfill so the
+          // LFG view is populated with recent history immediately.
+          log("SSE: first connect (boot_id=" + boot + "); scheduling backfill");
+          __bnet_backfilled_channels.clear();
+          __bnet_backfill_in_progress = false;
+          scheduleBackfill();
+          return;
+        }
+        if (isRestart) {
+          log("SSE: bnetswitch restarted (boot_id changed); re-backfilling");
+          __bnet_backfilled_channels.clear();
+          __bnet_backfill_in_progress = false;
+          scheduleBackfill();
+        }
+      } catch (e) {
+        warn("SSE boot event error:", e.message);
+      }
+    });
+
+    sseSource.onopen = () => {
+      log("SSE connected to bnetswitch");
+      sseRetryCount = 0;
+      // SSE is handling actions + session keepalive; disable fallbacks.
+      disablePollingFallback();
+    };
+
+    sseSource.onerror = () => {
+      // EventSource auto-reconnects, but if bnetswitch is down or
+      // mixed-content blocks the connection, it'll keep failing.
+      // After a few failures, fall back to HTTP polling.
+      sseRetryCount++;
+      if (sseRetryCount >= 3) {
+        // Kill the EventSource to stop its auto-reconnect spam.
+        if (sseSource) {
+          sseSource.close();
+          sseSource = null;
+        }
+        enablePollingFallback();
+      }
+    };
+  }
+
+  let sseFallbackActionInterval = null;
+  let sseFallbackRegisterInterval = null;
+
+  function enablePollingFallback() {
+    if (sseFallbackActionInterval) return; // already active
+    log("enabling HTTP polling fallback (SSE unavailable)");
+    sseFallbackActionInterval = setInterval(pollActions, ACTION_POLL_INTERVAL_MS);
+    sseFallbackRegisterInterval = setInterval(registerSession, SESSION_REGISTER_INTERVAL_MS);
+    // Also do an immediate register so we don't wait 20s for leader election.
+    registerSession();
+  }
+
+  function disablePollingFallback() {
+    if (sseFallbackActionInterval) {
+      clearInterval(sseFallbackActionInterval);
+      sseFallbackActionInterval = null;
+    }
+    if (sseFallbackRegisterInterval) {
+      clearInterval(sseFallbackRegisterInterval);
+      sseFallbackRegisterInterval = null;
+    }
+  }
+
   function start() {
-    log("bnetswitch LFG bridge starting (v0.9.1, op 14 lazy-guild voice subscribe)");
+    log("bnetswitch LFG bridge starting (v0.9.9, SSE push + gateway tap)");
     log("server:", BNETSWITCH_HOST);
     log("watched channels:", WATCHED_CHANNEL_IDS.join(", ") || "all");
 
-    bnetRequest("GET", "/health")
-      .then(() => log("bnetswitch reachable"))
-      .catch((e) =>
-        warn("bnetswitch not reachable yet:", e.message, "(will keep trying)")
-      );
+    // Primary action delivery via SSE (push, ~0 latency).
+    connectSSE();
 
-    setInterval(pollActions, ACTION_POLL_INTERVAL_MS);
-    setInterval(reportVoiceStatus, 5000);
-    // Poll boot_id every 5s so we re-backfill within 5s of bnetswitch
-    // restart. Initial call seeds __bnet_last_boot_id without action.
+    // Voice status: still push-based (us -> server), reduced to 30s.
+    // The SSE connection's keepalive implicitly tells the server we're
+    // alive; voice status is just supplemental metadata.
+    setInterval(reportVoiceStatus, 30000);
+
+    // Boot-id detection is handled by the SSE "boot" event now.
+    // Keep a slow fallback poll in case SSE never connects.
     pollBootId();
-    setInterval(pollBootId, 5000);
-    // Multi-browser leader election: register this session at boot
-    // and re-register periodically (and on visibility change) so the
-    // most-recently-active tab keeps "primary" status. Other tabs
-    // remain useful for ingestion + backfill but don't execute joins.
+    setInterval(pollBootId, 30000);
+
+    // Session registration: the SSE connection URL includes session=<id>
+    // and the server registers/refreshes on every keepalive read. Still
+    // do an explicit register at boot for immediate leader election.
     registerSession();
-    setInterval(registerSession, SESSION_REGISTER_INTERVAL_MS);
+    // Re-register on tab focus so switching tabs promotes this one.
     document.addEventListener("visibilitychange", () => {
       if (document.visibilityState === "visible") registerSession();
     });

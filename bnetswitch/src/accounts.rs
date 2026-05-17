@@ -35,6 +35,13 @@ pub struct AppConfig {
     /// newly added account.
     #[serde(default)]
     pub pending_merge_emails: Vec<String>,
+    /// Safety snapshot of SavedAccountNames taken at the moment `add_new_account`
+    /// clears the list. If `save_current` produces a shorter merged list than
+    /// this snapshot, something went wrong (Battle.net didn't fully restore,
+    /// user pressed `s` too early, etc.) and we use the snapshot as the floor.
+    /// Cleared alongside `pending_merge_emails` on successful save.
+    #[serde(default)]
+    pub pending_snapshot_emails: Vec<String>,
     /// Maximum age in seconds of the Wine registry's `Launch Options\Pro`
     /// section for which we'll attempt a "warm launch" (spawn OW directly
     /// using the existing Battle.net-written auth tokens rather than
@@ -96,6 +103,7 @@ impl Default for AppConfig {
             auto_launch: true,
             accounts: HashMap::new(),
             pending_merge_emails: Vec::new(),
+            pending_snapshot_emails: Vec::new(),
             warm_launch_ttl_secs: default_warm_launch_ttl(),
             discord_nickname_sync_guilds: Vec::new(),
             lfg_stale_threshold_secs: default_lfg_stale_secs(),

@@ -293,6 +293,20 @@ fn fetch_with_retry(battletag: &str, force: bool) -> Result<RoleRanks, String> {
     Err(last_err)
 }
 
+/// A destructive action awaiting user confirmation. The TUI shows a
+/// warning in the status bar and waits for Y/N before proceeding.
+#[derive(Debug, Clone)]
+enum PendingAction {
+    /// Switch to a different account (kills Battle.net + OW).
+    Switch { email: String },
+    /// Add New Account workflow (clears SavedAccountNames, relaunches).
+    AddNew,
+    /// Kill Battle.net processes (soft kill).
+    Kill,
+    /// Aggressive kill (Battle.net + wineserver + Lutris).
+    KillAggressive,
+}
+
 /// Application state.
 struct App {
     /// Detected Battle.net installation.
@@ -315,6 +329,10 @@ struct App {
     editing_placement: bool,
     /// Buffer for placement input ("T Diamond 3 12" etc.).
     placement_input: String,
+    /// Pending destructive action awaiting confirmation. When set, the
+    /// status bar shows a "press Y to confirm, any other key to cancel"
+    /// prompt. The next keypress either executes or cancels.
+    pending_confirm: Option<PendingAction>,
     /// Whether to quit.
     should_quit: bool,
     /// Rank cache keyed by email. Updated as the background fetch worker
@@ -351,10 +369,18 @@ struct App {
     /// scroll_offset` because each LFG entry spans 2 terminal rows.
     /// None until the first LFG render.
     lfg_view_bounds: Option<LfgViewBounds>,
+    /// Message IDs in the order they were rendered last frame. Used by
+    /// click-to-join so the click resolves to the SAME entry the user
+    /// saw, even if the list re-sorts between render and click.
+    lfg_rendered_ids: Vec<String>,
     /// Shared LFG state populated by the userscript via the local HTTP
     /// server. None when the LFG server failed to bind (e.g., port
     /// already in use); UI hides the panel in that case.
     lfg_state: Option<std::sync::Arc<std::sync::Mutex<lfg::LfgState>>>,
+
+    /// SSE notifier: wakes any connected EventSource clients when actions
+    /// are enqueued. None when the LFG server isn't running.
+    lfg_notifier: Option<tokio::sync::broadcast::Sender<()>>,
 
     /// Detected terminal capabilities (graphics protocol, tmux,
     /// TTY-or-not). Captured once at startup; used to decide whether
@@ -440,6 +466,7 @@ impl App {
             nickname_input: String::new(),
             editing_placement: false,
             placement_input: String::new(),
+            pending_confirm: None,
             should_quit: false,
             ranks_by_email: HashMap::new(),
             fetching_emails: std::collections::HashSet::new(),
@@ -450,7 +477,9 @@ impl App {
             lfg_list_state: ListState::default(),
             lfg_selected_message_id: None,
             lfg_view_bounds: None,
+            lfg_rendered_ids: Vec::new(),
             lfg_state: None,
+            lfg_notifier: None,
             term_caps: caps,
             rank_icons,
         }
@@ -459,8 +488,13 @@ impl App {
     /// Wire the LFG server's shared state into the App so the LFG view
     /// can read messages and the 'g'-Enter handler can enqueue actions.
     /// Called once after `LfgServer::start()` succeeds in main.
-    fn attach_lfg(&mut self, state: std::sync::Arc<std::sync::Mutex<lfg::LfgState>>) {
+    fn attach_lfg(
+        &mut self,
+        state: std::sync::Arc<std::sync::Mutex<lfg::LfgState>>,
+        notify_tx: tokio::sync::broadcast::Sender<()>,
+    ) {
         self.lfg_state = Some(state);
+        self.lfg_notifier = Some(notify_tx);
     }
 
     /// Number of LFG messages currently in the bridge's store. Used by
@@ -694,6 +728,12 @@ impl App {
             // this via SPA routing; no DOM lookup needed.
             voice_channel_url: entry.voice_channel_url.clone(),
         });
+        drop(guard);
+        // Wake any SSE clients so the action is delivered immediately
+        // instead of waiting for the next keepalive cycle.
+        if let Some(ref n) = self.lfg_notifier {
+            let _ = n.send(());
+        }
 
         Ok(Some(label))
     }
@@ -997,6 +1037,11 @@ impl App {
                 nickname: nickname.clone(),
             });
         }
+        drop(guard);
+        // Wake SSE clients so nickname actions are delivered immediately.
+        if let Some(ref n) = self.lfg_notifier {
+            let _ = n.send(());
+        }
         self.status = format!(
             "{} | Discord nickname queue: '{}' -> {} guild(s)",
             self.status,
@@ -1063,6 +1108,15 @@ impl App {
     /// order preserved.
     fn add_new_account(&mut self) -> Result<()> {
         let on_disk = config::read_saved_accounts(&self.install.config_path)?;
+
+        // Safety snapshot: if this is the FIRST `a` press (no pending
+        // emails yet), save the full current account list as a floor.
+        // save_current will refuse to produce a merged list shorter than
+        // this snapshot, preventing the "accidental `a` then `s` before
+        // login completes wipes most accounts" bug.
+        if self.app_config.pending_snapshot_emails.is_empty() && !on_disk.is_empty() {
+            self.app_config.pending_snapshot_emails = on_disk.clone();
+        }
 
         // Merge — never overwrite. This is the critical bug fix vs an
         // earlier version that did `pending = on_disk`, which would clobber
@@ -1140,6 +1194,21 @@ impl App {
                 }
             }
 
+            // Safety check: if the merged list is shorter than the
+            // snapshot taken at `add_new_account` time, something went
+            // wrong (user pressed `s` before Battle.net finished
+            // logging in, or Battle.net didn't restore accounts). Use
+            // the snapshot as a floor -- add back any emails from the
+            // snapshot that aren't already in merged.
+            let snapshot = &self.app_config.pending_snapshot_emails;
+            if !snapshot.is_empty() && merged.len() < snapshot.len() {
+                for email in snapshot {
+                    if !merged.contains(email) {
+                        merged.push(email.clone());
+                    }
+                }
+            }
+
             if merged.is_empty() {
                 self.status =
                     "No new account detected and no pending accounts to restore.".to_string();
@@ -1154,6 +1223,7 @@ impl App {
             self.refresh_active_battletag();
 
             self.app_config.pending_merge_emails.clear();
+            self.app_config.pending_snapshot_emails.clear();
             self.app_config.save()?;
 
             match new_email {
@@ -1798,7 +1868,7 @@ fn main() -> Result<()> {
             // Hand the shared LFG state to App so the LFG view can read
             // messages and the join-action hotkey can enqueue work for
             // the userscript.
-            app.attach_lfg(s.state.clone());
+            app.attach_lfg(s.state.clone(), s.notify_tx.clone());
             app.status = format!(
                 "LFG bridge listening on :{}. Press 'g' to toggle LFG view.",
                 lfg::LFG_PORT
@@ -1962,12 +2032,14 @@ fn run_tui(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut App)
                 && app.view == View::Lfg
             {
                 if let Some(visible_idx) = app.row_index_at_click(mouse.column, mouse.row) {
-                    let ids = app.lfg_visible_message_ids();
-                    if let Some(id) = ids.get(visible_idx).cloned() {
+                    // Use the message IDs captured at render time, NOT a
+                    // fresh recomputation. The list may have re-sorted
+                    // between the render and this click; using the fresh
+                    // list would map the click to a different entry than
+                    // what the user visually clicked on.
+                    if let Some(id) = app.lfg_rendered_ids.get(visible_idx).cloned() {
                         app.lfg_selected_message_id = Some(id);
                         app.lfg_list_state.select(Some(visible_idx));
-                        // Fire join action immediately. Same path as
-                        // the 'j' keybind so behavior matches.
                         let _ = app.enqueue_join_for_selected_lfg();
                     }
                 }
@@ -2015,6 +2087,60 @@ fn run_tui(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut App)
                         app.placement_input.push(c);
                     }
                     _ => {}
+                }
+                continue;
+            }
+
+            // ---- confirmation prompt for destructive actions ----
+            // When pending_confirm is set, the next keypress either
+            // confirms (y/Y) or cancels (anything else).
+            if let Some(action) = app.pending_confirm.take() {
+                match key.code {
+                    KeyCode::Char('y') | KeyCode::Char('Y') => {
+                        match action {
+                            PendingAction::Switch { email } => {
+                                // Re-select the account and execute the switch.
+                                // The selection may have moved, so find the row.
+                                let rows = app.displayed_accounts();
+                                if let Some(idx) = rows.iter().position(|r| r.email == email) {
+                                    app.list_state.select(Some(idx));
+                                    if let Err(e) = app.switch_to_selected() {
+                                        app.status = format!("Error: {}", e);
+                                    }
+                                } else {
+                                    app.status = format!("{} no longer in account list.", email);
+                                }
+                            }
+                            PendingAction::AddNew => {
+                                if let Err(e) = app.add_new_account() {
+                                    app.status = format!("Add new failed: {}", e);
+                                }
+                            }
+                            PendingAction::Kill => {
+                                match switcher::kill_bnet_processes() {
+                                    Ok(_) => {
+                                        app.status = "Killed Battle.net launcher, Agent, and any running games.".to_string();
+                                    }
+                                    Err(e) => {
+                                        app.status = format!("Kill failed: {}", e);
+                                    }
+                                }
+                            }
+                            PendingAction::KillAggressive => {
+                                match switcher::kill_bnet_aggressive(&app.install) {
+                                    Ok(_) => {
+                                        app.status = "Killed Battle.net + wineserver + Lutris wrapper.".to_string();
+                                    }
+                                    Err(e) => {
+                                        app.status = format!("Kill failed: {}", e);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    _ => {
+                        app.status = "Cancelled.".to_string();
+                    }
                 }
                 continue;
             }
@@ -2093,7 +2219,19 @@ fn run_tui(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut App)
                 KeyCode::Enter => {
                     match app.view {
                         View::Accounts => {
-                            if let Err(e) = app.switch_to_selected() {
+                            // Guard: if a game is running and the selected
+                            // account isn't already active, require confirmation.
+                            let row = app.selected_row();
+                            let needs_switch = row.as_ref().map(|r| !matches!(r.state, AccountState::Active)).unwrap_or(false);
+                            if needs_switch && switcher::is_game_running() {
+                                let email = row.unwrap().email.clone();
+                                let name = app.app_config.display_name(&email);
+                                app.pending_confirm = Some(PendingAction::Switch { email });
+                                app.status = format!(
+                                    "GAME IS RUNNING. Switch to {} will kill Overwatch. Press Y to confirm, any other key to cancel.",
+                                    name
+                                );
+                            } else if let Err(e) = app.switch_to_selected() {
                                 app.status = format!("Error: {}", e);
                             }
                         }
@@ -2264,7 +2402,10 @@ fn run_tui(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut App)
                 KeyCode::Char('a') => {
                     // Add New Account: clear SavedAccountNames, relaunch
                     // Battle.net so the user gets a blank login screen.
-                    if let Err(e) = app.add_new_account() {
+                    if switcher::is_game_running() {
+                        app.pending_confirm = Some(PendingAction::AddNew);
+                        app.status = "GAME IS RUNNING. Add New Account will kill Overwatch and clear all saved accounts. Press Y to confirm, any other key to cancel.".to_string();
+                    } else if let Err(e) = app.add_new_account() {
                         app.status = format!("Add new failed: {}", e);
                     }
                 }
@@ -2277,29 +2418,37 @@ fn run_tui(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut App)
                 }
                 KeyCode::Char('x') => {
                     // Kill Battle.net + Agent + any running Blizzard games.
-                    // Doesn't touch wineserver; faster than 'X' (aggressive).
-                    match switcher::kill_bnet_processes() {
-                        Ok(_) => {
-                            app.status =
-                                "Killed Battle.net launcher, Agent, and any running games.".to_string();
-                        }
-                        Err(e) => {
-                            app.status = format!("Kill failed: {}", e);
+                    if switcher::is_game_running() {
+                        app.pending_confirm = Some(PendingAction::Kill);
+                        app.status = "GAME IS RUNNING. Kill will terminate Overwatch. Press Y to confirm, any other key to cancel.".to_string();
+                    } else {
+                        match switcher::kill_bnet_processes() {
+                            Ok(_) => {
+                                app.status =
+                                    "Killed Battle.net launcher, Agent, and any running games.".to_string();
+                            }
+                            Err(e) => {
+                                app.status = format!("Kill failed: {}", e);
+                            }
                         }
                     }
                 }
                 KeyCode::Char('X') => {
                     // Aggressive kill: also tears down wineserver + lutris
-                    // wrapper for the prefix. Slower; use when you want a
-                    // truly clean shutdown.
-                    match switcher::kill_bnet_aggressive(&app.install) {
-                        Ok(_) => {
-                            app.status =
-                                "Killed Battle.net + wineserver + Lutris wrapper for prefix."
-                                    .to_string();
-                        }
-                        Err(e) => {
-                            app.status = format!("Aggressive kill failed: {}", e);
+                    // wrapper for the prefix.
+                    if switcher::is_game_running() {
+                        app.pending_confirm = Some(PendingAction::KillAggressive);
+                        app.status = "GAME IS RUNNING. Aggressive kill will terminate Overwatch + wineserver. Press Y to confirm, any other key to cancel.".to_string();
+                    } else {
+                        match switcher::kill_bnet_aggressive(&app.install) {
+                            Ok(_) => {
+                                app.status =
+                                    "Killed Battle.net + wineserver + Lutris wrapper for prefix."
+                                        .to_string();
+                            }
+                            Err(e) => {
+                                app.status = format!("Aggressive kill failed: {}", e);
+                            }
                         }
                     }
                 }
@@ -3134,6 +3283,11 @@ fn render_lfg_view(f: &mut ratatui::Frame, area: Rect, app: &mut App) {
             entries_extra_descs.push(extras);
         }
     }
+
+    // Snapshot the rendered message IDs in display order so click-to-join
+    // resolves to the SAME entry the user saw, even if the list re-sorts
+    // between this render and the click event.
+    app.lfg_rendered_ids = entries.iter().map(|(m, _)| m.message_id.clone()).collect();
 
     // ---- Stable cursor: derive list_state index from message_id ----
     //

@@ -154,16 +154,16 @@
           return;
         }
         if (!cached) {
-          // First-ever load with no prior cache. Old code never ran, so
-          // we can apply immediately.
+          // First-ever load with no prior cache. Old code never ran.
+          // Still check voice state -- user might have installed the
+          // loader while already in a Discord call.
           console.log(
             "[bnetswitch-loader] first-time install cached (" +
               newHash +
-              "), reloading in " +
-              (RELOAD_GRACE_MS / 1000) +
-              "s..."
+              ")"
           );
-          scheduleReload();
+          updatePending = true;
+          tryApplyUpdate();
         } else {
           console.log(
             "[bnetswitch-loader] new version cached: " +

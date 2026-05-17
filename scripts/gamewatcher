@@ -118,10 +118,15 @@ activate_pid() {
         echo "  [warn] gamemoded register failed (daemon down?)"
     fi
 
-    # 2. Pin to CCD0. taskset -p sets affinity on a running PID.
+    # 2. Pin to CCD0. taskset -apc sets affinity on ALL threads of
+    #    a running PID. Plain -pc only sets the main thread, leaving
+    #    child threads (OW has ~100) spread across both CCDs where
+    #    cross-CCD cache misses add 40-80ns per access.
     if [[ -n "$CCD0_CPUS" ]]; then
-        if taskset -pc "$CCD0_CPUS" "$pid" > /dev/null 2>&1; then
-            echo "  [pin] pid=$pid -> cpus=$CCD0_CPUS"
+        if taskset -apc "$CCD0_CPUS" "$pid" > /dev/null 2>&1; then
+            local nthreads
+            nthreads=$(ls "/proc/$pid/task/" 2>/dev/null | wc -l)
+            echo "  [pin] pid=$pid ($nthreads threads) -> cpus=$CCD0_CPUS"
         else
             echo "  [warn] taskset failed for pid=$pid (process exited?)"
         fi
