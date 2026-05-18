@@ -17,3 +17,6 @@ app/tix/build-tsan/
 app/tix/compile_commands.json
 app/tix/vendor/sqlite/sqlite3.c
 app/tix/vendor/sqlite/sqlite3.h
+
+# bnetswitch (Rust build artifacts)
+bnetswitch/target/

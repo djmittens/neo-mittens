@@ -453,6 +453,64 @@ build_tix() {
 
 build_tix
 
+# 4d) Build bnetswitch (Linux-only Battle.net account switcher).
+#     Compiles with cargo if available, then symlinks the release binary
+#     into powerplant/ so it lands on PATH alongside other neo-mittens
+#     utilities. Skips entirely on non-Linux since bnetswitch depends on
+#     Wine/Lutris/Battle.net being installed in a Linux/Hyprland setup.
+build_bnetswitch() {
+  local bnet_src="$SCRIPT_DIR/bnetswitch"
+  local bnet_target="$bnet_src/target/release/bnetswitch"
+  local pp_link="$SCRIPT_DIR/powerplant/bnetswitch"
+
+  # Linux-only: bnetswitch is a Battle.net-on-Linux launcher.
+  if [ "$(uname -s)" != "Linux" ]; then
+    echo "SKIP: bnetswitch is Linux-only ($(uname -s) detected)"
+    return 0
+  fi
+
+  if [ ! -d "$bnet_src" ]; then
+    echo "SKIP: $bnet_src not present"
+    return 0
+  fi
+
+  # Resolve cargo. Most users will have it on PATH; if not, fall back to
+  # the standard rustup install location at ~/.cargo/bin/.
+  local cargo_cmd=""
+  if command -v cargo >/dev/null 2>&1; then
+    cargo_cmd="cargo"
+  elif [ -x "$HOME/.cargo/bin/cargo" ]; then
+    cargo_cmd="$HOME/.cargo/bin/cargo"
+  fi
+
+  if [ -z "$cargo_cmd" ]; then
+    echo "SKIP: cargo not found; install rustup to build bnetswitch"
+    echo "      (curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh)"
+    return 0
+  fi
+
+  # Build (release). Quiet output but propagate failure as a warning —
+  # we don't want to fail the whole bootstrap over a Rust compile.
+  echo "Building bnetswitch (release)..."
+  if (cd "$bnet_src" && "$cargo_cmd" build --release --quiet 2>&1); then
+    echo "OK: bnetswitch built"
+  else
+    echo "WARN: bnetswitch build failed; binary will not be exposed"
+    return 0
+  fi
+
+  # Symlink the binary into powerplant/ so it lands on PATH via the
+  # existing managed PATH block. Re-symlink each run so it tracks the
+  # latest target/release/bnetswitch.
+  if [ -x "$bnet_target" ]; then
+    link_symlink "$bnet_target" "$pp_link"
+  else
+    echo "WARN: $bnet_target missing after build"
+  fi
+}
+
+build_bnetswitch
+
 # 4c) Add repo root and app/ to PYTHONPATH for ralph package imports
 install_pythonpath_block "$HOME/.profile" "$SCRIPT_DIR"
 install_pythonpath_block "$ZSHRC_PATH" "$SCRIPT_DIR"

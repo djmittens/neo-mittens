@@ -73,6 +73,7 @@ require("lazy").setup({
   {
     dir = "~/src/valkyria/editors",
     name = "valk-editors",
+    enabled = vim.loop.fs_stat(vim.fn.expand('~/src/valkyria/editors')) ~= nil,
     build = "cc -shared -o valk.so -fPIC -I src src/parser.c && cp valk.so " .. vim.fn.stdpath("data") .. "/site/parser/valk.so",
   },
   {

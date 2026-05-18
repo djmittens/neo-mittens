@@ -1,0 +1,97 @@
+#!/bin/bash
+# gamelaunch - universal low-latency game launcher wrapper
+#
+# Bundles the same stack bnetswitch applies for Battle.net into a single
+# command you can use for any game runner.
+#
+# Usage:
+#   ~/.local/bin/gamelaunch <command> [args...]
+#
+# For Steam games:
+#   right-click game -> Properties -> Launch Options:
+#     /home/xyzyx/.local/bin/gamelaunch %command%
+#
+# For Heroic / Bottles / direct binaries:
+#   just prepend `gamelaunch ` to the command.
+#
+# What it does:
+#   1. gamemoderun       -> registers process with gamemoded
+#                           (CPU governor performance, ioprio, pinning)
+#   2. taskset -c CCD0   -> pins to higher-binned CCD on dual-CCD AMD
+#                           (cores 0-5 + SMT siblings 12-17 on 9900X)
+#   3. NVAPI/Reflex env  -> enables VK_NV_low_latency2 path on NVIDIA
+#   4. MANGOHUD=1        -> overlay on (toggle visible: RShift+F12)
+#
+# To bypass for one launch (e.g., to compare with/without):
+#   GAMELAUNCH_BYPASS=1 gamelaunch <command>
+
+set -e
+
+if [[ "${GAMELAUNCH_BYPASS:-0}" == "1" ]]; then
+    exec "$@"
+fi
+
+# ============================================================================
+# Detect prerequisites; degrade gracefully if anything's missing.
+# ============================================================================
+WRAPPERS=()
+if command -v gamemoderun >/dev/null; then
+    WRAPPERS+=(gamemoderun)
+fi
+if command -v taskset >/dev/null; then
+    # Detect higher-binned CCD on AMD chiplet CPUs by reading CPPC2 perf
+    # rankings. Falls back silently to no-pinning on single-CCD systems.
+    PIN_CPUS=$(python3 - <<'PY'
+import os, glob
+domains = {}
+for cpudir in glob.glob("/sys/devices/system/cpu/cpu[0-9]*"):
+    cpu = int(os.path.basename(cpudir)[3:])
+    p = os.path.join(cpudir, "cache/index3/shared_cpu_list")
+    if os.path.exists(p):
+        domains.setdefault(open(p).read().strip(), []).append(cpu)
+
+if len(domains) < 2:
+    raise SystemExit  # single-CCD, nothing to pin
+
+best = (-1, [])
+for _, cpus in domains.items():
+    perfs = []
+    for c in cpus:
+        f = f"/sys/devices/system/cpu/cpu{c}/cpufreq/amd_pstate_highest_perf"
+        if os.path.exists(f):
+            perfs.append(int(open(f).read()))
+    if not perfs:
+        continue
+    median = sorted(perfs)[len(perfs)//2]
+    if median > best[0]:
+        best = (median, sorted(cpus))
+
+if best[1]:
+    cpus = best[1]
+    ranges, i = [], 0
+    while i < len(cpus):
+        s = e = cpus[i]
+        while i+1 < len(cpus) and cpus[i+1] == e+1:
+            e = cpus[i+1]; i += 1
+        ranges.append(f"{s}-{e}" if s != e else str(s))
+        i += 1
+    print(",".join(ranges))
+PY
+    )
+    if [[ -n "$PIN_CPUS" ]]; then
+        WRAPPERS+=(taskset -c "$PIN_CPUS")
+    fi
+fi
+
+# ============================================================================
+# Reflex / NVAPI / overlay env (only set if not already configured).
+# ============================================================================
+export PROTON_FORCE_NVAPI="${PROTON_FORCE_NVAPI:-1}"
+export DXVK_ENABLE_NVAPI="${DXVK_ENABLE_NVAPI:-1}"
+export MANGOHUD="${MANGOHUD:-1}"
+
+# ============================================================================
+# Exec the wrapped command. exec replaces this shell so the wrappers'
+# pid is gamemoderun's pid (gamemode registers based on argv[0] pid).
+# ============================================================================
+exec "${WRAPPERS[@]}" "$@"

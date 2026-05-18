@@ -1,0 +1,57 @@
+---
+# site.yml - top-level playbook for neo-mittens gaming-desktop config.
+#
+# Run with:
+#   ansible-playbook site.yml --ask-become-pass
+#   ansible-playbook site.yml --check                # dry-run
+#   ansible-playbook site.yml --tags packages        # specific role
+#
+# Or via the wrapper:
+#   ../install-gaming.sh
+#
+# The wrapper handles ansible install + nice flags + reboot prompt.
+
+- name: Configure gaming desktop (Arch + NVIDIA + Hyprland)
+  hosts: gaming_desktops
+  gather_facts: true
+
+  pre_tasks:
+    # Sanity: don't accidentally apply this to a non-Arch host.
+    - name: Verify host is Arch Linux
+      ansible.builtin.assert:
+        that:
+          - ansible_facts['os_family'] == 'Archlinux'
+        fail_msg: >
+          install-gaming target must be Arch Linux.
+          Detected: {{ ansible_facts['os_family'] }} ({{ ansible_facts['distribution'] }}).
+          On the server / Macs, run ../bootstrap.sh instead -- this playbook
+          applies gaming-desktop-only config (mitigations=off, NVIDIA tuning,
+          gamewatcher) which is wrong for those hosts.
+
+    - name: Show target hostname for confirmation
+      ansible.builtin.debug:
+        msg: "Configuring host '{{ ansible_facts['hostname'] }}' as user '{{ target_user }}'"
+
+  roles:
+    - role: system_packages
+      tags: [packages]
+    - role: gaming_kernel
+      tags: [kernel, system]
+    - role: gamemode
+      tags: [gamemode, system]
+    - role: gamewatcher
+      tags: [gamewatcher, user]
+    - role: bnetswitch
+      tags: [bnetswitch, user]
+
+  post_tasks:
+    - name: Final summary
+      ansible.builtin.debug:
+        msg:
+          - "Configuration complete."
+          - "If kernel cmdline or NVIDIA modprobe changed, REBOOT to activate."
+          - "Verify after reboot:"
+          - "  cat /proc/cmdline | tr ' ' '\\n' | grep -E 'mitigations|tsc'"
+          - "  cat /proc/driver/nvidia/params | grep PageAttribute"
+          - "  systemctl --user status gamewatcher"
+          - "  pkexec /usr/lib/gamemode/cpugovctl get  # should print without prompt"

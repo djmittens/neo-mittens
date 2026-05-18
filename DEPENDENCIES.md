@@ -41,6 +41,8 @@ This document lists the hard dependencies required for neo-mittens to function p
 | **waybar** | Optional | Status bar for Hyprland | `pacman -S waybar` |
 | **wofi** | Optional | Application launcher | `pacman -S wofi` |
 | **rofi** | Optional | Alternative launcher (X11) | `pacman -S rofi` |
+| **rustup / cargo** | Optional | Build `bnetswitch` (Battle.net account switcher) | `curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \| sh` |
+| **lutris + wine-staging** | Optional | Runtime for `bnetswitch` (Battle.net under Wine) | `pacman -S lutris wine-staging` |
 
 ## Verification
 

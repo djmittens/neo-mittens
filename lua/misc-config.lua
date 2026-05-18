@@ -1,7 +1,15 @@
 vim.cmd.colorscheme("gruvbox")
 
+-- LSP reference highlights — subtle background + underline
+vim.api.nvim_set_hl(0, 'LspReferenceText',  { bg = '#3c3836', underline = true })
+vim.api.nvim_set_hl(0, 'LspReferenceRead',  { bg = '#3c3836', italic = true })
+vim.api.nvim_set_hl(0, 'LspReferenceWrite', { bg = '#3c3836', underline = true, bold = true })
+
 -- Auto-source project-local config (.nvim.lua)
 vim.o.exrc = true
+
+-- CursorHold fires after this many ms idle — controls document highlight delay
+vim.o.updatetime = 300
 
 -- Core navigation improvements - center cursor after jumps
 vim.keymap.set("n", "<C-u>", "<C-u>zz", { desc = "Page up and center" })

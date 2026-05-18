@@ -1,0 +1,13 @@
+---
+# Variables applied to ALL hosts in the inventory.
+
+# The non-root user we're configuring for. Resolved from the invoking
+# user (i.e., whoever ran ansible-playbook). NOT root, NOT the SUDO_USER.
+target_user: "{{ lookup('env', 'USER') }}"
+
+# Home directory of target_user. Computed once.
+target_home: "{{ lookup('env', 'HOME') }}"
+
+# Where the neo-mittens repo lives on disk. Used by tasks that symlink
+# from the repo into ~/.config / ~/.local/bin.
+neo_mittens_root: "{{ playbook_dir }}/.."

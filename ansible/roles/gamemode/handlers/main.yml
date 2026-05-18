@@ -1,0 +1,6 @@
+---
+- name: restart polkit
+  ansible.builtin.systemd:
+    name: polkit
+    state: restarted
+  become: true
