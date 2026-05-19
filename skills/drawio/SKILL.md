@@ -2,7 +2,7 @@
 name: drawio
 description: Create, generate, or design diagrams, flowcharts, architecture diagrams, ER diagrams, sequence diagrams, class diagrams, network diagrams, or any visual diagram using draw.io. Produces native .drawio files with optional PNG/SVG/PDF export (with embedded XML so exports remain editable in draw.io).
 license: Apache-2.0
-compatibility: opencode
+compatibility: Requires Python 3.10+ and `npx draw.io-export` on PATH
 metadata:
   category: diagramming
   system: drawio
@@ -11,24 +11,42 @@ metadata:
 
 # Draw.io Diagram Skill
 
-Create and edit draw.io diagrams using the `drawio` tools (`create_diagram`, `read_diagram`, `update_diagram`).
+Create and edit draw.io diagrams using `scripts/drawio.py`. The script handles PNG export (via `npx draw.io-export`) and embeds the source XML into the PNG as a zTXt chunk, so the file is both viewable as an image and editable in draw.io.
 
 **Data privacy:** Everything runs locally. No diagram data is sent to any external server.
+
+## Script Usage
+
+```bash
+# Create a new diagram from XML
+uv run scripts/drawio.py create --xml '<mxGraphModel>...</mxGraphModel>' -o diagram.drawio.png
+uv run scripts/drawio.py create --xml-file diagram.xml -o diagram.drawio.png
+
+# Extract XML from an existing .drawio.png
+uv run scripts/drawio.py read diagram.drawio.png
+
+# Update an existing .drawio.png with new XML
+uv run scripts/drawio.py update --xml '<mxGraphModel>...</mxGraphModel>' diagram.drawio.png
+uv run scripts/drawio.py update --xml-file updated.xml diagram.drawio.png
+```
+
+XML can also be piped via stdin (omit `--xml` and `--xml-file`).
 
 ## Workflow
 
 ### Creating a new diagram
 1. Generate draw.io mxGraphModel XML for the requested diagram
-2. Call `create_diagram` with the XML and an output path ending in `.drawio.png`
-3. The tool writes a `.drawio` file, exports to PNG, embeds the XML inside the PNG, and cleans up
+2. Write XML to a temp file (or pass via `--xml`)
+3. Run: `uv run scripts/drawio.py create --xml-file tmp.xml -o diagram.drawio.png`
+4. The script writes a `.drawio` file, exports to PNG, embeds XML into the PNG, and cleans up
 
 ### Editing an existing diagram
-1. Call `read_diagram` with the `.drawio.png` path to extract the current XML
+1. Extract current XML: `uv run scripts/drawio.py read diagram.drawio.png`
 2. Modify the XML as needed
-3. Call `update_diagram` with the new XML and the same path
+3. Write it back: `uv run scripts/drawio.py update --xml-file updated.xml diagram.drawio.png`
 
 ### Review loop
-After creating or updating, show the resulting PNG to the user. If they request changes, use `read_diagram` + `update_diagram` to iterate.
+After creating or updating, show the resulting PNG to the user. If they request changes, read + update to iterate.
 
 ## XML format
 

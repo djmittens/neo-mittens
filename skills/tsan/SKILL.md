@@ -2,7 +2,7 @@
 name: tsan
 description: Handle ThreadSanitizer output - redirect to files, summarize races, avoid context flooding
 license: MIT
-compatibility: opencode
+compatibility: Requires bash and a C/C++ project with ThreadSanitizer-capable compiler
 metadata:
   category: testing
   sanitizer: thread

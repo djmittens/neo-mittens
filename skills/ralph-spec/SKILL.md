@@ -2,7 +2,7 @@
 name: ralph-spec
 description: Write Ralph specification documents - structured feature specs with clear requirements, acceptance criteria, and implementation guidance for autonomous task execution
 license: MIT
-compatibility: opencode
+compatibility: Requires ralph installed and initialized in the target repo
 metadata:
   category: planning
   system: ralph
@@ -571,3 +571,97 @@ Keep specs small to minimize context pressure. A 300-line spec plus codebase exp
 
 Ralph logs are stored in `/tmp/ralph-logs/<repo>/<branch>/<spec>/`.
 Logs are auto-cleared on system restart.
+
+## Planning Workflow
+
+To generate or update the implementation plan from specs:
+
+### Prerequisites
+
+`ralph/` must exist. If not, initialize Ralph first (see ralph-config skill).
+
+### Steps
+
+1. Read all files in `ralph/specs/` to understand requirements
+
+2. Study the existing codebase to understand current implementation
+
+3. Gap analysis -- compare specs vs implementation:
+   - What's specified but not implemented?
+   - What's implemented but not in specs?
+   - What's partially implemented?
+   - What has TODOs, FIXMEs, or placeholders?
+
+4. Create/update `ralph/IMPLEMENTATION_PLAN.md` with:
+   - Tasks grouped by their source spec file
+   - Each task small enough for one iteration
+   - Discovered issues listed separately
+
+5. **Do NOT implement anything** -- planning only
+
+### Plan Format
+
+```markdown
+# Implementation Plan
+
+**Branch:** `<current branch>`
+**Last updated:** <timestamp>
+
+## Spec: spec-filename.md
+
+- [ ] Task 1 from this spec
+- [ ] Task 2 from this spec
+
+## Spec: another-spec.md
+
+- [ ] Task 1 from another spec
+
+## Completed
+
+- [x] Done task
+
+## Discovered Issues
+
+- Issue description
+```
+
+Tasks MUST be grouped under `## Spec: <filename>` headers so that during implementation, only the relevant spec is read and validated against.
+
+## Single-Task Execution Workflow
+
+Execute exactly ONE task from the implementation plan, then stop.
+
+### Prerequisites
+
+`ralph/IMPLEMENTATION_PLAN.md` must exist. If not, run the planning workflow first.
+
+### Steps
+
+1. Read `ralph/IMPLEMENTATION_PLAN.md`
+2. Pick the SINGLE most important incomplete task (first incomplete task in the file)
+3. Identify which `## Spec:` section this task belongs to
+4. Read ONLY that specific spec file from `ralph/specs/` -- do NOT read all specs
+5. Search the codebase to confirm the task isn't already done
+6. Implement the task fully:
+   - No placeholders or stubs
+   - No comments unless explicitly required
+   - Follow existing code patterns
+7. Run tests/build to validate ONLY the functionality related to this spec
+8. Update `ralph/IMPLEMENTATION_PLAN.md`:
+   - Mark task as complete: `- [x] Task`
+   - Add any discovered issues
+   - Add any new tasks found
+9. Commit with descriptive message
+10. Report completion:
+    ```
+    [RALPH] === DONE: <task name> ===
+    [RALPH] RESULT: <summary>
+    ```
+
+### Critical Rules
+
+- Complete ONE task only. Do not start another task.
+- The workflow should be run again for the next task.
+- If stuck for more than 5 minutes on the same issue:
+  1. Document what you tried in `ralph/IMPLEMENTATION_PLAN.md` under "## Discovered Issues"
+  2. Move on and report the blocker

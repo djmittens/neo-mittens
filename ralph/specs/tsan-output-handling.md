@@ -160,7 +160,7 @@ Add to compaction strategy:
 
 ## Acceptance Criteria
 
-- [ ] Create `.opencode/skills/tsan.md` skill file
+- [x] Create `skills/tsan/SKILL.md` agent skill file
 - [ ] Skill detects TSAN output patterns
 - [ ] Skill provides deduplication strategy
 - [ ] Skill suggests appropriate TSAN_OPTIONS for different scenarios

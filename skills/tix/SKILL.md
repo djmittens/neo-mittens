@@ -2,7 +2,7 @@
 name: tix
 description: Use the tix CLI for git-based ticket management - tasks, issues, notes with plan.jsonl compatibility
 license: MIT
-compatibility: opencode
+compatibility: Requires tix CLI binary (built from neo-mittens/app/tix)
 metadata:
   category: workflow
   tool: tix
@@ -336,3 +336,45 @@ tix query issues                  # Review open issues
 tix task add '{"name": "Fix X", "created_from": "i-xxxx", "accept": "..."}'
 tix issue done i-xxxx             # Resolve the issue
 ```
+
+## Status Script
+
+Quick JSON status check for the current repository:
+
+```bash
+bash scripts/tix-status.sh
+```
+
+Outputs JSON to stdout with:
+- `branch`, `commit`: current git state
+- `tasks_pending` / `tasks_done`: task counts
+- `issues`, `notes`: open issue and note counts
+- `pending_tasks`: array of up to 10 pending tasks (id, name, priority)
+- `open_issues`: array of up to 5 open issues (id, name)
+
+## Execute a Single Task
+
+To execute exactly ONE task from the pending list, then stop:
+
+1. Run `tix query tasks` to get pending tasks as JSON
+2. Pick the SINGLE highest-priority incomplete task (first one returned)
+3. Read the task's spec file if it has one
+4. Search the codebase to confirm it's not already done
+5. Implement the task fully (no placeholders or stubs, follow existing patterns)
+6. Run tests/build to validate
+7. Mark the task done: `tix task done <id>`
+8. Report completion:
+   ```
+   [TIX] === DONE: <task name> ===
+   [TIX] RESULT: <summary>
+   ```
+
+**Critical**: Complete ONE task only. Do not start another task. Run this workflow again for the next task.
+
+## Getting Status
+
+Two approaches:
+
+1. **Script** (JSON, for programmatic use): `bash scripts/tix-status.sh`
+2. **CLI** (structured JSON): `tix query` for full state, `tix status` for dashboard
+3. **Combined**: Run `tix query` for structured data and `tix status` for the human-readable view

@@ -2,7 +2,7 @@
 name: circleci
 description: Fetch CircleCI build results, test failures, artifacts, and job logs to debug CI/CD issues on PRs
 license: MIT
-compatibility: opencode
+compatibility: Requires bash, curl, and a CircleCI API token in ~/.circleci/token
 metadata:
   category: testing
   system: circleci-server

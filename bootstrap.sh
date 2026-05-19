@@ -567,14 +567,24 @@ done
 
 # 14) bin/ PATH block removed - gcai moved to powerplant/ which is already in PATH
 
-# 15) Install global Claude commands (ralph alias)
+# 15) Claude commands — REMOVED
+# Claude commands (.claude/commands/ralph-*.md, tix-*.md) have been merged into
+# portable Agent Skills (skills/ralph-spec/, skills/ralph-config/, skills/tix/).
+# Cleanup stale symlinks from old installation.
 CLAUDE_COMMANDS_DIR="$HOME/.claude/commands"
-ensure_dir "$CLAUDE_COMMANDS_DIR"
-for cmd in "$SCRIPT_DIR/.claude/commands"/ralph-*.md; do
-  if [ -f "$cmd" ]; then
-    link_symlink "$cmd" "$CLAUDE_COMMANDS_DIR/$(basename "$cmd")"
-  fi
-done
+if [ -d "$CLAUDE_COMMANDS_DIR" ]; then
+  for link_path in "$CLAUDE_COMMANDS_DIR"/{ralph,tix}-*.md; do
+    if [ -L "$link_path" ]; then
+      old_target="$(readlink -- "$link_path" 2>/dev/null)"
+      case "$old_target" in
+        "$SCRIPT_DIR/"* | */neo-mittens/.claude/commands/*)
+          echo "CLEANUP: removing stale Claude command $link_path"
+          rm -f -- "$link_path"
+          ;;
+      esac
+    fi
+  done
+fi
 
 # 16) Install ralph shell completions
 install_ralph_completion_bash() {
@@ -757,39 +767,62 @@ install_tree_sitter_cli() {
 
 install_tree_sitter_cli
 
-# 18) Install global OpenCode tools (to ~/.config/opencode/tools/)
+# 18) OpenCode tools — REMOVED
+# OpenCode-specific tools (.opencode/tools/*.ts) have been replaced by portable
+# scripts bundled inside Agent Skills (skills/*/scripts/). No SDK-specific tool
+# installation needed. Cleanup stale symlinks from old installation.
 OPENCODE_CONFIG_DIR="$HOME/.config/opencode"
 OPENCODE_TOOLS_DIR="$OPENCODE_CONFIG_DIR/tools"
-ensure_dir "$OPENCODE_TOOLS_DIR"
-
-# Link tool files from .opencode/tools/ to ~/.config/opencode/tools/
-for tool_file in "$SCRIPT_DIR/.opencode/tools"/*.ts; do
-  if [ -f "$tool_file" ]; then
-    link_symlink "$tool_file" "$OPENCODE_TOOLS_DIR/$(basename "$tool_file")"
-  fi
-done
-
-# Copy package.json and install deps if bun is available
-if [ -f "$SCRIPT_DIR/.opencode/package.json" ]; then
-  cp "$SCRIPT_DIR/.opencode/package.json" "$OPENCODE_CONFIG_DIR/package.json"
-  if command -v bun >/dev/null 2>&1; then
-    echo "Installing OpenCode tool dependencies..."
-    (cd "$OPENCODE_CONFIG_DIR" && bun install --silent) || echo "WARN: bun install failed"
-  else
-    echo "SKIP: bun not found, run 'cd ~/.config/opencode && bun install' manually"
-  fi
+if [ -d "$OPENCODE_TOOLS_DIR" ]; then
+  for link_path in "$OPENCODE_TOOLS_DIR"/*.ts; do
+    if [ -L "$link_path" ]; then
+      old_target="$(readlink -- "$link_path" 2>/dev/null)"
+      case "$old_target" in
+        "$SCRIPT_DIR/"* | */neo-mittens/.opencode/tools/*)
+          echo "CLEANUP: removing stale opencode tool $link_path"
+          rm -f -- "$link_path"
+          ;;
+      esac
+    fi
+  done
 fi
 
-# 19) Install global OpenCode skills (to ~/.config/opencode/skills/)
-OPENCODE_SKILLS_DIR="$OPENCODE_CONFIG_DIR/skills"
-ensure_dir "$OPENCODE_SKILLS_DIR"
+# 19) Install Agent Skills (to ~/.agents/skills/ — cross-client standard)
+#
+# Uses the open Agent Skills spec (agentskills.io/specification).
+# Skills placed in ~/.agents/skills/ are auto-discovered by all conforming
+# agents: Claude Code, OpenCode, Cursor, Gemini CLI, GitHub Copilot, etc.
+# Third-party skills (e.g. from `npx skills add owner/repo`) coexist as
+# regular directories alongside our symlinks.
+AGENTS_SKILLS_DIR="$HOME/.agents/skills"
+ensure_dir "$AGENTS_SKILLS_DIR"
 
-# Link skill directories from .opencode/skills/ to ~/.config/opencode/skills/
-for skill_dir in "$SCRIPT_DIR/.opencode/skills"/*/; do
+# Link skill directories from skills/ to ~/.agents/skills/
+for skill_dir in "$SCRIPT_DIR/skills"/*/; do
   if [ -d "$skill_dir" ]; then
     skill_name="$(basename "$skill_dir")"
-    link_symlink "$skill_dir" "$OPENCODE_SKILLS_DIR/$skill_name"
+    link_symlink "$skill_dir" "$AGENTS_SKILLS_DIR/$skill_name"
   fi
 done
+
+# Cleanup: remove stale symlinks from old ~/.config/opencode/skills/ location
+OLD_OPENCODE_SKILLS_DIR="$OPENCODE_CONFIG_DIR/skills"
+if [ -d "$OLD_OPENCODE_SKILLS_DIR" ]; then
+  for link_path in "$OLD_OPENCODE_SKILLS_DIR"/*; do
+    if [ -L "$link_path" ]; then
+      # Use readlink (not -f) to get raw target -- broken symlinks still have a target
+      old_target="$(readlink -- "$link_path" 2>/dev/null)"
+      # Remove if it points into our repo (old .opencode/skills/ or new skills/)
+      case "$old_target" in
+        "$SCRIPT_DIR/"* | */neo-mittens/.opencode/skills/*)
+          echo "CLEANUP: removing stale symlink $link_path"
+          rm -f -- "$link_path"
+          ;;
+      esac
+    fi
+  done
+  # Remove the directory if it's now empty
+  rmdir "$OLD_OPENCODE_SKILLS_DIR" 2>/dev/null && echo "CLEANUP: removed empty $OLD_OPENCODE_SKILLS_DIR" || true
+fi
 
 echo "Done. You may need to restart your shell (or source ~/.profile) and restart Neovim."

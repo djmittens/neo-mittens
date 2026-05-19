@@ -2,7 +2,7 @@
 name: ralph-config
 description: Configure Ralph user-level settings - model selection, profiles, timeouts, context limits
 license: MIT
-compatibility: opencode
+compatibility: Requires ralph installed (pip install ralph-ai or from neo-mittens/app/ralph)
 metadata:
   category: configuration
   tool: ralph
@@ -289,6 +289,60 @@ If hitting context limits frequently:
 - Lower `context_compact_pct` to compact earlier
 - Use `max_decompose_depth` to allow more breakdown
 - Consider breaking specs into smaller units
+
+## Status Script
+
+Check Ralph status in the current repository:
+
+```bash
+bash scripts/ralph-status.sh
+```
+
+Outputs JSON to stdout with:
+- `initialized`: whether `ralph/` exists
+- `specs`: count of spec files in `ralph/specs/`
+- `stage`: current orchestration stage (from `.tix/ralph-state.json`)
+- `current_spec`: spec being worked on (if any)
+- `tasks_pending` / `tasks_done`: task counts from tix
+- `issues`: open issue count
+- `latest_log`: path to most recent log file
+
+## Initialization Workflow
+
+To set up Ralph in a new repository:
+
+1. Create the `ralph/` directory structure:
+   ```
+   ralph/
+   ├── PROMPT_plan.md
+   ├── PROMPT_build.md
+   ├── IMPLEMENTATION_PLAN.md
+   └── specs/
+   ```
+
+2. Create `ralph/PROMPT_plan.md` with planning mode instructions
+
+3. Create `ralph/PROMPT_build.md` with build mode instructions that:
+   - Pick ONE task from the implementation plan
+   - Implement it fully
+   - Run tests
+   - Commit and push
+   - EXIT (so loop restarts fresh)
+
+4. Create empty `ralph/IMPLEMENTATION_PLAN.md`
+
+5. Create `ralph/specs/` directory for requirement specs
+
+6. Add to `.gitignore`:
+   ```
+   ralph/IMPLEMENTATION_PLAN.md
+   build/ralph-logs/
+   ```
+
+After initialization:
+1. Write specs in `ralph/specs/`
+2. Run `ralph plan` to generate the implementation plan
+3. Run `ralph` to start building
 
 ## Migration from Legacy
 
