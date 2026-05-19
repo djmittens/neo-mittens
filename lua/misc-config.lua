@@ -396,9 +396,10 @@ vim.keymap.set('n', '<leader>gq', ':DiffviewClose<CR>', { desc = "Close diffview
 
 -- PR workflow helpers
 vim.keymap.set('n', '<leader>gpr', function()
-  -- Show all changes on current branch vs main
-  -- --find-renames=30: lower threshold so moved+edited files show both sides
-  vim.cmd('DiffviewOpen main...HEAD --find-renames=30')
+  -- Detect PR base branch via gh, fall back to main
+  local base = vim.fn.trim(vim.fn.system("gh pr view --json baseRefName --jq .baseRefName 2>/dev/null"))
+  if vim.v.shell_error ~= 0 or base == "" then base = "main" end
+  vim.cmd('DiffviewOpen ' .. base .. '...HEAD --find-renames=30')
 end, { desc = "Review current PR changes" })
 
 vim.keymap.set('n', '<leader>gpl', function()
