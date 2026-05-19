@@ -396,33 +396,31 @@ vim.keymap.set('n', '<leader>gq', ':DiffviewClose<CR>', { desc = "Close diffview
 
 -- PR workflow helpers
 vim.keymap.set('n', '<leader>gpr', function()
-  -- 1. Try to detect PR base branch via gh
+  -- Try to detect PR base branch via gh
   local base = vim.fn.trim(vim.fn.system("gh pr view --json baseRefName --jq .baseRefName 2>/dev/null"))
   if vim.v.shell_error == 0 and base ~= "" then
     vim.cmd('DiffviewOpen ' .. base .. '...HEAD --find-renames=30')
     return
   end
-  -- 2. No PR -- find the closest common ancestor among typical trunk branches
-  local candidates = { "main", "master", "develop", "dev" }
-  local best_base, best_count = nil, math.huge
-  for _, candidate in ipairs(candidates) do
-    -- Check if the branch exists locally or on origin
-    local ref = vim.fn.trim(vim.fn.system("git rev-parse --verify " .. candidate .. " 2>/dev/null"))
-    if ref == "" then
-      ref = vim.fn.trim(vim.fn.system("git rev-parse --verify origin/" .. candidate .. " 2>/dev/null"))
-      if ref ~= "" then candidate = "origin/" .. candidate end
-    end
-    if ref ~= "" then
-      local count_str = vim.fn.trim(vim.fn.system("git rev-list --count " .. candidate .. "..HEAD 2>/dev/null"))
-      local count = tonumber(count_str) or math.huge
-      if count < best_count then
-        best_count = count
-        best_base = candidate
-      end
-    end
-  end
-  base = best_base or "main"
-  vim.cmd('DiffviewOpen ' .. base .. '...HEAD --find-renames=30')
+  -- No PR found -- let user pick a base branch via telescope
+  require('telescope.builtin').git_branches({
+    prompt_title = "Select base branch for diff",
+    attach_mappings = function(_, map)
+      map('i', '<CR>', function(prompt_bufnr)
+        local entry = require('telescope.actions.state').get_selected_entry(prompt_bufnr)
+        require('telescope.actions').close(prompt_bufnr)
+        local ref = vim.fn.trim(entry.value)
+        vim.cmd('DiffviewOpen ' .. ref .. '...HEAD --find-renames=30')
+      end)
+      map('n', '<CR>', function(prompt_bufnr)
+        local entry = require('telescope.actions.state').get_selected_entry(prompt_bufnr)
+        require('telescope.actions').close(prompt_bufnr)
+        local ref = vim.fn.trim(entry.value)
+        vim.cmd('DiffviewOpen ' .. ref .. '...HEAD --find-renames=30')
+      end)
+      return true
+    end,
+  })
 end, { desc = "Review current PR changes" })
 
 vim.keymap.set('n', '<leader>gpl', function()
