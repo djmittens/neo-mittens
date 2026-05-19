@@ -127,7 +127,7 @@ require("lazy").setup({
   },
   {
     "OXY2DEV/markview.nvim",
-    ft = "markdown",   -- Lazy-load only for markdown files
+    ft = { "markdown", "Avante" },
 
     -- For `nvim-treesitter` users.
     priority = 49,
@@ -153,8 +153,10 @@ require("lazy").setup({
         hybrid_modes = { "n" },
         linewise_hybrid_mode = true,
         max_buf_lines = 1000,
-        debounce = 50,
+        debounce = 300,
         map_gx = true,
+        filetypes = { "markdown", "quarto", "rmd", "typst", "asciidoc", "Avante" },
+        ignore_buftypes = {},
       },
 
       markdown = {
@@ -393,6 +395,88 @@ require("lazy").setup({
   { "lewis6991/gitsigns.nvim",  main = 'neo-mittens.plugins.gitsigns', config = true },
 
   {
+    "sindrets/diffview.nvim",
+    config = function()
+      -- Track reviewed files across the diffview session
+      local reviewed_ns = vim.api.nvim_create_namespace('diffview_reviewed')
+      local reviewed_files = {}
+
+      local function toggle_reviewed()
+        -- Only works in the file panel buffer
+        local bufname = vim.api.nvim_buf_get_name(0)
+        if not bufname:match('DiffviewFilePanel') then return end
+
+        local line = vim.fn.line('.') - 1  -- 0-indexed for extmarks
+        local line_text = vim.api.nvim_buf_get_lines(0, line, line + 1, false)[1] or ''
+
+        if reviewed_files[line] then
+          -- Unmark
+          reviewed_files[line] = nil
+          vim.api.nvim_buf_clear_namespace(0, reviewed_ns, line, line + 1)
+        else
+          -- Mark as reviewed
+          reviewed_files[line] = true
+          vim.api.nvim_buf_set_extmark(0, reviewed_ns, line, 0, {
+            virt_text = { { ' ✓', 'DiagnosticOk' } },
+            virt_text_pos = 'eol',
+          })
+        end
+      end
+
+      local function reapply_reviewed_marks(bufnr)
+        vim.api.nvim_buf_clear_namespace(bufnr, reviewed_ns, 0, -1)
+        for line, _ in pairs(reviewed_files) do
+          pcall(vim.api.nvim_buf_set_extmark, bufnr, reviewed_ns, line, 0, {
+            virt_text = { { ' ✓', 'DiagnosticOk' } },
+            virt_text_pos = 'eol',
+          })
+        end
+      end
+
+      require("diffview").setup({
+        enhanced_diff_hl = true,
+        view = {
+          default    = { winbar_info = true },
+          file_history = { winbar_info = true },
+          merge_tool   = { winbar_info = true },
+        },
+        hooks = {
+          diff_buf_read = function(bufnr, ctx)
+            vim.opt_local.wrap = false
+            vim.opt_local.list = false
+            vim.opt_local.relativenumber = false
+            -- Prevent diffview from wiping git-object buffers when navigating away.
+            -- Without this, new/added files lose their content after switching to other files.
+            vim.bo[bufnr].bufhidden = 'hide'
+          end,
+          diff_buf_win_enter = function(bufnr, winid, ctx)
+            local label = ({ a = ' OLD ', b = ' NEW ' })[ctx.symbol]
+            if label then
+              vim.wo[winid].winbar = label .. ' %f'
+            end
+            -- Tag buffer with its diff side so <leader>go can use L vs R anchors
+            vim.b[bufnr].diffview_side = ctx.symbol  -- "a" = old, "b" = new
+          end,
+          view_post_layout = function()
+            -- Reapply marks after diffview redraws the file panel
+            for _, buf in ipairs(vim.api.nvim_list_bufs()) do
+              if vim.api.nvim_buf_get_name(buf):match('DiffviewFilePanel') then
+                reapply_reviewed_marks(buf)
+              end
+            end
+          end,
+        },
+        keymaps = {
+          file_panel = {
+            { 'n', '<leader>v', toggle_reviewed, { desc = 'Toggle file as reviewed' } },
+            { 'n', 'p', require('diffview.actions').select_entry, { desc = 'Preview file (keep focus in panel)' } },
+            { 'n', '<CR>', require('diffview.actions').focus_entry, { desc = 'Open file and focus diff' } },
+          },
+        },
+      })
+    end,
+  },
+  {
     "NeogitOrg/neogit",
     dependencies = {
       "nvim-lua/plenary.nvim",  -- required
@@ -416,17 +500,47 @@ require("lazy").setup({
   {
     "juacker/git-link.nvim",
     config = function()
+      -- Cache PR lookup per branch to avoid shelling out on every invocation.
+      -- Invalidated when the branch changes.
+      local _pr_cache = { branch = nil, pr_url = nil }
+
+      local function get_pr_url()
+        local branch = vim.fn.trim(vim.fn.system("git rev-parse --abbrev-ref HEAD"))
+        if branch == "" or branch == "HEAD" then return nil end
+        if _pr_cache.branch == branch then return _pr_cache.pr_url end
+
+        local out = vim.fn.trim(vim.fn.system("gh pr view --json url --jq .url 2>/dev/null"))
+        local pr_url = (vim.v.shell_error == 0 and out ~= "") and out or nil
+        _pr_cache = { branch = branch, pr_url = pr_url }
+        return pr_url
+      end
+
       require("git-link").setup({
         url_rules = {
-          -- Override to use current branch (HEAD) instead of upstream
           {
             pattern = "^https?://([^/]+)/(.+)$",
             replace = "https://%1/%2",
             format_url = function(base_url, params)
-              -- Use current branch instead of upstream
+              local pr_url = get_pr_url()
+
+              if pr_url then
+                -- PR file view: link into the Files tab with a file anchor and line comment
+                -- GitHub anchors the file diff via sha256 of the file path
+                local handle = io.popen("printf '%s' '" .. params.file_path .. "' | shasum -a 256 | cut -d' ' -f1")
+                local sha = handle and vim.fn.trim(handle:read("*a")) or ""
+                if handle then handle:close() end
+
+                local anchor = string.format("diff-%s", sha)
+                if params.start_line == params.end_line then
+                  return string.format("%s/files#%sR%d", pr_url, anchor, params.start_line)
+                end
+                return string.format("%s/files#%sR%d-R%d", pr_url, anchor, params.start_line, params.end_line)
+              end
+
+              -- Fallback: blob URL on current branch
               local branch = vim.fn.trim(vim.fn.system("git rev-parse --abbrev-ref HEAD"))
               if branch == "" or branch == "HEAD" then
-                branch = params.branch -- fallback to plugin's branch
+                branch = params.branch
               end
               local single_line_url =
                 string.format("%s/blob/%s/%s#L%d", base_url, branch, params.file_path, params.start_line)
@@ -439,12 +553,97 @@ require("lazy").setup({
         },
       })
 
-      vim.keymap.set({ 'n', 'v' }, "<leader>gy", function() require("git-link").copy_line_url() end)
-      vim.keymap.set({ 'n', 'v' }, "<leader>go", function() require("git-link").open_line_url() end)
+      -- Extract file path + line from a diffview buffer and open in PR/blob view.
+      -- Diffview buffer names look like: diffview://.../worktrees/.../{rev}/{file_path}
+      -- or diffview://.../objects/.../{rev}/{file_path}
+      local function diffview_url()
+        local bufname = vim.api.nvim_buf_get_name(0)
+        if not bufname:match('^diffview://') then return nil end
+
+        -- The file path follows the short rev hash (7-40 hex chars) after .git/
+        local file_path = bufname:match('/[0-9a-f]+/(.+)$')
+        if not file_path then return nil end
+
+        local line = vim.fn.line('.')
+        -- GitHub PR diff anchors: L = old (left) side, R = new (right) side
+        local side = vim.b.diffview_side  -- "a" = old, "b" = new (set by diff_buf_win_enter hook)
+        local line_prefix = (side == 'a') and 'L' or 'R'
+        local pr_url = get_pr_url()
+
+        if pr_url then
+          local handle = io.popen("printf '%s' '" .. file_path .. "' | shasum -a 256 | cut -d' ' -f1")
+          local sha = handle and vim.fn.trim(handle:read("*a")) or ""
+          if handle then handle:close() end
+          return string.format("%s/files#diff-%s%s%d", pr_url, sha, line_prefix, line)
+        end
+
+        -- Fallback: blob URL
+        local remote_url = vim.fn.trim(vim.fn.system("git remote get-url origin 2>/dev/null"))
+        local base = remote_url:gsub('%.git$', '')
+        local branch = vim.fn.trim(vim.fn.system("git rev-parse --abbrev-ref HEAD"))
+        return string.format("%s/blob/%s/%s#L%d", base, branch, file_path, line)
+      end
+
+      local function open_or_fallback()
+        local url = diffview_url()
+        if url then
+          vim.fn.jobstart({ 'open', url }, { detach = true })
+        else
+          require("git-link").open_line_url()
+        end
+      end
+
+      local function copy_or_fallback()
+        local url = diffview_url()
+        if url then
+          vim.fn.setreg('+', url)
+          vim.notify('Copied: ' .. url, vim.log.levels.INFO)
+        else
+          require("git-link").copy_line_url()
+        end
+      end
+
+      vim.keymap.set({ 'n', 'v' }, "<leader>gy", copy_or_fallback)
+      vim.keymap.set({ 'n', 'v' }, "<leader>go", open_or_fallback)
     end,
   },
   -- { 'tpope/vim-fugitive' },      -- This is the greatest git plugin for vim
   -- { 'tpope/vim-rhubarb' },       -- Extension for fugitive specifically for github, eg open stuff in browsers
+
+  -- AI assistant (Cursor-like sidebar)
+  {
+    "yetone/avante.nvim",
+    event = "VeryLazy",
+    version = false,
+    build = "make",
+    dependencies = {
+      "nvim-lua/plenary.nvim",
+      "MunifTanjim/nui.nvim",
+      "nvim-tree/nvim-web-devicons",
+      "nvim-telescope/telescope.nvim",
+      "hrsh7th/nvim-cmp",
+
+    },
+    opts = {
+      provider = "opencode",
+      selection = {
+        enabled = true,
+        hint_display = "right_align",
+      },
+      acp_providers = {
+        opencode = {
+          command = "opencode",
+          args = { "acp" },
+        },
+      },
+      mappings = {
+        submit = {
+          normal = "<CR>",
+          insert = "<C-j>",
+        },
+      },
+    },
+  },
 
   -- Debugger Support
   { 'mfussenegger/nvim-dap',     dependencies = { "nvim-neotest/nvim-nio" } },
