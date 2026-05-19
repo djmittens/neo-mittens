@@ -146,6 +146,54 @@ If any Google Workspace tool returns a 403/permission error:
 | `google-docs_append` | Append text to end of doc |
 | `google-docs_find_replace` | Find and replace text |
 | `google-docs_get_structure` | Get document headings structure |
+| `google-docs_insert_heading` | Insert a styled heading at document end (params: document_id, text, level 1-6) |
+| `google-docs_apply_heading_style` | Convert existing text to heading style (params: document_id, find_text, level) |
+| `google-docs_format_text` | Apply formatting to text found in doc (params: document_id, find_text, bold, italic, underline, font_size, foreground_color, background_color) |
+| `google-docs_format_document` | Apply professional formatting to entire doc (auto-detects headings) |
+| `google-docs_batch_format` | Apply multiple formatting operations in one call |
+| `google-docs_write_formatted_section` | Write content with formatting in one operation. WARNING: content must NOT contain `#` characters — they cause JSON parse errors. Use `insert_heading` + `append` instead. |
+| `google-docs_insert_styled_table` | Insert a professionally styled table with dark header and alternating rows. See Table Insertion Guide below. |
+| `google-docs_insert_table` | Insert a table with explicit row/column counts. Data uses `\|` as column separator and `\|\|` as row separator. |
+| `google-docs_link_text` | Add a hyperlink to text found in the doc |
+| `google-docs_clear_document` | Clear all content from a doc |
+
+## Table Insertion Guide
+
+**CRITICAL: Getting tables right requires correct parameter formats.**
+
+### `insert_styled_table` — Preferred for most tables
+
+Parameters:
+- `headers`: Comma-separated string for simple headers, OR JSON array for headers containing commas.
+  - Simple: `"Name,Type,Description"`
+  - With commas in values: `'["Name","Type, with comma","Description"]'`
+- `rows`: **MUST be a JSON array of arrays** when cell values contain commas, parentheses, or special characters (which is almost always the case for real data).
+  - **CORRECT**: `'[["Value 1","Some text (with parens)","100%"],["Value 2","More text, with comma","50%"]]'`
+  - **WRONG**: `"Value 1,Some text (with parens),100%,Value 2,More text with comma,50%"` — commas in values will be misinterpreted as column separators.
+
+Example — correct usage:
+```
+insert_styled_table(
+  document_id="...",
+  headers="Category,Count,Percentage",
+  rows='[["FEATURE","285","51%"],["FIX","96","17%"],["INFRA","67","12%"]]'
+)
+```
+
+### `insert_table` — Alternative with pipe delimiters
+
+Parameters:
+- `rows`: number of rows (including header)
+- `columns`: number of columns
+- `data`: Pipe-delimited string. `|` separates columns, `||` separates rows.
+  - Example: `"Header1|Header2|Header3||Row1Col1|Row1Col2|Row1Col3||Row2Col1|Row2Col2|Row2Col3"`
+
+### Common mistakes to avoid
+
+1. **Never use comma-separated rows** when cell values contain commas, parentheses, colons, or other punctuation. Always use JSON arrays for `rows`.
+2. **`write_formatted_section` cannot handle `#` characters** — they cause JSON parse errors. Build formatted docs using `insert_heading` + `append` + `format_text` instead.
+3. **`append` does not render markdown** — it inserts plain text. Use `insert_heading` for headings and `format_text` for bold/italic/colors.
+4. **Tables from `insert_styled_table` get dark header row and alternating row colors automatically** — no additional styling needed.
 
 ### Google Slides
 

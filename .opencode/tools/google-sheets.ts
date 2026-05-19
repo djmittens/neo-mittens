@@ -1,69 +1,10 @@
 import { tool } from "@opencode-ai/plugin"
-import { readFileSync, existsSync } from "fs"
-import { homedir } from "os"
-import { join } from "path"
+import { googleApi } from "./google-auth"
 
-/**
- * Get quota project from ADC credentials file
- */
-function getQuotaProject(): string | null {
-  const adcPath = join(homedir(), ".config", "gcloud", "application_default_credentials.json")
-  if (!existsSync(adcPath)) {
-    return null
-  }
-  try {
-    const adc = JSON.parse(readFileSync(adcPath, "utf-8"))
-    return adc.quota_project_id || null
-  } catch {
-    return null
-  }
-}
+const SHEETS_BASE = "https://sheets.googleapis.com"
 
-/**
- * Helper to get access token from gcloud ADC
- */
-async function getAccessToken(): Promise<string> {
-  const proc = Bun.spawn(["gcloud", "auth", "application-default", "print-access-token"], {
-    stdout: "pipe",
-    stderr: "pipe",
-  })
-  const output = await new Response(proc.stdout).text()
-  const exitCode = await proc.exited
-  if (exitCode !== 0) {
-    const stderr = await new Response(proc.stderr).text()
-    throw new Error(`Failed to get access token: ${stderr}`)
-  }
-  return output.trim()
-}
-
-/**
- * Make authenticated request to Google Sheets API
- */
 async function sheetsApi(endpoint: string, options: RequestInit = {}): Promise<any> {
-  const token = await getAccessToken()
-  const quotaProject = getQuotaProject()
-  
-  const headers: Record<string, string> = {
-    Authorization: `Bearer ${token}`,
-    "Content-Type": "application/json",
-  }
-  
-  if (quotaProject) {
-    headers["x-goog-user-project"] = quotaProject
-  }
-  
-  const response = await fetch(`https://sheets.googleapis.com${endpoint}`, {
-    ...options,
-    headers: {
-      ...headers,
-      ...options.headers,
-    },
-  })
-  if (!response.ok) {
-    const error = await response.text()
-    throw new Error(`Google Sheets API error (${response.status}): ${error}`)
-  }
-  return response.json()
+  return googleApi(SHEETS_BASE, "Google Sheets", endpoint, options)
 }
 
 export const read = tool({
@@ -132,10 +73,29 @@ ${sheets}`
   },
 })
 
+/**
+ * Convert markdown-style links `[text](url)` to Sheets HYPERLINK formulas.
+ * Plain strings pass through unchanged.
+ */
+function convertLinks(values: string[][]): string[][] {
+  const linkPattern = /^\[([^\]]+)\]\(([^)]+)\)$/
+  return values.map((row) =>
+    row.map((cell) => {
+      const match = cell.match(linkPattern)
+      if (match) {
+        const [, text, url] = match
+        return `=HYPERLINK("${url}","${text}")`
+      }
+      return cell
+    })
+  )
+}
+
 export const write = tool({
   description: `Write data to a Google Sheet.
   
-Writes values to a specified range. Data is provided as a 2D array.`,
+Writes values to a specified range. Data is provided as a 2D array.
+Supports markdown-style links: use [text](url) to create clickable hyperlinks.`,
   args: {
     spreadsheet_id: tool.schema.string().describe("The spreadsheet ID"),
     range: tool.schema
@@ -143,7 +103,7 @@ Writes values to a specified range. Data is provided as a 2D array.`,
       .describe("A1 notation range to write to (e.g., 'Sheet1!A1')"),
     values: tool.schema
       .array(tool.schema.array(tool.schema.string()))
-      .describe("2D array of values to write"),
+      .describe("2D array of values to write. Use [text](url) for hyperlinks."),
   },
   async execute(args) {
     const { spreadsheet_id, range, values } = args
@@ -152,7 +112,7 @@ Writes values to a specified range. Data is provided as a 2D array.`,
       `/v4/spreadsheets/${spreadsheet_id}/values/${encodeURIComponent(range)}?valueInputOption=USER_ENTERED`,
       {
         method: "PUT",
-        body: JSON.stringify({ values }),
+        body: JSON.stringify({ values: convertLinks(values) }),
       }
     )
 
@@ -163,7 +123,7 @@ Writes values to a specified range. Data is provided as a 2D array.`,
 export const append_rows = tool({
   description: `Append rows to a Google Sheet.
   
-Appends data after the last row with data.`,
+Appends data after the last row with data. Supports [text](url) for hyperlinks.`,
   args: {
     spreadsheet_id: tool.schema.string().describe("The spreadsheet ID"),
     sheet_name: tool.schema
@@ -173,7 +133,7 @@ Appends data after the last row with data.`,
       .describe("Sheet name (default: Sheet1)"),
     values: tool.schema
       .array(tool.schema.array(tool.schema.string()))
-      .describe("2D array of rows to append"),
+      .describe("2D array of rows to append. Use [text](url) for hyperlinks."),
   },
   async execute(args) {
     const { spreadsheet_id, sheet_name = "Sheet1", values } = args
@@ -183,7 +143,7 @@ Appends data after the last row with data.`,
       `/v4/spreadsheets/${spreadsheet_id}/values/${encodeURIComponent(range)}:append?valueInputOption=USER_ENTERED&insertDataOption=INSERT_ROWS`,
       {
         method: "POST",
-        body: JSON.stringify({ values }),
+        body: JSON.stringify({ values: convertLinks(values) }),
       }
     )
 
@@ -220,6 +180,73 @@ export const create = tool({
 **Title:** ${result.properties.title}
 **ID:** ${result.spreadsheetId}
 **URL:** ${result.spreadsheetUrl}`
+  },
+})
+
+export const insert_rows = tool({
+  description: `Insert rows into a Google Sheet at a specific position, shifting existing rows down.
+  
+Unlike 'write' (which overwrites), this inserts new rows without clobbering existing data below.`,
+  args: {
+    spreadsheet_id: tool.schema.string().describe("The spreadsheet ID"),
+    sheet_name: tool.schema
+      .string()
+      .optional()
+      .default("Sheet1")
+      .describe("Sheet name (default: Sheet1)"),
+    row_index: tool.schema
+      .number()
+      .describe("0-based row index to insert at (e.g., 5 inserts before current row 6)"),
+    values: tool.schema
+      .array(tool.schema.array(tool.schema.string()))
+      .describe("2D array of rows to insert"),
+  },
+  async execute(args) {
+    const { spreadsheet_id, sheet_name = "Sheet1", row_index, values } = args
+
+    // First, get the sheet ID from the sheet name
+    const info = await sheetsApi(
+      `/v4/spreadsheets/${spreadsheet_id}?fields=sheets.properties`
+    )
+    const sheet = info.sheets.find(
+      (s: any) => s.properties.title === sheet_name
+    )
+    if (!sheet) {
+      throw new Error(`Sheet '${sheet_name}' not found in spreadsheet`)
+    }
+    const sheetId = sheet.properties.sheetId
+
+    // Insert blank rows
+    await sheetsApi(`/v4/spreadsheets/${spreadsheet_id}:batchUpdate`, {
+      method: "POST",
+      body: JSON.stringify({
+        requests: [
+          {
+            insertDimension: {
+              range: {
+                sheetId,
+                dimension: "ROWS",
+                startIndex: row_index,
+                endIndex: row_index + values.length,
+              },
+              inheritFromBefore: row_index > 0,
+            },
+          },
+        ],
+      }),
+    })
+
+    // Write values into the new rows (1-based for A1 notation)
+    const range = `${sheet_name}!A${row_index + 1}`
+    const result = await sheetsApi(
+      `/v4/spreadsheets/${spreadsheet_id}/values/${encodeURIComponent(range)}?valueInputOption=USER_ENTERED`,
+      {
+        method: "PUT",
+        body: JSON.stringify({ values: convertLinks(values) }),
+      }
+    )
+
+    return `Inserted ${values.length} row(s) at row ${row_index + 1} in ${result.updatedRange}`
   },
 })
 
