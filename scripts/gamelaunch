@@ -84,6 +84,23 @@ PY
 fi
 
 # ============================================================================
+# Wayland: enable native Wayland driver and auto-detect focused monitor.
+# ============================================================================
+export PROTON_ENABLE_WAYLAND="${PROTON_ENABLE_WAYLAND:-1}"
+if command -v hyprctl >/dev/null && [[ -z "${PROTON_WAYLAND_MONITOR:-}" ]]; then
+    FOCUSED_MONITOR=$(hyprctl monitors -j 2>/dev/null | python3 -c '
+import sys, json
+for m in json.load(sys.stdin):
+    if m.get("focused"):
+        print(m["name"])
+        break
+' 2>/dev/null)
+    if [[ -n "$FOCUSED_MONITOR" ]]; then
+        export PROTON_WAYLAND_MONITOR="$FOCUSED_MONITOR"
+    fi
+fi
+
+# ============================================================================
 # Reflex / NVAPI / overlay env (only set if not already configured).
 # ============================================================================
 export PROTON_FORCE_NVAPI="${PROTON_FORCE_NVAPI:-1}"
