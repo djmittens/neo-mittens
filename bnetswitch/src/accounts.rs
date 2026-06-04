@@ -12,6 +12,10 @@ pub struct AccountMeta {
     /// BattleTag if known (e.g., "Player#1234")
     #[serde(default)]
     pub battletag: Option<String>,
+    /// Marked unusable for Overwatch (e.g., suspended/banned). bnetswitch
+    /// flags it in the list and refuses to launch Overwatch for it.
+    #[serde(default)]
+    pub banned: bool,
 }
 
 /// The bnetswitch config file that stores account metadata.
@@ -79,6 +83,17 @@ pub struct AppConfig {
     /// all.
     #[serde(default = "default_true")]
     pub lfg_dedupe_by_voice_channel: bool,
+
+    /// Every account email bnetswitch has observed in Battle.net's
+    /// `SavedAccountNames`. Battle.net trims that list when its own UI is
+    /// used to log in/out, which makes accounts disappear and prompt for a
+    /// fresh login even though their credentials are still on disk.
+    /// bnetswitch restores this superset (active account first) on launch so
+    /// accounts stop being forgotten. Only emails actually saved by
+    /// Battle.net here are recorded, so TCNO-imported-but-never-used accounts
+    /// are never injected into the login list.
+    #[serde(default)]
+    pub remembered_emails: Vec<String>,
 }
 
 fn default_lfg_stale_secs() -> u64 {
@@ -109,6 +124,7 @@ impl Default for AppConfig {
             lfg_stale_threshold_secs: default_lfg_stale_secs(),
             lfg_dedupe_by_author: true,
             lfg_dedupe_by_voice_channel: true,
+            remembered_emails: Vec::new(),
         }
     }
 }
@@ -147,14 +163,17 @@ impl AppConfig {
         Ok(())
     }
 
-    /// Get display name for an account (nickname > battletag > email).
+    /// Get the display name for an account: nickname, else BattleTag, else
+    /// the email as a last resort. The email is intentionally NOT appended —
+    /// it's only shown in the account detail view (`d`) to keep the list
+    /// uncluttered and avoid exposing addresses at a glance.
     pub fn display_name(&self, email: &str) -> String {
         if let Some(meta) = self.accounts.get(email) {
             if let Some(nick) = &meta.nickname {
-                return format!("{} ({})", nick, email);
+                return nick.clone();
             }
             if let Some(tag) = &meta.battletag {
-                return format!("{} ({})", tag, email);
+                return tag.clone();
             }
         }
         email.to_string()
@@ -165,8 +184,42 @@ impl AppConfig {
         let meta = self.accounts.entry(email.to_string()).or_insert(AccountMeta {
             nickname: None,
             battletag: None,
+            banned: false,
         });
         meta.nickname = Some(nickname);
+    }
+
+    /// Whether an account is marked banned/unusable for Overwatch.
+    pub fn is_banned(&self, email: &str) -> bool {
+        self.accounts.get(email).map(|m| m.banned).unwrap_or(false)
+    }
+
+    /// Toggle the banned flag for an account. Returns the new state.
+    pub fn toggle_banned(&mut self, email: &str) -> bool {
+        let meta = self.accounts.entry(email.to_string()).or_insert(AccountMeta {
+            nickname: None,
+            battletag: None,
+            banned: false,
+        });
+        meta.banned = !meta.banned;
+        meta.banned
+    }
+
+    /// Record account emails seen in Battle.net's `SavedAccountNames` into the
+    /// persistent superset. Returns true if any new email was added (so the
+    /// caller can decide whether to persist the config).
+    pub fn remember_emails(&mut self, emails: &[String]) -> bool {
+        let mut changed = false;
+        for email in emails {
+            if email.is_empty() {
+                continue;
+            }
+            if !self.remembered_emails.iter().any(|e| e == email) {
+                self.remembered_emails.push(email.clone());
+                changed = true;
+            }
+        }
+        changed
     }
 
     /// Set a battletag for an account.
@@ -174,7 +227,38 @@ impl AppConfig {
         let meta = self.accounts.entry(email.to_string()).or_insert(AccountMeta {
             nickname: None,
             battletag: None,
+            banned: false,
         });
         meta.battletag = Some(battletag);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ban_toggle_round_trips() {
+        let mut cfg = AppConfig::default();
+        let email = "smurf@example.com";
+        // Unknown account defaults to not-banned.
+        assert!(!cfg.is_banned(email));
+        // First toggle bans it; creates the account entry.
+        assert!(cfg.toggle_banned(email));
+        assert!(cfg.is_banned(email));
+        // Second toggle unbans.
+        assert!(!cfg.toggle_banned(email));
+        assert!(!cfg.is_banned(email));
+    }
+
+    #[test]
+    fn ban_preserves_existing_metadata() {
+        let mut cfg = AppConfig::default();
+        let email = "main@example.com";
+        cfg.set_battletag(email, "Player#1234".to_string());
+        cfg.toggle_banned(email);
+        let meta = cfg.accounts.get(email).unwrap();
+        assert_eq!(meta.battletag.as_deref(), Some("Player#1234"));
+        assert!(meta.banned);
     }
 }

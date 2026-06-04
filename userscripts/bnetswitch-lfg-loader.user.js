@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         bnetswitch LFG bridge
 // @namespace    https://github.com/xyzyx/neo-mittens
-// @version      1.0.0
+// @version      1.0.1
 // @description  [loader] Auto-fetches the live bnetswitch userscript from http://127.0.0.1:7172 and caches it via GM_setValue. Reloads only when not in voice. Install once via http://127.0.0.1:7172/bnetswitch-lfg-loader.user.js -- never touch again.
 // @match        https://discord.com/*
 // @match        https://canary.discord.com/*
@@ -11,6 +11,7 @@
 // @grant        GM_getValue
 // @grant        GM_log
 // @grant        GM_addElement
+// @grant        GM_setClipboard
 // @grant        unsafeWindow
 // @run-at       document-start
 // @connect      127.0.0.1
@@ -312,6 +313,6 @@
   } catch (_) {}
 
   console.log(
-    "[bnetswitch-loader] v1.0.0 active, will fetch from " + REMOTE_URL
+    "[bnetswitch-loader] v1.0.1 active, will fetch from " + REMOTE_URL
   );
 })();

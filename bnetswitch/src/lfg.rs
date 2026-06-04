@@ -888,9 +888,14 @@ async fn handle_events(
                 }
             }
 
-            // If no actions, send a keepalive comment.
+            // If no actions, send a named `ping` heartbeat. A *named* event
+            // (not an SSE comment) is observable by the EventSource client,
+            // which uses it as a liveness signal: if pings stop arriving
+            // (e.g. the socket went half-open across a system suspend), the
+            // client force-reconnects rather than sitting on a dead stream.
             if actions.is_empty() {
-                yield Ok::<_, Infallible>(Event::default().comment("keepalive"));
+                let ping = format!(r#"{{"ts":{}}}"#, now_ms());
+                yield Ok::<_, Infallible>(Event::default().event("ping").data(ping));
             }
         }
     };

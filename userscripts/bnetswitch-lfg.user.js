@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         bnetswitch LFG bridge
 // @namespace    https://github.com/xyzyx/neo-mittens
-// @version      0.9.9
+// @version      0.9.15
 // @description  Taps Discord's WebSocket gateway directly to forward Overwatch LFG embeds + voice-state updates to bnetswitch's local HTTP server. Push-based, complete coverage, no DOM polling.
 // @match        https://discord.com/*
 // @match        https://canary.discord.com/*
@@ -11,6 +11,7 @@
 // @grant        GM_getValue
 // @grant        GM_log
 // @grant        GM_addElement
+// @grant        GM_setClipboard
 // @grant        unsafeWindow
 // @run-at       document-start
 // @connect      127.0.0.1
@@ -75,7 +76,7 @@
 // =============================================================================
 
 /* eslint-env browser, greasemonkey */
-/* global GM_xmlhttpRequest, GM_setValue, GM_getValue, GM_log, GM_addElement, unsafeWindow */
+/* global GM_xmlhttpRequest, GM_setValue, GM_getValue, GM_log, GM_addElement, GM_setClipboard, unsafeWindow */
 
 (function () {
   "use strict";
@@ -93,7 +94,7 @@
   // this file. Exposed via bnetswitchLfgDiagnose so we can confirm
   // which build is actually loaded after a TM update or loader reload
   // (the @version banner is only visible in TM's UI).
-  const USERSCRIPT_VERSION = "0.9.9";
+  const USERSCRIPT_VERSION = "0.9.13";
 
   // Per-userscript-instance ID for multi-browser leader election.
   // bnetswitch elects the most-recently-registered tab as primary
@@ -147,6 +148,14 @@
     userVoiceChannel: new Map(),
     // guild_id -> { name }
     guilds: new Map(),
+    // user_id -> { username, global_name, nick, tag, tag_enabled }
+    //
+    // `nick` is the per-server nickname (the name shown in the voice
+    // channel); `tag` is Discord's <=4-char "server tag" from
+    // primary_guild. Populated by ingestUser() from every gateway path
+    // that carries a user object. Consumed by resolveMentions() and the
+    // ctrl+click-to-copy feature.
+    users: new Map(),
     // Our own user id (from READY)
     meId: null,
     ready: false,
@@ -228,6 +237,9 @@
       console.log("gateway ready:", GW.ready);
       console.log("known guilds:", GW.guilds.size);
       console.log("known channels:", GW.channels.size);
+      console.log("cached users:", GW.users.size,
+                  "(with server tag:",
+                  Array.from(GW.users.values()).filter((u) => u.tag).length, ")");
       console.log("voice states tracked:", GW.voiceStates.size, "channels with users");
       let totalUsersInVoice = 0;
       for (const users of GW.voiceStates.values()) totalUsersInVoice += users.size;
@@ -259,6 +271,8 @@
         stats: { ...stats },
         ready: GW.ready,
         meId: GW.meId,
+        cached_users: GW.users.size,
+        cached_users_with_tag: Array.from(GW.users.values()).filter((u) => u.tag).length,
         subscribedGuilds: Array.from(subscribedGuilds),
         trackedVcs: Array.from(trackedVcs).map((id) => {
           const ch = GW.channels.get(id);
@@ -296,6 +310,7 @@
     switch (t) {
       case "READY":
         GW.meId = d.user?.id || null;
+        if (d.user) ingestUser(d.user);
         for (const guild of d.guilds || []) {
           ingestGuild(guild);
         }
@@ -340,6 +355,14 @@
             for (const v of vs) handleVoiceStateUpdate(v);
           } else {
             handleVoiceStateUpdate(vs);
+          }
+        }
+        // merged_members is an array (per-guild) of arrays of member
+        // objects; each member.user can carry a server tag. Cache them.
+        for (const group of d.merged_members || []) {
+          if (!Array.isArray(group)) continue;
+          for (const member of group) {
+            if (member && member.user) ingestUser(member.user, member.nick);
           }
         }
         break;
@@ -426,6 +449,7 @@
           for (const op of d.ops) {
             const items = op.items || (op.item ? [op.item] : []);
             for (const it of items) {
+              if (it && it.member && it.member.user) ingestUser(it.member.user, it.member.nick);
               if (it && it.member && it.member.voice_state) {
                 const vs = it.member.voice_state;
                 handleVoiceStateUpdate({
@@ -441,6 +465,15 @@
 
       case "MESSAGE_CREATE":
       case "MESSAGE_UPDATE":
+        // Authors and mentioned users carry user objects (+ nick via the
+        // attached member, when present).
+        if (d.author) ingestUser(d.author, d.member && d.member.nick);
+        for (const u of d.mentions || []) ingestUser(u, u.member && u.member.nick);
+        // Remember the newest message in the LFG channel for the Ctrl+G
+        // jump hotkey (any author counts, not just the LFG bot).
+        if (t === "MESSAGE_CREATE" && isWatchedChannel(d.channel_id)) {
+          noteWatchedMessage(d.id);
+        }
         if (shouldProcessLfgMessage(d)) {
           stats.lfg_posts_observed++;
           postLfgMessage(d);
@@ -485,6 +518,11 @@
       ingestChannel({ ...channel, guild_id: guild.id });
     }
 
+    // Members shipped inline (small guilds) carry user objects + nicks.
+    for (const member of guild.members || []) {
+      if (member && member.user) ingestUser(member.user, member.nick);
+    }
+
     // Voice states: each user currently in a VC of this guild.
     for (const vs of guild.voice_states || []) {
       handleVoiceStateUpdate({ ...vs, guild_id: guild.id });
@@ -502,9 +540,58 @@
     });
   }
 
+  /** Cache a user's identity, notably their "server tag".
+   *
+   * Discord's "server tag" is the <=4-char text in the user object's
+   * `primary_guild.tag` (older payloads used `clan`). `identity_enabled`
+   * is false when the user has a tag configured but isn't displaying it.
+   *
+   * Called from every gateway path that carries a full user object so the
+   * ctrl+click-to-copy feature can resolve user_id -> tag without a REST
+   * round-trip. We never clobber a previously-known tag with `undefined`:
+   * many payloads (e.g. message authors) include the user object but omit
+   * primary_guild, and we don't want those to erase a tag we already have.
+   */
+  function ingestUser(user, nick) {
+    if (!user || !user.id) return;
+    const prev = GW.users.get(user.id) || {};
+    const pg = user.primary_guild || user.clan || null;
+    let tag = prev.tag != null ? prev.tag : null;
+    let tagEnabled = prev.tag_enabled;
+    if (pg) {
+      // primary_guild present and authoritative: trust it even to clear.
+      tag = typeof pg.tag === "string" && pg.tag.length ? pg.tag : null;
+      tagEnabled = pg.identity_enabled !== false && !!tag;
+    }
+    GW.users.set(user.id, {
+      username: user.username || prev.username || null,
+      global_name: user.global_name || prev.global_name || null,
+      // Per-server nickname -- the name shown in the voice channel. Keep
+      // the previous value when this payload doesn't carry a nick (many
+      // user objects arrive without member context).
+      nick: nick != null ? nick : prev.nick != null ? prev.nick : null,
+      tag,
+      tag_enabled: tagEnabled,
+    });
+  }
+
+  /** The name shown next to a user in a server/voice channel, following
+   *  Discord's display priority: server nickname > global display name >
+   *  username. Returns null if we have nothing cached. */
+  function displayNameFor(userId) {
+    const u = GW.users.get(userId);
+    if (!u) return null;
+    return u.nick || u.global_name || u.username || null;
+  }
+
   function handleVoiceStateUpdate(vs) {
     if (!vs.user_id) return;
     stats.voice_state_updates++;
+
+    // Voice states embed the member (user + per-server nick) for the
+    // person entering/leaving a VC. This is the richest source of names
+    // for "people in voice channels" -- exactly the ctrl+click set.
+    if (vs.member && vs.member.user) ingestUser(vs.member.user, vs.member.nick);
 
     // Remove the user from their previous VC (if any)
     const prevChannelId = GW.userVoiceChannel.get(vs.user_id);
@@ -571,6 +658,22 @@
   // updates for these to keep network traffic to a few /sec instead of
   // the whole guild's voice activity.
   const trackedVcs = new Set();
+
+  // Newest message id seen in a watched (LFG) channel. Used by the Ctrl+G
+  // hotkey to jump straight to the latest message. Updated from live
+  // MESSAGE_CREATE events and from history backfill. Snowflakes are
+  // time-ordered, so we keep the numerically-largest id.
+  let latestWatchedMessageId = null;
+  function noteWatchedMessage(id) {
+    if (!id) return;
+    try {
+      if (!latestWatchedMessageId || BigInt(id) > BigInt(latestWatchedMessageId)) {
+        latestWatchedMessageId = id;
+      }
+    } catch (_) {
+      latestWatchedMessageId = id;
+    }
+  }
 
   // Guilds we've subscribed to via op 14 lazy request. We send the
   // subscribe once per guild on first sighting of an LFG embed in that
@@ -1175,15 +1278,29 @@
         // so we end up actually joined to the VC. Beats pushState (which
         // only navigates without joining).
         // ====================================================================
-        document.addEventListener('__bnetswitch_voice_state__', function(event) {
+        document.addEventListener('__bnetswitch_voice_state__', async function(event) {
           const detail = event.detail || {};
-          const ws = window.__bnet_gw_ws;
+          // After suspension/reconnect the gateway WS reference may be
+          // stale (closed) or not yet captured on the new connection.
+          // Retry a few times to give Discord's reconnect flow time to
+          // establish a new WS and for our capture hook to fire.
+          const MAX_RETRIES = 10;
+          const RETRY_MS = 300;
+          let ws = null;
+          for (let i = 0; i < MAX_RETRIES; i++) {
+            ws = window.__bnet_gw_ws;
+            if (ws && ws.readyState === 1) break;
+            if (i < MAX_RETRIES - 1) {
+              console.log('[bnetswitch-lfg-injected] voice-state-update: WS not ready (attempt ' + (i+1) + '/' + MAX_RETRIES + '), retrying in ' + RETRY_MS + 'ms');
+              await new Promise(r => setTimeout(r, RETRY_MS));
+            }
+          }
           if (!ws) {
-            console.log('[bnetswitch-lfg-injected] voice-state-update: no gateway WS captured yet');
+            console.log('[bnetswitch-lfg-injected] voice-state-update: no gateway WS captured after ' + MAX_RETRIES + ' attempts');
             return;
           }
           if (ws.readyState !== 1) {
-            console.log('[bnetswitch-lfg-injected] voice-state-update: WS not OPEN (state=' + ws.readyState + ')');
+            console.log('[bnetswitch-lfg-injected] voice-state-update: WS still not OPEN after ' + MAX_RETRIES + ' attempts (state=' + ws.readyState + ')');
             return;
           }
           try {
@@ -1816,6 +1933,371 @@
   }
 
   // ============================================================================
+  // Ctrl/Cmd+click a voice-channel member -> copy the name shown for them
+  //
+  // We copy the name displayed in the voice channel, following Discord's
+  // priority: server nickname > global display name > username (see
+  // displayNameFor / ingestUser). Names are cached from gateway events,
+  // notably VOICE_STATE_UPDATE which carries member.user + member.nick for
+  // everyone in a VC.
+  //
+  // On a ctrl (or cmd, on macOS) + left-click that lands on a voice-user
+  // row, we resolve the row to a user_id, look up the name, and copy it.
+  // If it isn't cached yet we fall back to a REST /profile fetch using the
+  // auth token we already capture for backfill. A small toast confirms.
+  //
+  // We intentionally scope to voice rows so we don't hijack ctrl+click
+  // elsewhere (links, messages). The selectors below are heuristics over
+  // Discord's obfuscated class names; if Discord renames things, update
+  // VOICE_USER_SELECTOR / extractUserIdFromRow (bnetswitchLfgDiagnose
+  // reports cached-user counts to help debug).
+  // ============================================================================
+
+  // Match both the left-sidebar voice participant rows and the in-call
+  // user tiles. Class names carry a readable prefix before the CSS-module
+  // hash (e.g. "voiceUser_efcaf8"), so substring matching is stable-ish.
+  const VOICE_USER_SELECTOR =
+    '[data-list-item-id^="voiceuser-"], [class*="voiceUser"], [class*="voiceState"], [class*="userTile"]';
+
+  // Discord IDs are 17-20 digit snowflakes; bound the regex to avoid
+  // matching hashes / sizes elsewhere in a URL.
+  const SNOWFLAKE = "\\d{15,25}";
+  const AVATAR_URL_RES = [
+    new RegExp("/avatars/(" + SNOWFLAKE + ")/"),                       // global avatar
+    new RegExp("/users/(" + SNOWFLAKE + ")/avatars/"),                 // per-guild member avatar (partial)
+    new RegExp("/guilds/" + SNOWFLAKE + "/users/(" + SNOWFLAKE + ")/"),// per-guild member avatar (full)
+  ];
+
+  function userIdFromUrl(s) {
+    if (!s) return null;
+    for (const re of AVATAR_URL_RES) {
+      const m = s.match(re);
+      if (m) return m[1];
+    }
+    return null;
+  }
+
+  function userIdFromListItemId(v) {
+    if (!v) return null;
+    // "voiceuser-<channelId>-<userId>" / "member-<...>-<userId>" (sep may be - or _)
+    const m =
+      v.match(new RegExp("(?:voiceuser|member)[-_]?" + SNOWFLAKE + "[-_](" + SNOWFLAKE + ")", "i")) ||
+      v.match(new RegExp("(" + SNOWFLAKE + ")\\s*$")); // trailing id as last resort
+    return m ? m[1] : null;
+  }
+
+  /** Resolve a user_id from a clicked voice-user row by scanning the row
+   *  and all its descendants for any id-bearing attribute. Covers:
+   *    - data-list-item-id="voiceuser-<chan>-<user>"
+   *    - data-user-id
+   *    - <img src>, SVG <image href>/<image xlink:href>  (voice avatars
+   *      are SVG <image> for the speaking-ring, NOT <img>)
+   *    - style="background-image:url(...avatars/<id>...)"
+   */
+  function extractUserIdFromRow(row) {
+    if (!row) return null;
+
+    // Fast path: the per-user list-item id on the row itself.
+    let hit = userIdFromListItemId(row.getAttribute && row.getAttribute("data-list-item-id"));
+    if (hit) return hit;
+
+    const els = [row];
+    if (row.querySelectorAll) {
+      for (const el of row.querySelectorAll("*")) els.push(el);
+    }
+    for (const el of els) {
+      if (!el.getAttribute) continue;
+
+      hit = userIdFromListItemId(el.getAttribute("data-list-item-id"));
+      if (hit) return hit;
+
+      const du = el.getAttribute("data-user-id");
+      if (du && new RegExp("^" + SNOWFLAKE + "$").test(du)) return du;
+
+      // src (img), href / xlink:href (SVG image used for voice avatars)
+      hit =
+        userIdFromUrl(el.getAttribute("src")) ||
+        userIdFromUrl(el.getAttribute("href")) ||
+        userIdFromUrl(el.getAttribute("xlink:href"));
+      if (hit) return hit;
+
+      // background-image: url(...)
+      if (el.style && el.style.backgroundImage) {
+        hit = userIdFromUrl(el.style.backgroundImage);
+        if (hit) return hit;
+      }
+    }
+    return null;
+  }
+
+  /** Look up (or fetch) the name shown for a user in the voice channel
+   *  (server nickname > display name > username), copy it, and toast the
+   *  result. Returns true if a name was copied. Exposed on window as
+   *  bnetswitchCopyMemberName for manual testing. */
+  async function copyMemberNameForUser(userId) {
+    if (!userId) return false;
+    let name = displayNameFor(userId);
+    if (!name) name = await fetchDisplayName(userId);
+
+    if (!name) {
+      showToast("No name found for " + userId);
+      log("name-copy: no name cached for", userId);
+      return false;
+    }
+    copyToClipboard(name);
+    showToast('Copied name "' + name + '"');
+    log("name-copy: copied", JSON.stringify(name), "for", userId);
+    return true;
+  }
+
+  // Set `__bnet_tag_debug = true` from the console to get a verbose log of
+  // every ctrl/cmd+click: whether a voice row matched, the element's class
+  // chain (so we can fix selectors if Discord renamed things), the resolved
+  // user id, and the cached tag. One-shot way to diagnose "nothing copied".
+  function tagDebugEnabled() {
+    try { return !!usw.__bnet_tag_debug; } catch (_) { return false; }
+  }
+  function describeEl(el, depth = 5) {
+    const parts = [];
+    let cur = el;
+    for (let i = 0; i < depth && cur && cur.nodeType === 1; i++) {
+      const cls = (cur.className && cur.className.toString && cur.className.toString()) || "";
+      const lid = cur.getAttribute && cur.getAttribute("data-list-item-id");
+      parts.push(
+        cur.tagName.toLowerCase() +
+          (cls ? "." + cls.trim().split(/\s+/).join(".") : "") +
+          (lid ? "[data-list-item-id=" + lid + "]" : "")
+      );
+      cur = cur.parentElement;
+    }
+    return parts.join("  <  ");
+  }
+
+  function onVoiceUserCtrlClick(e) {
+    if (GM_getValue("tag_copy_enabled", true) === false) return;
+    if (!(e.ctrlKey || e.metaKey)) return;
+    if (e.button !== 0) return;
+    const dbg = tagDebugEnabled();
+    const closest = (sel) => e.target && e.target.closest && e.target.closest(sel);
+    // Prefer the unambiguous per-user list-item; fall back to class match.
+    const row = closest('[data-list-item-id^="voiceuser-"]') || closest(VOICE_USER_SELECTOR);
+    if (!row) {
+      if (dbg) {
+        console.log(
+          "[bnetswitch-lfg] name-copy DEBUG: ctrl/cmd+click but NO voice row matched.\n" +
+            "  selector: " + VOICE_USER_SELECTOR + "\n" +
+            "  target chain: " + describeEl(e.target)
+        );
+      }
+      return; // not a voice member -- let Discord handle the click
+    }
+    const userId = extractUserIdFromRow(row);
+    if (dbg) {
+      const entry = userId ? GW.users.get(userId) : null;
+      console.log(
+        "[bnetswitch-lfg] name-copy DEBUG: voice row matched.\n" +
+          "  row chain: " + describeEl(row) + "\n" +
+          "  resolved userId: " + (userId || "(none)") + "\n" +
+          "  cached entry: " + (entry ? JSON.stringify(entry) : "(not cached)") + "\n" +
+          "  row.outerHTML[0..400]: " + (row.outerHTML || "").slice(0, 400)
+      );
+    }
+    if (!userId) {
+      warn("name-copy: ctrl+click matched a voice row but couldn't resolve a user id " +
+           "(set __bnet_tag_debug=true and re-click to dump the DOM)");
+      return;
+    }
+    // We're claiming this gesture; stop Discord's default ctrl+click.
+    e.preventDefault();
+    e.stopPropagation();
+    copyMemberNameForUser(userId).catch((err) =>
+      warn("name-copy failed:", err && err.message)
+    );
+  }
+
+  /** REST fallback when the user isn't in our gateway cache: fetch their
+   *  profile with the captured auth token. Note this yields the global
+   *  display name / username, NOT a per-server nickname (that needs the
+   *  guild-member endpoint). For people actually in the voice channel the
+   *  gateway cache almost always hits, so this is a rare path. */
+  async function fetchDisplayName(userId) {
+    const token = __bnet_auth_token ||
+      (typeof usw !== "undefined" && usw.__bnet_auth_token) || null;
+    if (!token) {
+      debug("name-copy: no auth token for REST profile fallback");
+      return null;
+    }
+    try {
+      const res = await fetch(
+        "/api/v9/users/" + userId + "/profile?with_mutual_guilds=false",
+        { headers: { authorization: token, accept: "*/*" }, credentials: "include" }
+      );
+      if (!res.ok) {
+        debug("name-copy: profile fetch", userId, "->", res.status);
+        return null;
+      }
+      const body = await res.json();
+      const user = body.user || body;
+      if (user) ingestUser(user); // cache for next time
+      return (user && (user.global_name || user.username)) || null;
+    } catch (err) {
+      debug("name-copy: profile fetch error:", err && err.message);
+      return null;
+    }
+  }
+
+  function copyToClipboard(text) {
+    // GM_setClipboard is the most reliable (no focus/permission needs).
+    try {
+      if (typeof GM_setClipboard === "function") {
+        GM_setClipboard(text, { type: "text", mimetype: "text/plain" });
+        return;
+      }
+    } catch (_) {}
+    // navigator.clipboard works here because we're inside a click gesture.
+    try {
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard.writeText(text).catch(() => fallbackCopy(text));
+        return;
+      }
+    } catch (_) {}
+    fallbackCopy(text);
+  }
+
+  function fallbackCopy(text) {
+    try {
+      const ta = document.createElement("textarea");
+      ta.value = text;
+      ta.style.position = "fixed";
+      ta.style.top = "-1000px";
+      ta.style.opacity = "0";
+      document.body.appendChild(ta);
+      ta.focus();
+      ta.select();
+      document.execCommand("copy");
+      ta.remove();
+    } catch (err) {
+      warn("clipboard copy failed:", err && err.message);
+    }
+  }
+
+  // Minimal transient toast so the (otherwise invisible) clipboard copy
+  // gives the user feedback. Reuses a single element.
+  let __bnet_toast_el = null;
+  let __bnet_toast_timer = null;
+  function showToast(msg) {
+    try {
+      if (!__bnet_toast_el || !__bnet_toast_el.isConnected) {
+        __bnet_toast_el = document.createElement("div");
+        const s = __bnet_toast_el.style;
+        s.position = "fixed";
+        s.bottom = "28px";
+        s.left = "50%";
+        s.transform = "translateX(-50%)";
+        s.zIndex = "100000";
+        s.background = "rgba(30,31,34,0.96)";
+        s.color = "#fff";
+        s.font = "14px/1.4 'gg sans', 'Helvetica Neue', sans-serif";
+        s.padding = "10px 16px";
+        s.borderRadius = "8px";
+        s.boxShadow = "0 4px 18px rgba(0,0,0,0.45)";
+        s.pointerEvents = "none";
+        s.transition = "opacity 0.2s ease";
+        (document.body || document.documentElement).appendChild(__bnet_toast_el);
+      }
+      __bnet_toast_el.textContent = msg;
+      __bnet_toast_el.style.opacity = "1";
+      if (__bnet_toast_timer) clearTimeout(__bnet_toast_timer);
+      __bnet_toast_timer = setTimeout(() => {
+        if (__bnet_toast_el) __bnet_toast_el.style.opacity = "0";
+      }, 2200);
+    } catch (_) {}
+  }
+
+  // Expose for manual testing from the console:
+  //   bnetswitchCopyMemberName("<user_id>")
+  try {
+    usw.bnetswitchCopyMemberName = copyMemberNameForUser;
+  } catch (_) {}
+
+  // ============================================================================
+  // Hotkey: Ctrl+G -> jump to the latest message in the LFG channel
+  //
+  // We navigate Discord's SPA to /channels/<guild>/<channel>/<messageId>
+  // using the newest message id we've tracked (latestWatchedMessageId).
+  // Jumping to the newest message lands at the bottom of the channel and
+  // works even if you're already viewing it but scrolled up. If we don't
+  // have a message id yet we navigate to the channel root (also bottom).
+  // ============================================================================
+
+  function navigateSpa(path) {
+    try {
+      window.history.pushState(null, "", path);
+      window.dispatchEvent(new PopStateEvent("popstate"));
+      return true;
+    } catch (e) {
+      warn("hotkey: SPA navigate failed:", e && e.message);
+      return false;
+    }
+  }
+
+  // Best-effort "scroll to newest" for the case where we're already in the
+  // channel: click Discord's "Jump To Present" bar if it's showing, else
+  // shove the message scroller to the bottom. Selectors are heuristics.
+  function scrollMessagesToBottom() {
+    try {
+      const jump = Array.from(document.querySelectorAll("button, div[role='button']"))
+        .find((b) => /jump to present/i.test(b.textContent || ""));
+      if (jump) {
+        jump.click();
+        return;
+      }
+      const scroller = document.querySelector(
+        '[class*="messagesWrapper"] [class*="scroller"], main [class*="scroller"]'
+      );
+      if (scroller) scroller.scrollTop = scroller.scrollHeight;
+    } catch (_) {}
+  }
+
+  function goToLatestLfgMessage() {
+    const channelId = WATCHED_CHANNEL_IDS[0];
+    if (!channelId) {
+      showToast("No LFG channel configured");
+      return;
+    }
+    const ch = GW.channels.get(channelId);
+    const guildId = ch && ch.guild_id;
+    if (!guildId) {
+      showToast("LFG channel not located yet — open Discord a moment and retry");
+      warn("hotkey: no guild_id for LFG channel", channelId, "(gateway not ready?)");
+      return;
+    }
+    const base = "/channels/" + guildId + "/" + channelId;
+    const path = latestWatchedMessageId ? base + "/" + latestWatchedMessageId : base;
+    navigateSpa(path);
+    // Nudge to the bottom shortly after in case we were already in-channel
+    // (pushState to the same view won't re-scroll on its own).
+    setTimeout(scrollMessagesToBottom, 500);
+    showToast("Jumping to latest LFG message");
+    log("hotkey: go to latest LFG ->", path);
+  }
+
+  function onHotkey(e) {
+    if (GM_getValue("lfg_hotkey_enabled", true) === false) return;
+    // Ctrl+G only (no Cmd/Alt/Shift) so we don't clash with Cmd+G find.
+    if (!e.ctrlKey || e.metaKey || e.altKey || e.shiftKey) return;
+    if ((e.key || "").toLowerCase() !== "g") return;
+    e.preventDefault();
+    e.stopPropagation();
+    goToLatestLfgMessage();
+  }
+
+  // Manual trigger / testing from the console.
+  try {
+    usw.bnetswitchGoToLatestLfg = goToLatestLfgMessage;
+  } catch (_) {}
+
+  // ============================================================================
   // Nickname change UI walk (still DOM-based; Discord doesn't expose
   // self-rename through gateway from the user's side -- it's a REST PATCH)
   // ============================================================================
@@ -1971,25 +2453,67 @@
   // ============================================================================
   let sseRetryCount = 0;
   const SSE_MAX_RETRY_DELAY_MS = 30000;
+  const SSE_BASE_RETRY_DELAY_MS = 1000;
+  // Server sends a `ping` event ~every 15s. If we hear nothing at all for
+  // this long, the connection is presumed dead (e.g. a half-open socket
+  // after a system suspend, which often never fires `onerror`) and we force
+  // a reconnect.
+  const SSE_HEARTBEAT_TIMEOUT_MS = 45000;
   let sseSource = null;
-  let sseFallbackInterval = null;
+  let sseReconnectTimer = null;
+  let lastSseActivityAt = 0;
+
+  function noteSseActivity() {
+    lastSseActivityAt = Date.now();
+  }
+
+  function clearSseReconnectTimer() {
+    if (sseReconnectTimer) {
+      clearTimeout(sseReconnectTimer);
+      sseReconnectTimer = null;
+    }
+  }
+
+  function closeSse() {
+    if (sseSource) {
+      try { sseSource.close(); } catch (e) { /* ignore */ }
+      sseSource = null;
+    }
+  }
+
+  // Reconnect SSE with capped exponential backoff + jitter. HTTP polling runs
+  // as a TEMPORARY bridge in the meantime and is torn down once SSE is back
+  // (in onopen) -- we never permanently downgrade to polling anymore.
+  function scheduleSseReconnect() {
+    clearSseReconnectTimer();
+    const base = SSE_BASE_RETRY_DELAY_MS * Math.pow(2, Math.min(sseRetryCount, 5));
+    const delay = Math.min(SSE_MAX_RETRY_DELAY_MS, base) * (0.5 + Math.random() * 0.5);
+    enablePollingFallback();
+    sseReconnectTimer = setTimeout(connectSSE, delay);
+  }
 
   function connectSSE() {
+    clearSseReconnectTimer();
+    closeSse();
     const url = `${BNETSWITCH_HOST}/events?token=${encodeURIComponent(BNETSWITCH_TOKEN)}&session=${encodeURIComponent(SESSION_ID)}`;
 
     // EventSource from discord.com (HTTPS) to http://127.0.0.1 may be
     // blocked by mixed-content policy in some browsers. We try it; if
-    // it fails, the fallback path enables HTTP polling which uses
-    // GM_xmlhttpRequest (bypasses CORS + mixed-content).
+    // it fails, we keep retrying with backoff while HTTP polling (via
+    // GM_xmlhttpRequest, which bypasses CORS + mixed-content) bridges.
     try {
       sseSource = new EventSource(url);
     } catch (e) {
-      warn("EventSource constructor failed:", e.message, "-- using HTTP polling fallback");
-      enablePollingFallback();
+      warn("EventSource constructor failed:", e.message, "-- polling + retrying SSE");
+      sseRetryCount++;
+      scheduleSseReconnect();
       return;
     }
 
+    noteSseActivity();
+
     sseSource.addEventListener("action", (event) => {
+      noteSseActivity();
       try {
         const action = JSON.parse(event.data);
         executeAction(action);
@@ -1998,7 +2522,13 @@
       }
     });
 
+    // Heartbeat: just proof-of-life, updates the activity timestamp.
+    sseSource.addEventListener("ping", () => {
+      noteSseActivity();
+    });
+
     sseSource.addEventListener("boot", (event) => {
+      noteSseActivity();
       try {
         const data = JSON.parse(event.data);
         const boot = data.boot_id;
@@ -2030,24 +2560,45 @@
     sseSource.onopen = () => {
       log("SSE connected to bnetswitch");
       sseRetryCount = 0;
-      // SSE is handling actions + session keepalive; disable fallbacks.
+      noteSseActivity();
+      // SSE is handling actions; tear down the temporary polling bridge.
       disablePollingFallback();
+      // Re-assert leadership/liveness immediately on (re)connect.
+      registerSession();
     };
 
     sseSource.onerror = () => {
-      // EventSource auto-reconnects, but if bnetswitch is down or
-      // mixed-content blocks the connection, it'll keep failing.
-      // After a few failures, fall back to HTTP polling.
+      // Don't permanently downgrade. Replace the (possibly stuck/half-open)
+      // source and reconnect with backoff; polling bridges the gap.
       sseRetryCount++;
-      if (sseRetryCount >= 3) {
-        // Kill the EventSource to stop its auto-reconnect spam.
-        if (sseSource) {
-          sseSource.close();
-          sseSource = null;
-        }
-        enablePollingFallback();
-      }
+      closeSse();
+      scheduleSseReconnect();
     };
+  }
+
+  // Liveness watchdog: if the SSE source exists but has gone silent past the
+  // heartbeat timeout, the socket is almost certainly half-open (typical
+  // after a suspend/resume). Force a fresh connection.
+  function sseHeartbeatWatchdog() {
+    if (!sseSource) return; // a reconnect is already scheduled / in flight
+    if (Date.now() - lastSseActivityAt > SSE_HEARTBEAT_TIMEOUT_MS) {
+      warn("SSE silent >" + SSE_HEARTBEAT_TIMEOUT_MS + "ms; forcing reconnect");
+      sseRetryCount = 0; // resume case -- reconnect promptly
+      connectSSE();
+    }
+  }
+
+  // Ensure the bridge is live after a resume / network change / tab focus.
+  function ensureConnected(reason) {
+    debug("ensureConnected:", reason);
+    registerSession();
+    const stale = !sseSource ||
+      sseSource.readyState === 2 /* CLOSED */ ||
+      Date.now() - lastSseActivityAt > SSE_HEARTBEAT_TIMEOUT_MS;
+    if (stale) {
+      sseRetryCount = 0;
+      connectSSE();
+    }
   }
 
   let sseFallbackActionInterval = null;
@@ -2074,12 +2625,35 @@
   }
 
   function start() {
-    log("bnetswitch LFG bridge starting (v0.9.9, SSE push + gateway tap)");
+    log("bnetswitch LFG bridge starting (v0.9.15, SSE push + gateway tap)");
     log("server:", BNETSWITCH_HOST);
     log("watched channels:", WATCHED_CHANNEL_IDS.join(", ") || "all");
 
     // Primary action delivery via SSE (push, ~0 latency).
     connectSSE();
+
+    // Liveness watchdog: catches half-open SSE sockets (typically left behind
+    // by a system suspend) that never fire `onerror`.
+    setInterval(sseHeartbeatWatchdog, 15000);
+
+    // Resume detector: a frozen process means setInterval stops firing during
+    // suspend, so a wall-clock gap far larger than the interval means we just
+    // resumed. Sockets are stale -- rebuild the connection and refresh LFG.
+    let __bnet_last_tick = Date.now();
+    const TICK_INTERVAL_MS = 10000;
+    setInterval(() => {
+      const now = Date.now();
+      const gap = now - __bnet_last_tick;
+      __bnet_last_tick = now;
+      if (gap > TICK_INTERVAL_MS * 2) {
+        log("resume detected (gap " + Math.round(gap / 1000) + "s); reconnecting");
+        ensureConnected("resume");
+        scheduleBackfill();
+      }
+    }, TICK_INTERVAL_MS);
+
+    // Network came back (Wi-Fi reconnect, VPN flap, etc.).
+    window.addEventListener("online", () => ensureConnected("online"));
 
     // Voice status: still push-based (us -> server), reduced to 30s.
     // The SSE connection's keepalive implicitly tells the server we're
@@ -2095,10 +2669,20 @@
     // and the server registers/refreshes on every keepalive read. Still
     // do an explicit register at boot for immediate leader election.
     registerSession();
-    // Re-register on tab focus so switching tabs promotes this one.
+    // On tab focus: promote this session AND make sure the bridge is live
+    // (the tab may have been hidden through a suspend that killed the socket).
     document.addEventListener("visibilitychange", () => {
-      if (document.visibilityState === "visible") registerSession();
+      if (document.visibilityState === "visible") ensureConnected("visible");
     });
+
+    // Ctrl/Cmd+click a voice-channel member -> copy their server tag.
+    // Capture phase so we can pre-empt Discord's own ctrl+click handling.
+    document.addEventListener("click", onVoiceUserCtrlClick, true);
+    log("name copy: ctrl/cmd+click a voice member to copy their displayed name");
+
+    // Ctrl+G -> jump to the latest message in the LFG channel.
+    document.addEventListener("keydown", onHotkey, true);
+    log("hotkey: Ctrl+G jumps to the latest LFG message");
   }
 
   async function registerSession() {

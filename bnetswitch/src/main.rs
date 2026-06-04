@@ -325,6 +325,9 @@ struct App {
     editing_nickname: bool,
     /// Buffer for nickname input.
     nickname_input: String,
+    /// Whether the account detail overlay (shows email + full metadata) is
+    /// open. Toggled with 'd'; the email is otherwise hidden everywhere.
+    show_detail: bool,
     /// Whether we're in manual placement entry mode.
     editing_placement: bool,
     /// Buffer for placement input ("T Diamond 3 12" etc.).
@@ -415,7 +418,7 @@ impl App {
                 app_config.pending_merge_emails.len()
             )
         } else {
-            "Ready. Enter switch, a add, s save, x kill, n nickname, f refresh ranks, q quit."
+            "Ready. Enter switch, a add, s save, x kill, n nickname, b ban, f refresh ranks, q quit."
                 .to_string()
         };
         // Spin up the long-lived rank-fetch worker. It receives fetch
@@ -464,6 +467,7 @@ impl App {
             status,
             editing_nickname: false,
             nickname_input: String::new(),
+            show_detail: false,
             editing_placement: false,
             placement_input: String::new(),
             pending_confirm: None,
@@ -944,6 +948,10 @@ impl App {
                         self.app_config.display_name(&email)
                     );
                 }
+                // Still sync Discord nickname even if already active —
+                // catches cases where the nickname drifted or wasn't
+                // synced on startup.
+                self.sync_discord_nickname_for(&email);
                 return Ok(());
             }
             AccountState::Pending => {
@@ -979,11 +987,12 @@ impl App {
         self.list_state.select(Some(0));
 
         // Launch if configured
+        let name = self.app_config.display_name(&email);
         if self.app_config.auto_launch {
             switcher::launch_bnet(&self.install, self.app_config.use_lutris)?;
-            self.status = format!("Switched to {} and launched Battle.net.", email);
+            self.status = format!("Switched to {} and launched Battle.net.", name);
         } else {
-            self.status = format!("Switched to {}. Launch Battle.net manually.", email);
+            self.status = format!("Switched to {}. Launch Battle.net manually.", name);
         }
 
         // Push the new account's BattleTag as a per-server nickname to all
@@ -1078,7 +1087,7 @@ impl App {
                     self.app_config.set_nickname(&email, nick.clone());
                 }
                 self.app_config.save()?;
-                self.status = format!("Nickname saved for {}.", email);
+                self.status = format!("Nickname saved for {}.", self.app_config.display_name(&email));
             }
         } else {
             self.status = "Nickname edit cancelled.".to_string();
@@ -1222,6 +1231,8 @@ impl App {
             // Capture BattleTag for the newly active account.
             self.refresh_active_battletag();
 
+            // Remember the full saved set so Battle.net trims can't drop it.
+            self.app_config.remember_emails(&merged);
             self.app_config.pending_merge_emails.clear();
             self.app_config.pending_snapshot_emails.clear();
             self.app_config.save()?;
@@ -1248,6 +1259,10 @@ impl App {
             if !self.accounts.is_empty() {
                 self.list_state.select(Some(0));
             }
+            // Persist any newly-seen emails so they survive Battle.net trims.
+            if self.app_config.remember_emails(&self.accounts) {
+                let _ = self.app_config.save();
+            }
             self.refresh_active_battletag();
             if let Some(email) = self.accounts.first() {
                 let display = self.app_config.display_name(email);
@@ -1258,6 +1273,65 @@ impl App {
         }
 
         Ok(())
+    }
+
+    /// Emails for accounts that can be safely restored to Battle.net's login
+    /// list: those Battle.net still has cached credentials for (its
+    /// `login_cache`), mapped to emails via bnetswitch's known
+    /// BattleTag↔email pairs, followed by any other emails previously seen
+    /// saved on this machine. Using `login_cache` as the gate means
+    /// TCNO-imported accounts with no local credentials are never injected as
+    /// dead "needs login" entries.
+    fn recoverable_emails(&self) -> Vec<String> {
+        let mut tag_to_email: HashMap<String, String> = HashMap::new();
+        for (email, meta) in &self.app_config.accounts {
+            if let Some(tag) = &meta.battletag {
+                tag_to_email.insert(tag.clone(), email.clone());
+            }
+        }
+        let mut out: Vec<String> = Vec::new();
+        // login_cache, most-recent first: accounts with live credentials.
+        for tag in config::read_all_battletags(&self.install.prefix) {
+            if let Some(email) = tag_to_email.get(&tag) {
+                if !out.contains(email) {
+                    out.push(email.clone());
+                }
+            }
+        }
+        // Any other emails we've recorded as saved here.
+        for email in &self.app_config.remembered_emails {
+            if !out.contains(email) {
+                out.push(email.clone());
+            }
+        }
+        out
+    }
+
+    /// Restore any dropped accounts into Battle.net's `SavedAccountNames` on
+    /// launch (active account preserved at position 0). No-op during an "Add
+    /// New Account" workflow or when nothing is missing.
+    fn auto_recover_accounts(&mut self) {
+        if !self.app_config.pending_merge_emails.is_empty() {
+            return;
+        }
+        let order = config::reconcile_saved_accounts(&self.accounts, &self.recoverable_emails());
+        if order.len() <= self.accounts.len() {
+            return;
+        }
+        let added = order.len().saturating_sub(self.accounts.len());
+        match config::write_account_order(&self.install.config_path, &order) {
+            Ok(_) => {
+                self.accounts = order;
+                self.list_state.select(Some(0));
+                self.status = format!(
+                    "Restored {} account(s) Battle.net had dropped from the login list.",
+                    added
+                );
+            }
+            Err(e) => {
+                self.status = format!("Account restore failed: {}", e);
+            }
+        }
     }
 
     /// Begin manual placement editing for the selected row.
@@ -1826,6 +1900,13 @@ fn main() -> Result<()> {
         }
     }
 
+    // Remember every email Battle.net currently lists so a later Battle.net
+    // trim (which happens when its own UI is used to log in/out) can't make
+    // bnetswitch forget them.
+    if app_config.remember_emails(&accounts) {
+        let _ = app_config.save();
+    }
+
     // Set up terminal
     enable_raw_mode()?;
     let mut stdout = io::stdout();
@@ -1894,19 +1975,10 @@ fn main() -> Result<()> {
         app.sync_discord_nickname_for(&active_email);
     }
 
-    // Drift detection: Battle.net occasionally trims SavedAccountNames
-    // when its UI is used to log in/out. Compare against the count of
-    // BattleTags Battle.net itself knows about (login_cache) — if there
-    // are more known tags than visible emails, the user likely wants to
-    // hit 'R' to rebuild.
-    let known_tag_count = config::login_cache_count(&app.install.prefix);
-    let visible_email_count = app.accounts.len();
-    if known_tag_count > visible_email_count {
-        app.status = format!(
-            "Battle.net knows {} accounts but SavedAccountNames only lists {}. Press 'R' to rebuild.",
-            known_tag_count, visible_email_count
-        );
-    }
+    // Auto-recover accounts Battle.net dropped from its login list, using the
+    // accounts it still has credentials for (login_cache) plus emails we've
+    // seen saved here. Active account stays first, so auto-login is unchanged.
+    app.auto_recover_accounts();
 
     // Install a panic hook that restores terminal state before printing
     // the panic message. Without this, a panic mid-TUI leaves the user's
@@ -2108,7 +2180,8 @@ fn run_tui(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut App)
                                         app.status = format!("Error: {}", e);
                                     }
                                 } else {
-                                    app.status = format!("{} no longer in account list.", email);
+                                    app.status =
+                                        format!("{} no longer in account list.", app.app_config.display_name(&email));
                                 }
                             }
                             PendingAction::AddNew => {
@@ -2147,7 +2220,17 @@ fn run_tui(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut App)
 
             match key.code {
                 KeyCode::Char('q') | KeyCode::Esc => {
-                    app.should_quit = true;
+                    // Esc closes the detail overlay first rather than quitting.
+                    if app.show_detail && key.code == KeyCode::Esc {
+                        app.show_detail = false;
+                    } else {
+                        app.should_quit = true;
+                    }
+                }
+                KeyCode::Char('d') if app.view == View::Accounts => {
+                    // Toggle the account detail overlay (the only place the
+                    // email is shown).
+                    app.show_detail = !app.show_detail;
                 }
 
                 // ----- view toggle -----
@@ -2223,12 +2306,26 @@ fn run_tui(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut App)
                             // account isn't already active, require confirmation.
                             let row = app.selected_row();
                             let needs_switch = row.as_ref().map(|r| !matches!(r.state, AccountState::Active)).unwrap_or(false);
-                            if needs_switch && switcher::is_game_running() {
-                                let email = row.unwrap().email.clone();
+                            let email_opt = row.as_ref().map(|r| r.email.clone());
+                            let banned = email_opt
+                                .as_deref()
+                                .map(|e| app.app_config.is_banned(e))
+                                .unwrap_or(false);
+                            let game_running = switcher::is_game_running();
+                            if needs_switch && (banned || game_running) {
+                                let email = email_opt.unwrap();
                                 let name = app.app_config.display_name(&email);
+                                let mut reasons: Vec<&str> = Vec::new();
+                                if banned {
+                                    reasons.push("account is BANNED");
+                                }
+                                if game_running {
+                                    reasons.push("Overwatch is running and will be killed");
+                                }
                                 app.pending_confirm = Some(PendingAction::Switch { email });
                                 app.status = format!(
-                                    "GAME IS RUNNING. Switch to {} will kill Overwatch. Press Y to confirm, any other key to cancel.",
+                                    "{}. Switch to {}? Press Y to confirm, any other key to cancel.",
+                                    reasons.join("; "),
                                     name
                                 );
                             } else if let Err(e) = app.switch_to_selected() {
@@ -2258,6 +2355,29 @@ fn run_tui(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut App)
                 KeyCode::Char('p') => {
                     app.start_placement_edit();
                 }
+                KeyCode::Char('b') if app.view == View::Accounts => {
+                    // Toggle the banned marker on the selected account so the
+                    // user knows it can't be used for Overwatch.
+                    if let Some(row) = app.selected_row() {
+                        let email = row.email.clone();
+                        let now_banned = app.app_config.toggle_banned(&email);
+                        let name = app.app_config.display_name(&email);
+                        match app.app_config.save() {
+                            Ok(_) => {
+                                app.status = if now_banned {
+                                    format!("Marked {} as BANNED — won't launch Overwatch.", name)
+                                } else {
+                                    format!("Unmarked {} — no longer banned.", name)
+                                };
+                            }
+                            Err(e) => {
+                                app.status = format!("Failed to save ban state: {}", e);
+                            }
+                        }
+                    } else {
+                        app.status = "No account selected.".to_string();
+                    }
+                }
                 KeyCode::Char('o') => {
                     // Launch Overwatch for the selected (or active)
                     // account directly. If the selection is a different
@@ -2270,6 +2390,13 @@ fn run_tui(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut App)
                             continue;
                         }
                     };
+                    if app.app_config.is_banned(&row.email) {
+                        app.status = format!(
+                            "{} is marked BANNED — not launching Overwatch. Press 'b' to unmark.",
+                            app.app_config.display_name(&row.email)
+                        );
+                        continue;
+                    }
                     let needs_switch = !matches!(row.state, AccountState::Active);
                     if needs_switch && !matches!(row.state, AccountState::Saved) {
                         app.status = format!(
@@ -2469,67 +2596,32 @@ fn run_tui(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut App)
                     app.status = format!("Refreshing ranks for {} account(s)...", tags.len());
                 }
                 KeyCode::Char('R') => {
-                    // Rebuild SavedAccountNames from accounts Battle.net
-                    // *actually has credentials for*. Source of truth is
-                    // the login_cache SQLite table — only BattleTags listed
-                    // there have encrypted tokens on disk and can be
-                    // auto-logged-in by Battle.net.
-                    //
-                    // We intentionally do NOT include accounts known only
-                    // from a TCNO import; those don't have credentials on
-                    // this machine yet and would just sit dead in the
-                    // SavedAccountNames list.
-                    //
-                    // Order: login_cache returns BattleTags by recency
-                    // (most recent first via ROWID DESC). We map those
-                    // back to emails using bnetswitch's known mapping,
-                    // which preserves the natural recency order.
-
-                    let authed_tags = config::read_all_battletags(&app.install.prefix);
-
-                    // Build BattleTag -> email reverse map from our config.
-                    let mut tag_to_email: HashMap<String, String> = HashMap::new();
-                    for (email, meta) in &app.app_config.accounts {
-                        if let Some(tag) = &meta.battletag {
-                            tag_to_email.insert(tag.clone(), email.clone());
-                        }
-                    }
-
-                    let mut order: Vec<String> = Vec::new();
-                    let mut unmapped_tags: Vec<String> = Vec::new();
-                    for tag in &authed_tags {
-                        match tag_to_email.get(tag) {
-                            Some(email) => {
-                                if !order.contains(email) {
-                                    order.push(email.clone());
-                                }
-                            }
-                            None => unmapped_tags.push(tag.clone()),
-                        }
-                    }
-
-                    if order.is_empty() {
-                        app.status = format!(
-                            "No authenticated accounts found in login_cache (found {} tags but none mapped to known emails).",
-                            authed_tags.len()
-                        );
+                    // Rebuild SavedAccountNames to include every account
+                    // bnetswitch has seen Battle.net save on this machine.
+                    // Battle.net trims that list when its own UI is used to
+                    // log in/out; this restores the full set (the active
+                    // account stays first) so accounts stop dropping to
+                    // "needs login". Only previously-saved emails are
+                    // restored, so TCNO-imported-but-never-used accounts are
+                    // never injected as dead login entries.
+                    let order = config::reconcile_saved_accounts(
+                        &app.accounts,
+                        &app.recoverable_emails(),
+                    );
+                    if order.len() <= app.accounts.len() {
+                        app.status =
+                            "All recoverable accounts are already listed; nothing to rebuild."
+                                .to_string();
                     } else {
+                        let added = order.len().saturating_sub(app.accounts.len());
                         match config::write_account_order(&app.install.config_path, &order) {
                             Ok(_) => {
-                                app.accounts = order.clone();
+                                app.accounts = order;
                                 app.list_state.select(Some(0));
-                                let mut msg = format!(
-                                    "Rebuilt SavedAccountNames with {} authenticated account(s).",
-                                    order.len()
+                                app.status = format!(
+                                    "Rebuilt login list (+{} account(s) restored).",
+                                    added
                                 );
-                                if !unmapped_tags.is_empty() {
-                                    msg.push_str(&format!(
-                                        " {} BattleTag(s) in login_cache had no email mapping (skipped): {}",
-                                        unmapped_tags.len(),
-                                        unmapped_tags.join(", ")
-                                    ));
-                                }
-                                app.status = msg;
                                 app.refresh_all_ranks(false);
                             }
                             Err(e) => {
@@ -2900,6 +2992,22 @@ fn ui(f: &mut ratatui::Frame, app: &mut App) {
                 ),
             };
 
+            // Banned accounts override styling: red + strikethrough name and
+            // a clear suffix so they're unmistakable in the list.
+            let (row_style, suffix, suffix_style) = if app.app_config.is_banned(&row.email) {
+                (
+                    Style::default()
+                        .fg(Color::Red)
+                        .add_modifier(Modifier::CROSSED_OUT),
+                    "  (BANNED)",
+                    Style::default()
+                        .fg(Color::Red)
+                        .add_modifier(Modifier::BOLD),
+                )
+            } else {
+                (row_style, suffix, suffix_style)
+            };
+
             // Look up rank data and fetch state for this account.
             let ranks_opt = app.ranks_by_email.get(&row.email);
             let is_fetching = app.fetching_emails.contains(&row.email);
@@ -3050,6 +3158,10 @@ fn ui(f: &mut ratatui::Frame, app: &mut App) {
         Span::raw(" Place  "),
         Span::styled("n", Style::default().fg(Color::Cyan)),
         Span::raw(" Nick  "),
+        Span::styled("b", Style::default().fg(Color::Cyan)),
+        Span::raw(" Ban  "),
+        Span::styled("d", Style::default().fg(Color::Cyan)),
+        Span::raw(" Detail  "),
         Span::styled("l", Style::default().fg(Color::Cyan)),
         Span::raw(" AutoLaunch  "),
         Span::styled("q", Style::default().fg(Color::Cyan)),
@@ -3104,6 +3216,60 @@ fn ui(f: &mut ratatui::Frame, app: &mut App) {
                 .border_style(Style::default().fg(Color::Magenta)),
         );
         f.render_widget(input, area);
+    }
+
+    // Account detail overlay: the only place the full email is shown. Opened
+    // with 'd', closed with 'd' or Esc.
+    if app.show_detail && app.view == View::Accounts {
+        if let Some(row) = app.selected_row() {
+            let meta = app.app_config.accounts.get(&row.email);
+            let nickname = meta
+                .and_then(|m| m.nickname.clone())
+                .unwrap_or_else(|| "(none)".to_string());
+            let battletag = meta
+                .and_then(|m| m.battletag.clone())
+                .unwrap_or_else(|| "(unknown)".to_string());
+            let banned = app.app_config.is_banned(&row.email);
+            let state = match row.state {
+                AccountState::Active => "Active (auto-login)",
+                AccountState::Saved => "Saved (switchable)",
+                AccountState::Pending => "Pending (Add New in progress)",
+                AccountState::Known => "Known (needs login)",
+            };
+            let label = |k: &str| Span::styled(
+                format!("{:<10}", k),
+                Style::default().fg(Color::DarkGray),
+            );
+            let lines = vec![
+                Line::from(vec![label("Nickname:"), Span::raw(nickname)]),
+                Line::from(vec![label("BattleTag:"), Span::raw(battletag)]),
+                Line::from(vec![
+                    label("Email:"),
+                    Span::styled(row.email.clone(), Style::default().fg(Color::White)),
+                ]),
+                Line::from(vec![label("Status:"), Span::raw(state.to_string())]),
+                Line::from(vec![
+                    label("Banned:"),
+                    if banned {
+                        Span::styled(
+                            "YES — won't launch Overwatch",
+                            Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+                        )
+                    } else {
+                        Span::styled("no", Style::default().fg(Color::Green))
+                    },
+                ]),
+            ];
+            let area = centered_rect(60, 30, f.area());
+            f.render_widget(Clear, area);
+            let detail = Paragraph::new(lines).block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .title("Account Details (d or Esc to close)")
+                    .border_style(Style::default().fg(Color::Cyan)),
+            );
+            f.render_widget(detail, area);
+        }
     }
 }
 

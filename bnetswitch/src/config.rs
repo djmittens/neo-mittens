@@ -188,6 +188,22 @@ pub fn write_account_order(config_path: &Path, accounts: &[String]) -> Result<()
     Ok(())
 }
 
+/// Reconcile Battle.net's (possibly trimmed) `SavedAccountNames` against the
+/// set of emails bnetswitch has previously seen saved on this machine.
+/// Returns the on-disk list (order preserved, deduplicated) followed by any
+/// remembered emails missing from it. The first on-disk entry — the active,
+/// auto-login account — always stays first, so reconciling never changes
+/// which account Battle.net logs into.
+pub fn reconcile_saved_accounts(on_disk: &[String], remembered: &[String]) -> Vec<String> {
+    let mut result: Vec<String> = Vec::new();
+    for e in on_disk.iter().chain(remembered.iter()) {
+        if !e.is_empty() && !result.iter().any(|x| x == e) {
+            result.push(e.clone());
+        }
+    }
+    result
+}
+
 /// Reorder accounts so the selected email is first.
 pub fn reorder_accounts(accounts: &[String], selected_email: &str) -> Vec<String> {
     let mut result = vec![selected_email.to_string()];
@@ -274,6 +290,53 @@ pub fn read_all_battletags(prefix: &Path) -> Vec<String> {
 /// Used by bnetswitch to detect when SavedAccountNames has been trimmed
 /// below the set of accounts Battle.net itself remembers (which happens
 /// when the user logs out via Battle.net's native UI).
+#[allow(dead_code)]
 pub fn login_cache_count(prefix: &Path) -> usize {
     read_all_battletags(prefix).len()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn reconcile_restores_missing_keeps_active_first() {
+        let on_disk = vec!["a@x.com".to_string(), "b@x.com".to_string()];
+        let remembered = vec![
+            "b@x.com".to_string(),
+            "c@x.com".to_string(),
+            "d@x.com".to_string(),
+        ];
+        let out = reconcile_saved_accounts(&on_disk, &remembered);
+        // Active account (on_disk[0]) is unchanged; missing emails appended.
+        assert_eq!(
+            out,
+            vec![
+                "a@x.com".to_string(),
+                "b@x.com".to_string(),
+                "c@x.com".to_string(),
+                "d@x.com".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn reconcile_dedupes_and_ignores_empty() {
+        let on_disk = vec![
+            "a@x.com".to_string(),
+            "a@x.com".to_string(),
+            String::new(),
+        ];
+        let remembered = vec!["a@x.com".to_string(), "b@x.com".to_string()];
+        let out = reconcile_saved_accounts(&on_disk, &remembered);
+        assert_eq!(out, vec!["a@x.com".to_string(), "b@x.com".to_string()]);
+    }
+
+    #[test]
+    fn reconcile_noop_when_all_present() {
+        let on_disk = vec!["a@x.com".to_string(), "b@x.com".to_string()];
+        let remembered = vec!["a@x.com".to_string()];
+        let out = reconcile_saved_accounts(&on_disk, &remembered);
+        assert_eq!(out, on_disk);
+    }
 }

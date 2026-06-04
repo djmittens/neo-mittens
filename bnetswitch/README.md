@@ -46,11 +46,16 @@ bnetswitch
 | Down/j  | Move selection down             |
 | Enter   | Switch to selected account      |
 | n       | Set nickname for selected account |
+| b       | Toggle "banned" marker on selected account |
 | l       | Toggle auto-launch on/off       |
 | r       | Reload accounts from config     |
+| R       | Rebuild login list from accounts Battle.net still has credentials for |
 | q/Esc   | Quit                            |
 
 The active account (first in the list) is shown in green with a `*` marker.
+Accounts marked **banned** are shown in red with strikethrough and a
+`(BANNED)` tag; bnetswitch refuses to launch Overwatch for them and asks for
+confirmation before switching into one.
 
 ## Configuration
 

@@ -82,6 +82,24 @@ Disable:
 GM_setValue("debug", false);
 ```
 
+## Resilience (suspend / dropped sockets)
+
+The bridge keeps itself connected across system suspends and network drops:
+
+- The server sends a `ping` event every ~15s. The userscript treats a >45s
+  silence as a dead (half-open) connection and force-reconnects — half-open
+  sockets after a suspend often never fire `onerror`, so this is the signal
+  that recovers them.
+- SSE reconnects with capped exponential backoff and **never permanently
+  downgrades** to HTTP polling; polling only bridges the gap until SSE is
+  back.
+- A wall-clock-gap detector notices when timers were frozen (suspend) and
+  rebuilds the connection plus re-backfills the LFG list on resume.
+- `visibilitychange` (tab focus) and the `online` event also trigger a
+  reconnect + session re-register.
+
+No manual Discord-tab reload should be needed after a suspend or Wi-Fi blip.
+
 ## Privacy
 
 The script:
