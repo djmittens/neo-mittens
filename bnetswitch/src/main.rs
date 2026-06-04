@@ -835,6 +835,11 @@ impl App {
     ///
     /// Within each group, sort order matches insertion / config order so
     /// the layout doesn't jump around between renders.
+    ///
+    /// Banned accounts are then de-prioritized to the bottom (stable sort,
+    /// so their relative order is preserved) since they can't be used for
+    /// Overwatch — except the active account, which stays pinned at top so
+    /// the list still reflects which account auto-logs-in.
     fn displayed_accounts(&self) -> Vec<AccountRow> {
         let mut rows: Vec<AccountRow> = Vec::new();
         let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
@@ -888,6 +893,19 @@ impl App {
                 state: AccountState::Known,
             });
         }
+
+        // De-prioritize banned accounts to the bottom. Stable sort preserves
+        // the within-group ordering above; the active account stays pinned at
+        // the top even if banned so the list reflects who auto-logs-in.
+        rows.sort_by_key(|r| {
+            if matches!(r.state, AccountState::Active) {
+                0
+            } else if self.app_config.is_banned(&r.email) {
+                2
+            } else {
+                1
+            }
+        });
 
         rows
     }
