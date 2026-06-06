@@ -7,14 +7,14 @@
 
 set -euo pipefail
 
-# Host-to-theme mapping
-# Add your hosts here: "hostname:theme-name"
-declare -A HOST_THEMES=(
-    ["obelisk"]="obelisk"
-    ["obelisk.local"]="obelisk"
+# Host-to-theme mapping (bash 3.2 compatible — no associative arrays)
+# Add your hosts here as "hostname:theme-name" entries
+HOST_THEMES=(
+    "obelisk:obelisk"
+    "obelisk.local:obelisk"
     # Add more hosts as needed:
-    # ["production-server"]="danger"
-    # ["staging"]="warning"
+    # "production-server:danger"
+    # "staging:warning"
 )
 
 # Default theme for unknown hosts (falls back to local on disconnect)
@@ -47,17 +47,30 @@ get_hostname() {
     done
 }
 
+# Look up theme for a hostname from HOST_THEMES list
+lookup_host_theme() {
+    local host="$1"
+    local entry
+    for entry in "${HOST_THEMES[@]}"; do
+        if [[ "${entry%%:*}" == "$host" ]]; then
+            echo "${entry#*:}"
+            return
+        fi
+    done
+}
+
 # Get theme for a hostname
 get_theme_for_host() {
     local host="$1"
-    local theme="${HOST_THEMES[$host]:-}"
-    
+    local theme
+    theme=$(lookup_host_theme "$host")
+
     # Try without domain suffix
     if [[ -z "$theme" && "$host" == *.* ]]; then
         local short_host="${host%%.*}"
-        theme="${HOST_THEMES[$short_host]:-}"
+        theme=$(lookup_host_theme "$short_host")
     fi
-    
+
     echo "${theme:-$DEFAULT_REMOTE_THEME}"
 }
 

@@ -70,11 +70,11 @@ require("lazy").setup({
   { 'saadparwaiz1/cmp_luasnip', },
   { 'scalameta/nvim-metals',           dependencies = { 'nvim-lua/plenary.nvim' }, main = 'neo-mittens.plugins.metals',     config = true },
   { "nvim-treesitter/nvim-treesitter", branch = "main", build = ":TSUpdate", config = function() require('neo-mittens.plugins.treesitter').setup() end },
-  {
-    dir = "~/src/valkyria/editors",
-    name = "valk-editors",
-    build = "cc -shared -o valk.so -fPIC -I src src/parser.c && cp valk.so " .. vim.fn.stdpath("data") .. "/site/parser/valk.so",
-  },
+  -- {
+  --   dir = "~/src/valkyria/editors",
+  --   name = "valk-editors",
+  --   build = "cc -shared -o valk.so -fPIC -I src src/parser.c && cp valk.so " .. vim.fn.stdpath("data") .. "/site/parser/valk.so",
+  -- },
   {
     "nvim-treesitter/nvim-treesitter-context",
     dependencies = { 'nvim-treesitter/nvim-treesitter' },
