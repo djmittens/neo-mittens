@@ -558,8 +558,10 @@ wrapper always picks up the latest binary from `app/tix/build/tix`.
 ### OpenCode Tool (.opencode/tools/tix-status.ts)
 Read `.tix/cache.db` or shell out to `tix query`.
 
-### OpenCode Skill (.opencode/skills/tix/SKILL.md)
+### Agent Skill (skills/tix/SKILL.md)
 Skill for LLMs to understand tix workflow and commands.
+Follows the open Agent Skills spec (agentskills.io). Installed to
+~/.agents/skills/tix/ by bootstrap, discoverable by all conforming agents.
 
 ### Claude Commands (.claude/commands/tix-*.md)
 - `tix-status.md` - Show tix status

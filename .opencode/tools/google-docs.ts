@@ -1,7 +1,5 @@
 import { tool } from "@opencode-ai/plugin"
-import { readFileSync, existsSync } from "fs"
-import { homedir } from "os"
-import { join } from "path"
+import { googleApi } from "./google-auth"
 
 // ============================================================
 // STYLING CONFIGURATION (inspired by GenAI Secret Sauce)
@@ -59,58 +57,47 @@ const STYLES = {
 // HELPER FUNCTIONS
 // ============================================================
 
-function getQuotaProject(): string | null {
-  const adcPath = join(homedir(), ".config", "gcloud", "application_default_credentials.json")
-  if (!existsSync(adcPath)) {
-    return null
+/**
+ * Parse a table-data string into a 2D array of strings.
+ *
+ * Accepted formats (tried in order):
+ *   1. JSON 2D array:  [["a","b"],["c","d"]]
+ *   2. Pipe-delimited rows separated by `|`:  a|b|c|d  (requires known column count)
+ *
+ * When `columns` is provided the pipe-delimited format splits every `columns`
+ * values into a new row. Without it, each `|`-segment is one cell in a single row.
+ */
+function parseTableData(raw: string, columns?: number): string[][] {
+  const trimmed = raw.trim()
+
+  // 1. Try JSON first
+  if (trimmed.startsWith("[")) {
+    try {
+      const parsed = JSON.parse(trimmed)
+      if (Array.isArray(parsed) && parsed.every(Array.isArray)) {
+        return parsed as string[][]
+      }
+    } catch { /* fall through to pipe-delimited */ }
   }
-  try {
-    const adc = JSON.parse(readFileSync(adcPath, "utf-8"))
-    return adc.quota_project_id || null
-  } catch {
-    return null
+
+  // 2. Pipe-delimited: split on `|` and chunk by column count
+  const cells = trimmed.split("|").map(s => s.trim())
+  if (columns && columns > 0) {
+    const rows: string[][] = []
+    for (let i = 0; i < cells.length; i += columns) {
+      rows.push(cells.slice(i, i + columns))
+    }
+    return rows
   }
+
+  // No column hint: treat the whole thing as one row
+  return [cells]
 }
 
-async function getAccessToken(): Promise<string> {
-  const proc = Bun.spawn(["gcloud", "auth", "application-default", "print-access-token"], {
-    stdout: "pipe",
-    stderr: "pipe",
-  })
-  const output = await new Response(proc.stdout).text()
-  const exitCode = await proc.exited
-  if (exitCode !== 0) {
-    const stderr = await new Response(proc.stderr).text()
-    throw new Error(`Failed to get access token: ${stderr}`)
-  }
-  return output.trim()
-}
+const DOCS_BASE = "https://docs.googleapis.com"
 
 async function docsApi(endpoint: string, options: RequestInit = {}): Promise<any> {
-  const token = await getAccessToken()
-  const quotaProject = getQuotaProject()
-  
-  const headers: Record<string, string> = {
-    Authorization: `Bearer ${token}`,
-    "Content-Type": "application/json",
-  }
-  
-  if (quotaProject) {
-    headers["x-goog-user-project"] = quotaProject
-  }
-  
-  const response = await fetch(`https://docs.googleapis.com${endpoint}`, {
-    ...options,
-    headers: {
-      ...headers,
-      ...options.headers,
-    },
-  })
-  if (!response.ok) {
-    const error = await response.text()
-    throw new Error(`Google Docs API error (${response.status}): ${error}`)
-  }
-  return response.json()
+  return googleApi(DOCS_BASE, "Google Docs", endpoint, options)
 }
 
 function hexToRgb(hex: string): { red: number; green: number; blue: number } {
@@ -158,6 +145,52 @@ function extractText(doc: any): string {
   }
 
   return text
+}
+
+/**
+ * Find all occurrences of `needle` in the document (including inside tables)
+ * and return their {start, end} index ranges.
+ */
+function findTextRanges(
+  doc: any,
+  needle: string
+): { start: number; end: number }[] {
+  const ranges: { start: number; end: number }[] = []
+
+  function searchParagraph(paragraph: any) {
+    for (const elem of paragraph.elements || []) {
+      if (elem.textRun?.content) {
+        let idx = 0
+        const content = elem.textRun.content
+        const startIdx = elem.startIndex
+        while ((idx = content.indexOf(needle, idx)) !== -1) {
+          ranges.push({
+            start: startIdx + idx,
+            end: startIdx + idx + needle.length,
+          })
+          idx += needle.length
+        }
+      }
+    }
+  }
+
+  for (const element of doc.body?.content || []) {
+    if (element.paragraph) {
+      searchParagraph(element.paragraph)
+    } else if (element.table) {
+      for (const row of element.table.tableRows || []) {
+        for (const cell of row.tableCells || []) {
+          for (const cellContent of cell.content || []) {
+            if (cellContent.paragraph) {
+              searchParagraph(cellContent.paragraph)
+            }
+          }
+        }
+      }
+    }
+  }
+
+  return ranges
 }
 
 // ============================================================
@@ -317,6 +350,20 @@ export const find_replace = tool({
   },
   async execute(args) {
     const { document_id, find, replace, match_case = false } = args
+
+    // Guard: warn if the replacement contains the search text (risks compounding on repeated calls)
+    if (replace.includes(find)) {
+      // Check if this would create duplicates (e.g. adding "https://" to text that may already have it)
+      const doc = await docsApi(`/v1/documents/${document_id}`)
+      const docText = doc.body?.content
+        ?.map((el: any) => el.paragraph?.elements?.map((e: any) => e.textRun?.content || "").join("") || "")
+        .join("") || ""
+      
+      // If the replacement text already exists in the doc, warn about potential duplication
+      if (docText.includes(replace)) {
+        return `WARNING: Replacement "${replace}" already exists in the document and contains the search text "${find}". This would create duplicates (e.g. "https://https://"). Operation skipped. Use a more specific find string that won't match already-replaced text.`
+      }
+    }
 
     const result = await docsApi(`/v1/documents/${document_id}:batchUpdate`, {
       method: "POST",
@@ -559,6 +606,13 @@ export const insert_table = tool({
   async execute(args) {
     const { document_id, rows, columns, data, index } = args
 
+    // Parse & validate data *before* creating the table so a bad payload
+    // doesn't leave behind an empty table.
+    let tableData: string[][] | null = null
+    if (data) {
+      tableData = parseTableData(data, columns)
+    }
+
     const doc = await docsApi(`/v1/documents/${document_id}`)
     const insertIndex = index || (doc.body?.content?.slice(-1)[0]?.endIndex - 1) || 1
 
@@ -577,9 +631,7 @@ export const insert_table = tool({
     })
 
     // If data provided, populate and style the table
-    if (data) {
-      const tableData = JSON.parse(data) as string[][]
-      
+    if (tableData) {
       // Re-fetch doc to get table structure
       const updatedDoc = await docsApi(`/v1/documents/${document_id}`)
       
@@ -697,27 +749,7 @@ export const format_text = tool({
     const { document_id, find_text, bold, italic, underline, font_size, foreground_color, background_color } = args
 
     const doc = await docsApi(`/v1/documents/${document_id}`)
-    const ranges: { start: number; end: number }[] = []
-    
-    for (const element of doc.body?.content || []) {
-      if (element.paragraph) {
-        for (const elem of element.paragraph.elements || []) {
-          if (elem.textRun?.content) {
-            let idx = 0
-            const content = elem.textRun.content
-            const startIdx = elem.startIndex
-            
-            while ((idx = content.indexOf(find_text, idx)) !== -1) {
-              ranges.push({
-                start: startIdx + idx,
-                end: startIdx + idx + find_text.length,
-              })
-              idx += find_text.length
-            }
-          }
-        }
-      }
-    }
+    const ranges = findTextRanges(doc, find_text)
 
     if (ranges.length === 0) {
       return `Text "${find_text}" not found in document`
@@ -768,6 +800,45 @@ export const format_text = tool({
     })
 
     return `Formatted ${ranges.length} occurrence(s) of "${find_text}"`
+  },
+})
+
+export const link_text = tool({
+  description: `Add a hyperlink to text found in a Google Doc. Finds the text and makes it a clickable link.`,
+  args: {
+    document_id: tool.schema.string().describe("The Google Doc ID"),
+    find_text: tool.schema.string().describe("Text to find and convert to a hyperlink"),
+    url: tool.schema.string().describe("The URL the link should point to"),
+  },
+  async execute(args) {
+    const { document_id, find_text, url } = args
+
+    const doc = await docsApi(`/v1/documents/${document_id}`)
+    const ranges = findTextRanges(doc, find_text)
+
+    if (ranges.length === 0) {
+      return `Text "${find_text}" not found in document`
+    }
+
+    const requests = ranges.map((range) => ({
+      updateTextStyle: {
+        range: {
+          startIndex: range.start,
+          endIndex: range.end,
+        },
+        textStyle: {
+          link: { url },
+        },
+        fields: "link",
+      },
+    }))
+
+    await docsApi(`/v1/documents/${document_id}:batchUpdate`, {
+      method: "POST",
+      body: JSON.stringify({ requests }),
+    })
+
+    return `Linked ${ranges.length} occurrence(s) of "${find_text}" to ${url}`
   },
 })
 
@@ -1103,15 +1174,28 @@ export const insert_styled_table = tool({
   description: `Insert a professionally styled table with dark header and clean formatting.`,
   args: {
     document_id: tool.schema.string().describe("The Google Doc ID"),
-    headers: tool.schema.string().describe("Comma-separated header labels (e.g. 'Name,Type,Description')"),
+    headers: tool.schema.string().describe("Header labels as comma-separated string (e.g. 'Name,Type,Description') or JSON array (e.g. '[\"Name\",\"Type\",\"Description\"]')"),
     rows: tool.schema.string().describe(`JSON array of rows, each row is an array of cell values.
 Example: [["INT64","Number type","Primary key"],["STRING","Text type","Names and labels"]]`),
   },
   async execute(args) {
     const { document_id, headers, rows } = args
     
-    const headerCells = headers.split(",").map(h => h.trim())
-    const dataRows = JSON.parse(rows) as string[][]
+    // Support both JSON array format (["A","B"]) and comma-separated ("A,B")
+    let headerCells: string[]
+    const trimmed = headers.trim()
+    if (trimmed.startsWith("[")) {
+      try {
+        headerCells = JSON.parse(trimmed) as string[]
+      } catch {
+        headerCells = trimmed.split(",").map(h => h.trim())
+      }
+    } else {
+      headerCells = trimmed.split(",").map(h => h.trim())
+    }
+
+    // Parse rows using the shared helper (supports JSON arrays and pipe-delimited)
+    const dataRows = parseTableData(rows, headerCells.length)
     const numColumns = headerCells.length
     const numRows = dataRows.length + 1 // +1 for header
     
@@ -1271,6 +1355,6 @@ Example: [["INT64","Number type","Primary key"],["STRING","Text type","Names and
       }
     }
     
-    return `Inserted ${numRows}x${numColumns} styled table with headers: ${headers}`
+    return `Inserted ${numRows}x${numColumns} styled table with headers: ${headerCells.join(", ")}`
   },
 })

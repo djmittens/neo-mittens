@@ -1,0 +1,18 @@
+---
+# Local-only inventory: the machine running the playbook IS the only
+# target. Each host clones neo-mittens, installs ansible, and runs
+# `./install-gaming.sh` (which shells out to `ansible-playbook`).
+#
+# To extend to multi-host SSH-based control later, add hosts here under
+# `gaming_desktops:` with their FQDNs / IPs and remove `connection: local`
+# from group_vars/all.yml.
+
+all:
+  hosts:
+    localhost:
+      ansible_connection: local
+      ansible_python_interpreter: /usr/bin/python3
+  children:
+    gaming_desktops:
+      hosts:
+        localhost:

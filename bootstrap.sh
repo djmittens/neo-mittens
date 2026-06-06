@@ -453,6 +453,64 @@ build_tix() {
 
 build_tix
 
+# 4d) Build bnetswitch (Linux-only Battle.net account switcher).
+#     Compiles with cargo if available, then symlinks the release binary
+#     into powerplant/ so it lands on PATH alongside other neo-mittens
+#     utilities. Skips entirely on non-Linux since bnetswitch depends on
+#     Wine/Lutris/Battle.net being installed in a Linux/Hyprland setup.
+build_bnetswitch() {
+  local bnet_src="$SCRIPT_DIR/bnetswitch"
+  local bnet_target="$bnet_src/target/release/bnetswitch"
+  local pp_link="$SCRIPT_DIR/powerplant/bnetswitch"
+
+  # Linux-only: bnetswitch is a Battle.net-on-Linux launcher.
+  if [ "$(uname -s)" != "Linux" ]; then
+    echo "SKIP: bnetswitch is Linux-only ($(uname -s) detected)"
+    return 0
+  fi
+
+  if [ ! -d "$bnet_src" ]; then
+    echo "SKIP: $bnet_src not present"
+    return 0
+  fi
+
+  # Resolve cargo. Most users will have it on PATH; if not, fall back to
+  # the standard rustup install location at ~/.cargo/bin/.
+  local cargo_cmd=""
+  if command -v cargo >/dev/null 2>&1; then
+    cargo_cmd="cargo"
+  elif [ -x "$HOME/.cargo/bin/cargo" ]; then
+    cargo_cmd="$HOME/.cargo/bin/cargo"
+  fi
+
+  if [ -z "$cargo_cmd" ]; then
+    echo "SKIP: cargo not found; install rustup to build bnetswitch"
+    echo "      (curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh)"
+    return 0
+  fi
+
+  # Build (release). Quiet output but propagate failure as a warning —
+  # we don't want to fail the whole bootstrap over a Rust compile.
+  echo "Building bnetswitch (release)..."
+  if (cd "$bnet_src" && "$cargo_cmd" build --release --quiet 2>&1); then
+    echo "OK: bnetswitch built"
+  else
+    echo "WARN: bnetswitch build failed; binary will not be exposed"
+    return 0
+  fi
+
+  # Symlink the binary into powerplant/ so it lands on PATH via the
+  # existing managed PATH block. Re-symlink each run so it tracks the
+  # latest target/release/bnetswitch.
+  if [ -x "$bnet_target" ]; then
+    link_symlink "$bnet_target" "$pp_link"
+  else
+    echo "WARN: $bnet_target missing after build"
+  fi
+}
+
+build_bnetswitch
+
 # 4c) Add repo root and app/ to PYTHONPATH for ralph package imports
 install_pythonpath_block "$HOME/.profile" "$SCRIPT_DIR"
 install_pythonpath_block "$ZSHRC_PATH" "$SCRIPT_DIR"
@@ -509,14 +567,24 @@ done
 
 # 14) bin/ PATH block removed - gcai moved to powerplant/ which is already in PATH
 
-# 15) Install global Claude commands (ralph alias)
+# 15) Claude commands — REMOVED
+# Claude commands (.claude/commands/ralph-*.md, tix-*.md) have been merged into
+# portable Agent Skills (skills/ralph-spec/, skills/ralph-config/, skills/tix/).
+# Cleanup stale symlinks from old installation.
 CLAUDE_COMMANDS_DIR="$HOME/.claude/commands"
-ensure_dir "$CLAUDE_COMMANDS_DIR"
-for cmd in "$SCRIPT_DIR/.claude/commands"/ralph-*.md; do
-  if [ -f "$cmd" ]; then
-    link_symlink "$cmd" "$CLAUDE_COMMANDS_DIR/$(basename "$cmd")"
-  fi
-done
+if [ -d "$CLAUDE_COMMANDS_DIR" ]; then
+  for link_path in "$CLAUDE_COMMANDS_DIR"/{ralph,tix}-*.md; do
+    if [ -L "$link_path" ]; then
+      old_target="$(readlink -- "$link_path" 2>/dev/null)"
+      case "$old_target" in
+        "$SCRIPT_DIR/"* | */neo-mittens/.claude/commands/*)
+          echo "CLEANUP: removing stale Claude command $link_path"
+          rm -f -- "$link_path"
+          ;;
+      esac
+    fi
+  done
+fi
 
 # 16) Install ralph shell completions
 install_ralph_completion_bash() {
@@ -699,39 +767,62 @@ install_tree_sitter_cli() {
 
 install_tree_sitter_cli
 
-# 18) Install global OpenCode tools (to ~/.config/opencode/tools/)
+# 18) OpenCode tools — REMOVED
+# OpenCode-specific tools (.opencode/tools/*.ts) have been replaced by portable
+# scripts bundled inside Agent Skills (skills/*/scripts/). No SDK-specific tool
+# installation needed. Cleanup stale symlinks from old installation.
 OPENCODE_CONFIG_DIR="$HOME/.config/opencode"
 OPENCODE_TOOLS_DIR="$OPENCODE_CONFIG_DIR/tools"
-ensure_dir "$OPENCODE_TOOLS_DIR"
-
-# Link tool files from .opencode/tools/ to ~/.config/opencode/tools/
-for tool_file in "$SCRIPT_DIR/.opencode/tools"/*.ts; do
-  if [ -f "$tool_file" ]; then
-    link_symlink "$tool_file" "$OPENCODE_TOOLS_DIR/$(basename "$tool_file")"
-  fi
-done
-
-# Copy package.json and install deps if bun is available
-if [ -f "$SCRIPT_DIR/.opencode/package.json" ]; then
-  cp "$SCRIPT_DIR/.opencode/package.json" "$OPENCODE_CONFIG_DIR/package.json"
-  if command -v bun >/dev/null 2>&1; then
-    echo "Installing OpenCode tool dependencies..."
-    (cd "$OPENCODE_CONFIG_DIR" && bun install --silent) || echo "WARN: bun install failed"
-  else
-    echo "SKIP: bun not found, run 'cd ~/.config/opencode && bun install' manually"
-  fi
+if [ -d "$OPENCODE_TOOLS_DIR" ]; then
+  for link_path in "$OPENCODE_TOOLS_DIR"/*.ts; do
+    if [ -L "$link_path" ]; then
+      old_target="$(readlink -- "$link_path" 2>/dev/null)"
+      case "$old_target" in
+        "$SCRIPT_DIR/"* | */neo-mittens/.opencode/tools/*)
+          echo "CLEANUP: removing stale opencode tool $link_path"
+          rm -f -- "$link_path"
+          ;;
+      esac
+    fi
+  done
 fi
 
-# 19) Install global OpenCode skills (to ~/.config/opencode/skills/)
-OPENCODE_SKILLS_DIR="$OPENCODE_CONFIG_DIR/skills"
-ensure_dir "$OPENCODE_SKILLS_DIR"
+# 19) Install Agent Skills (to ~/.agents/skills/ — cross-client standard)
+#
+# Uses the open Agent Skills spec (agentskills.io/specification).
+# Skills placed in ~/.agents/skills/ are auto-discovered by all conforming
+# agents: Claude Code, OpenCode, Cursor, Gemini CLI, GitHub Copilot, etc.
+# Third-party skills (e.g. from `npx skills add owner/repo`) coexist as
+# regular directories alongside our symlinks.
+AGENTS_SKILLS_DIR="$HOME/.agents/skills"
+ensure_dir "$AGENTS_SKILLS_DIR"
 
-# Link skill directories from .opencode/skills/ to ~/.config/opencode/skills/
-for skill_dir in "$SCRIPT_DIR/.opencode/skills"/*/; do
+# Link skill directories from skills/ to ~/.agents/skills/
+for skill_dir in "$SCRIPT_DIR/skills"/*/; do
   if [ -d "$skill_dir" ]; then
     skill_name="$(basename "$skill_dir")"
-    link_symlink "$skill_dir" "$OPENCODE_SKILLS_DIR/$skill_name"
+    link_symlink "$skill_dir" "$AGENTS_SKILLS_DIR/$skill_name"
   fi
 done
+
+# Cleanup: remove stale symlinks from old ~/.config/opencode/skills/ location
+OLD_OPENCODE_SKILLS_DIR="$OPENCODE_CONFIG_DIR/skills"
+if [ -d "$OLD_OPENCODE_SKILLS_DIR" ]; then
+  for link_path in "$OLD_OPENCODE_SKILLS_DIR"/*; do
+    if [ -L "$link_path" ]; then
+      # Use readlink (not -f) to get raw target -- broken symlinks still have a target
+      old_target="$(readlink -- "$link_path" 2>/dev/null)"
+      # Remove if it points into our repo (old .opencode/skills/ or new skills/)
+      case "$old_target" in
+        "$SCRIPT_DIR/"* | */neo-mittens/.opencode/skills/*)
+          echo "CLEANUP: removing stale symlink $link_path"
+          rm -f -- "$link_path"
+          ;;
+      esac
+    fi
+  done
+  # Remove the directory if it's now empty
+  rmdir "$OLD_OPENCODE_SKILLS_DIR" 2>/dev/null && echo "CLEANUP: removed empty $OLD_OPENCODE_SKILLS_DIR" || true
+fi
 
 echo "Done. You may need to restart your shell (or source ~/.profile) and restart Neovim."

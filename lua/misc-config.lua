@@ -1,7 +1,33 @@
 vim.cmd.colorscheme("gruvbox")
 
+-- LSP reference highlights — subtle background + underline
+vim.api.nvim_set_hl(0, 'LspReferenceText',  { bg = '#3c3836', underline = true })
+vim.api.nvim_set_hl(0, 'LspReferenceRead',  { bg = '#3c3836', italic = true })
+vim.api.nvim_set_hl(0, 'LspReferenceWrite', { bg = '#3c3836', underline = true, bold = true })
+
+-- Diff highlights — subtle backgrounds, preserve syntax colors (no fg override)
+vim.api.nvim_set_hl(0, 'DiffAdd',    { bg = '#2a3625' })
+vim.api.nvim_set_hl(0, 'DiffDelete', { bg = '#3c2024' })
+vim.api.nvim_set_hl(0, 'DiffChange', { bg = '#272d3a' })
+vim.api.nvim_set_hl(0, 'DiffText',   { bg = '#314465' })
+-- Diffview-specific groups (enhanced_diff_hl mode)
+vim.api.nvim_set_hl(0, 'DiffviewDiffAdd',         { bg = '#2a3625' })
+vim.api.nvim_set_hl(0, 'DiffviewDiffDelete',       { bg = '#3c2024' })
+vim.api.nvim_set_hl(0, 'DiffviewDiffChange',       { bg = '#272d3a' })
+vim.api.nvim_set_hl(0, 'DiffviewDiffText',         { bg = '#314465' })
+vim.api.nvim_set_hl(0, 'DiffviewDiffAddAsDelete',  { bg = '#3c2024' })
+vim.api.nvim_set_hl(0, 'DiffviewDiffDeleteDim',    { fg = '#665c54' })
+
 -- Auto-source project-local config (.nvim.lua)
 vim.o.exrc = true
+
+-- CursorHold fires after this many ms idle — controls document highlight delay
+vim.o.updatetime = 300
+
+-- Diff quality: histogram algorithm (better "one line expanded to many" alignment),
+-- indent-heuristic (cleaner hunk boundaries), linematch (sub-line alignment across panes)
+vim.opt.diffopt:append('algorithm:histogram')
+vim.opt.diffopt:append('indent-heuristic')
 
 -- Core navigation improvements - center cursor after jumps
 vim.keymap.set("n", "<C-u>", "<C-u>zz", { desc = "Page up and center" })
@@ -370,8 +396,31 @@ vim.keymap.set('n', '<leader>gq', ':DiffviewClose<CR>', { desc = "Close diffview
 
 -- PR workflow helpers
 vim.keymap.set('n', '<leader>gpr', function()
-  -- Show all changes on current branch vs main
-  vim.cmd('DiffviewOpen main...HEAD')
+  -- Try to detect PR base branch via gh
+  local base = vim.fn.trim(vim.fn.system("gh pr view --json baseRefName --jq .baseRefName 2>/dev/null"))
+  if vim.v.shell_error == 0 and base ~= "" then
+    vim.cmd('DiffviewOpen ' .. base .. '...HEAD --find-renames=30')
+    return
+  end
+  -- No PR found -- let user pick a base branch via telescope
+  require('telescope.builtin').git_branches({
+    prompt_title = "Select base branch for diff",
+    attach_mappings = function(_, map)
+      map('i', '<CR>', function(prompt_bufnr)
+        local entry = require('telescope.actions.state').get_selected_entry(prompt_bufnr)
+        require('telescope.actions').close(prompt_bufnr)
+        local ref = vim.fn.trim(entry.value)
+        vim.cmd('DiffviewOpen ' .. ref .. '...HEAD --find-renames=30')
+      end)
+      map('n', '<CR>', function(prompt_bufnr)
+        local entry = require('telescope.actions.state').get_selected_entry(prompt_bufnr)
+        require('telescope.actions').close(prompt_bufnr)
+        local ref = vim.fn.trim(entry.value)
+        vim.cmd('DiffviewOpen ' .. ref .. '...HEAD --find-renames=30')
+      end)
+      return true
+    end,
+  })
 end, { desc = "Review current PR changes" })
 
 vim.keymap.set('n', '<leader>gpl', function()

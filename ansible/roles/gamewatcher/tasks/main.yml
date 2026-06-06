@@ -1,0 +1,62 @@
+---
+# gamewatcher role
+# Symlinks the gamewatcher + gamelaunch scripts into ~/.local/bin, the
+# games.conf config, and the user systemd service. Enables + starts the
+# service. All operations run as the target user (no become).
+
+- name: Ensure ~/.local/bin exists
+  ansible.builtin.file:
+    path: "{{ target_home }}/.local/bin"
+    state: directory
+    mode: "0755"
+
+- name: Ensure ~/.config/gamewatcher exists
+  ansible.builtin.file:
+    path: "{{ target_home }}/.config/gamewatcher"
+    state: directory
+    mode: "0755"
+
+- name: Ensure ~/.config/systemd/user exists
+  ansible.builtin.file:
+    path: "{{ target_home }}/.config/systemd/user"
+    state: directory
+    mode: "0755"
+
+# Symlink scripts (live edits in the repo propagate without re-running ansible)
+- name: Symlink gamewatcher and gamelaunch into ~/.local/bin
+  ansible.builtin.file:
+    src: "{{ neo_mittens_root }}/scripts/{{ item }}"
+    dest: "{{ target_home }}/.local/bin/{{ item }}"
+    state: link
+    force: true
+  loop:
+    - gamewatcher
+    - gamelaunch
+
+- name: Symlink games.conf into ~/.config/gamewatcher
+  ansible.builtin.file:
+    src: "{{ neo_mittens_root }}/gamewatcher-config/games.conf"
+    dest: "{{ target_home }}/.config/gamewatcher/games.conf"
+    state: link
+    force: true
+
+- name: Render gamewatcher.service into ~/.config/systemd/user
+  ansible.builtin.template:
+    src: gamewatcher.service.j2
+    dest: "{{ target_home }}/.config/systemd/user/gamewatcher.service"
+    mode: "0644"
+  notify: reload user systemd
+
+# `meta: flush_handlers` is needed here so the service file is reloaded
+# BEFORE we try to enable + start the unit -- otherwise systemd has the
+# old/missing definition cached and the enable step would fail.
+- name: Reload user systemd before enabling gamewatcher
+  ansible.builtin.meta: flush_handlers
+
+- name: Enable + start gamewatcher.service
+  ansible.builtin.systemd:
+    name: gamewatcher.service
+    enabled: true
+    state: started
+    scope: user
+    daemon_reload: true

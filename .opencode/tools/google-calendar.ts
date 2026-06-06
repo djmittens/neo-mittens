@@ -1,69 +1,10 @@
 import { tool } from "@opencode-ai/plugin"
-import { readFileSync, existsSync } from "fs"
-import { homedir } from "os"
-import { join } from "path"
+import { googleApi } from "./google-auth"
 
-/**
- * Get quota project from ADC credentials file
- */
-function getQuotaProject(): string | null {
-  const adcPath = join(homedir(), ".config", "gcloud", "application_default_credentials.json")
-  if (!existsSync(adcPath)) {
-    return null
-  }
-  try {
-    const adc = JSON.parse(readFileSync(adcPath, "utf-8"))
-    return adc.quota_project_id || null
-  } catch {
-    return null
-  }
-}
+const CALENDAR_BASE = "https://www.googleapis.com/calendar/v3"
 
-/**
- * Helper to get access token from gcloud ADC
- */
-async function getAccessToken(): Promise<string> {
-  const proc = Bun.spawn(["gcloud", "auth", "application-default", "print-access-token"], {
-    stdout: "pipe",
-    stderr: "pipe",
-  })
-  const output = await new Response(proc.stdout).text()
-  const exitCode = await proc.exited
-  if (exitCode !== 0) {
-    const stderr = await new Response(proc.stderr).text()
-    throw new Error(`Failed to get access token: ${stderr}`)
-  }
-  return output.trim()
-}
-
-/**
- * Make authenticated request to Google Calendar API
- */
 async function calendarApi(endpoint: string, options: RequestInit = {}): Promise<any> {
-  const token = await getAccessToken()
-  const quotaProject = getQuotaProject()
-  
-  const headers: Record<string, string> = {
-    Authorization: `Bearer ${token}`,
-    "Content-Type": "application/json",
-  }
-  
-  if (quotaProject) {
-    headers["x-goog-user-project"] = quotaProject
-  }
-  
-  const response = await fetch(`https://www.googleapis.com/calendar/v3${endpoint}`, {
-    ...options,
-    headers: {
-      ...headers,
-      ...options.headers,
-    },
-  })
-  if (!response.ok) {
-    const error = await response.text()
-    throw new Error(`Google Calendar API error (${response.status}): ${error}`)
-  }
-  return response.json()
+  return googleApi(CALENDAR_BASE, "Google Calendar", endpoint, options)
 }
 
 /**

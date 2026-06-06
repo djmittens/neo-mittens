@@ -1,0 +1,49 @@
+---
+# bnetswitch role
+# Builds bnetswitch (Rust) and symlinks the release binary into powerplant/
+# so it lands on PATH via the bootstrap.sh-managed PATH block.
+#
+# Skipped if cargo isn't installed -- bnetswitch is optional infrastructure.
+
+- name: Resolve cargo location
+  ansible.builtin.command: which cargo
+  register: cargo_check
+  changed_when: false
+  failed_when: false
+
+- name: Set cargo path fact
+  ansible.builtin.set_fact:
+    cargo_path: >-
+      {{
+        cargo_check.stdout if cargo_check.rc == 0
+        else (target_home ~ '/.cargo/bin/cargo')
+      }}
+
+- name: Check cargo binary exists
+  ansible.builtin.stat:
+    path: "{{ cargo_path }}"
+  register: cargo_stat
+
+- name: Skip bnetswitch build (cargo not found)
+  ansible.builtin.debug:
+    msg: >
+      cargo not found on PATH or at ~/.cargo/bin/cargo. Install rustup
+      (curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh)
+      and re-run, or run `cd bnetswitch && cargo build --release` manually.
+  when: not cargo_stat.stat.exists
+
+- name: Build bnetswitch (release)
+  ansible.builtin.command:
+    cmd: "{{ cargo_path }} build --release --quiet"
+    chdir: "{{ neo_mittens_root }}/bnetswitch"
+    creates: "{{ neo_mittens_root }}/bnetswitch/target/release/bnetswitch"
+  when: cargo_stat.stat.exists
+  register: cargo_build
+
+- name: Symlink bnetswitch binary into powerplant/
+  ansible.builtin.file:
+    src: "{{ neo_mittens_root }}/bnetswitch/target/release/bnetswitch"
+    dest: "{{ neo_mittens_root }}/powerplant/bnetswitch"
+    state: link
+    force: true
+  when: cargo_stat.stat.exists

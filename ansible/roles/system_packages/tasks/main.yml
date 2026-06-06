@@ -1,0 +1,104 @@
+---
+# system_packages role
+# Installs pacman-native and AUR packages from snapshots of RedBox's state.
+
+- name: Read native package list
+  ansible.builtin.slurp:
+    src: "{{ role_path }}/files/packages-gaming.txt"
+  register: native_pkg_blob
+
+- name: Parse native package list (skip blanks/comments)
+  ansible.builtin.set_fact:
+    native_packages: >-
+      {{
+        (native_pkg_blob.content | b64decode).split('\n')
+        | reject('match', '^\s*(#|$)')
+        | map('trim')
+        | reject('==', '')
+        | list
+      }}
+
+- name: Install native packages via pacman
+  community.general.pacman:
+    name: "{{ native_packages }}"
+    state: present
+    update_cache: true
+    extra_args: --needed
+  become: true
+
+# ----------------------------------------------------------------------
+# AUR helper bootstrap
+# Pacman doesn't manage AUR. We bootstrap `yay-bin` from source, then
+# use the `kewlfft.aur` collection (preferred) or `community.general.aur`
+# fallback. If neither collection is installed, fall back to a shell-out.
+# ----------------------------------------------------------------------
+
+- name: Check for yay
+  ansible.builtin.command: which yay
+  register: yay_check
+  changed_when: false
+  failed_when: false
+
+- name: Install yay build deps
+  community.general.pacman:
+    name:
+      - git
+      - base-devel
+    state: present
+    extra_args: --needed
+  become: true
+  when: yay_check.rc != 0
+
+- name: Bootstrap yay-bin from AUR (one-shot)
+  when: yay_check.rc != 0
+  block:
+    - name: Create temp build dir
+      ansible.builtin.tempfile:
+        state: directory
+        suffix: yay-bootstrap
+      register: yay_tmp
+
+    - name: Clone yay-bin
+      ansible.builtin.git:
+        repo: https://aur.archlinux.org/yay-bin.git
+        dest: "{{ yay_tmp.path }}/yay-bin"
+        depth: 1
+
+    - name: makepkg -si yay-bin
+      ansible.builtin.command:
+        cmd: makepkg -si --noconfirm
+        chdir: "{{ yay_tmp.path }}/yay-bin"
+      register: makepkg_result
+      changed_when: "'==> Finished making' in makepkg_result.stdout"
+      # makepkg cannot run as root; use the invoking user.
+      become: false
+
+    - name: Clean up build dir
+      ansible.builtin.file:
+        path: "{{ yay_tmp.path }}"
+        state: absent
+
+- name: Read AUR package list
+  ansible.builtin.slurp:
+    src: "{{ role_path }}/files/packages-aur.txt"
+  register: aur_pkg_blob
+
+- name: Parse AUR package list (skip blanks/comments)
+  ansible.builtin.set_fact:
+    aur_packages: >-
+      {{
+        (aur_pkg_blob.content | b64decode).split('\n')
+        | reject('match', '^\s*(#|$)')
+        | map('trim')
+        | reject('==', '')
+        | list
+      }}
+
+- name: Install AUR packages via yay
+  ansible.builtin.command:
+    cmd: yay -S --needed --noconfirm {{ aur_packages | join(' ') }}
+  register: yay_result
+  changed_when: "'there is nothing to do' not in (yay_result.stdout | default(''))"
+  failed_when: yay_result.rc != 0 and 'there is nothing to do' not in yay_result.stdout
+  become: false
+  when: aur_packages | length > 0

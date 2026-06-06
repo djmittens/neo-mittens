@@ -91,8 +91,11 @@ gives double the context for the same VRAM footprint.
    llama-server \
      -m ~/.lmstudio/models/lmstudio-community/Devstral-Small-2-24B-Instruct-2512-GGUF/Devstral-Small-2-24B-Instruct-2512-Q4_K_M.gguf \
      --jinja --ctx-size 131072 --flash-attn on --port 8080 -ngl 99 \
-     --cache-type-k q8_0 --cache-type-v q8_0
+     --cache-type-k q8_0 --cache-type-v q8_0 \
+     --parallel 1
    ```
+   `--parallel 1` limits to 1 KV slot (default auto-detects 4, wasting
+   ~7.5GB VRAM on unused slots since ralph uses sequential sessions).
 
 2. Verify server:
    ```bash

@@ -1,63 +1,10 @@
 import { tool } from "@opencode-ai/plugin"
+import { googleApi } from "./google-auth"
 
-/**
- * Helper to get access token from gcloud ADC
- */
-async function getAccessToken(): Promise<string> {
-  const proc = Bun.spawn(["gcloud", "auth", "application-default", "print-access-token"], {
-    stdout: "pipe",
-    stderr: "pipe",
-  })
-  const output = await new Response(proc.stdout).text()
-  const exitCode = await proc.exited
-  if (exitCode !== 0) {
-    const stderr = await new Response(proc.stderr).text()
-    throw new Error(`Failed to get access token: ${stderr}`)
-  }
-  return output.trim()
-}
+const DRIVE_BASE = "https://www.googleapis.com"
 
-/**
- * Helper to get quota project from ADC credentials file
- */
-async function getQuotaProject(): Promise<string | null> {
-  try {
-    const homeDir = process.env.HOME || process.env.USERPROFILE || ""
-    const adcPath = `${homeDir}/.config/gcloud/application_default_credentials.json`
-    const file = Bun.file(adcPath)
-    const content = await file.json()
-    return content.quota_project_id || null
-  } catch {
-    return null
-  }
-}
-
-/**
- * Make authenticated request to Google API
- */
-async function googleApi(endpoint: string, options: RequestInit = {}): Promise<any> {
-  const token = await getAccessToken()
-  const quotaProject = await getQuotaProject()
-  
-  const headers: Record<string, string> = {
-    Authorization: `Bearer ${token}`,
-    "Content-Type": "application/json",
-    ...options.headers as Record<string, string>,
-  }
-  
-  if (quotaProject) {
-    headers["x-goog-user-project"] = quotaProject
-  }
-  
-  const response = await fetch(`https://www.googleapis.com${endpoint}`, {
-    ...options,
-    headers,
-  })
-  if (!response.ok) {
-    const error = await response.text()
-    throw new Error(`Google API error (${response.status}): ${error}`)
-  }
-  return response.json()
+async function driveApi(endpoint: string, options: RequestInit = {}): Promise<any> {
+  return googleApi(DRIVE_BASE, "Google Drive", endpoint, options)
 }
 
 export const list = tool({
@@ -98,7 +45,7 @@ Examples: "mimeType='application/vnd.google-apps.document'" for Docs only.`,
       orderBy: "modifiedTime desc",
     })
 
-    const data = await googleApi(`/drive/v3/files?${params}`)
+    const data = await driveApi(`/drive/v3/files?${params}`)
 
     if (!data.files || data.files.length === 0) {
       return "No files found."
@@ -136,7 +83,7 @@ export const search = tool({
       orderBy: "modifiedTime desc",
     })
 
-    const data = await googleApi(`/drive/v3/files?${params}`)
+    const data = await driveApi(`/drive/v3/files?${params}`)
 
     if (!data.files || data.files.length === 0) {
       return `No files found matching: ${term}`
@@ -166,7 +113,7 @@ export const get_file_info = tool({
         "id,name,mimeType,description,createdTime,modifiedTime,size,webViewLink,owners,permissions",
     })
 
-    const data = await googleApi(`/drive/v3/files/${file_id}?${params}`)
+    const data = await driveApi(`/drive/v3/files/${file_id}?${params}`)
 
     return `## File: ${data.name}
 
@@ -195,7 +142,7 @@ export const download = tool({
     const { file_id, format = "text" } = args
 
     // Get file info first
-    const info = await googleApi(`/drive/v3/files/${file_id}?fields=mimeType,name`)
+    const info = await driveApi(`/drive/v3/files/${file_id}?fields=mimeType,name`)
 
     const mimeMap: Record<string, string> = {
       text: "text/plain",

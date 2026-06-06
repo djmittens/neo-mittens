@@ -1,0 +1,24 @@
+[Unit]
+Description=Reactive game-process latency optimizer
+Documentation=man:gamemoderun(1)
+# Wait for graphical session before starting (needs dbus session).
+After=graphical-session.target dbus.socket
+Requires=dbus.socket
+
+[Service]
+Type=simple
+ExecStart={{ target_home }}/.local/bin/gamewatcher
+ExecReload=/bin/kill -HUP $MAINPID
+Restart=on-failure
+RestartSec=5
+
+# Polling daemon, very low CPU footprint.
+MemoryMax=64M
+TasksMax=16
+
+# Stdout/stderr -> journal -- inspect with `journalctl --user -u gamewatcher`.
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=default.target
