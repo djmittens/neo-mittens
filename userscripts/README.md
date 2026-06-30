@@ -7,6 +7,32 @@ Currently:
 
 - **`bnetswitch-lfg.user.js`** — bridges Overwatch Discord's LFG channel
   to the bnetswitch TUI.
+- **`yarr-apple-news.user.js`** — restyles the stock yarr RSS reader
+  (`server/rss/`) to look like Apple News: San Francisco typography,
+  near-black iOS surfaces, big bold headlines, rounded cards, and nicer
+  code blocks. Pure CSS overlay on yarr's `night` theme — yarr stays the
+  stock binary (nothing patched or rebuilt). See "yarr Apple News theme"
+  below.
+
+## yarr Apple News theme
+
+A cosmetic-only CSS overlay for [yarr](../server/rss/README.md). It targets
+yarr's existing CSS classes (`.theme-night`, `#col-item-list`, `.content`,
+`.selectgroup`, …), so the only thing to maintain is this one file; yarr
+itself upgrades exactly as before.
+
+- **Install:** open
+  `file:///home/xyzyx/src/neo-mittens/userscripts/yarr-apple-news.user.js`
+  in your browser, accept the Tampermonkey prompt.
+- **Match:** `localhost:7070`, `127.0.0.1:7070`, and `*.ts.net` (your
+  `tailscale serve` URL). It only activates on port **7070**; if you move
+  yarr, edit `YARR_PORT` at the top of the script.
+- **Requires** yarr's theme set to **night** (Settings → theme → night).
+- **iPhone/Safari:** Tampermonkey isn't available on iOS — to get the look
+  on the phone you'd need the App Store "Userscripts" app, or it simply
+  shows yarr's stock night theme there. Desktop browsers work out of the box.
+- **Tweak:** colors live in the `:root { --an-* }` block near the top of the
+  script (e.g. change `--an-accent` from iOS blue to Apple News red `#f0285a`).
 
 ## Why userscripts
 
