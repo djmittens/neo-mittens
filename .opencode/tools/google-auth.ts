@@ -4,7 +4,7 @@
  * Handles:
  * - ADC token acquisition via gcloud
  * - Quota project detection and auto-fix
- * - Scope validation with actionable error messages
+ * - Scope validation with automatic re-auth (opens browser)
  * - Automatic retry after quota project auto-fix
  */
 
@@ -15,7 +15,7 @@ import { join } from "path"
 const ALL_SCOPES = [
   "https://www.googleapis.com/auth/documents",
   "https://www.googleapis.com/auth/drive",
-  "https://www.googleapis.com/auth/drawings",
+  // Note: drawings scope is not supported by the default gcloud OAuth client ID
   "https://www.googleapis.com/auth/spreadsheets",
   "https://www.googleapis.com/auth/cloud-platform",
 ]
@@ -38,6 +38,7 @@ export function getQuotaProject(): string | null {
 
 /**
  * Get an access token from gcloud ADC.
+ * If no credentials exist, automatically triggers the login flow.
  */
 export async function getAccessToken(): Promise<string> {
   const proc = Bun.spawn(["gcloud", "auth", "application-default", "print-access-token"], {
@@ -47,10 +48,23 @@ export async function getAccessToken(): Promise<string> {
   const output = await new Response(proc.stdout).text()
   const exitCode = await proc.exited
   if (exitCode !== 0) {
+    // No credentials — try auto-reauth before giving up
+    const ok = await autoReauth()
+    if (ok) {
+      const retryProc = Bun.spawn(["gcloud", "auth", "application-default", "print-access-token"], {
+        stdout: "pipe",
+        stderr: "pipe",
+      })
+      const retryOutput = await new Response(retryProc.stdout).text()
+      const retryExit = await retryProc.exited
+      if (retryExit === 0) {
+        return retryOutput.trim()
+      }
+    }
     const stderr = await new Response(proc.stderr).text()
     throw new Error(
-      `Failed to get access token. Is gcloud installed and authenticated?\n\n` +
-      `Fix: Run:\n  ${getReauthCommand()}\n\n` +
+      `Failed to get access token and automatic re-auth failed.\n\n` +
+      `Fix: Run manually:\n  ${getReauthCommand()}\n\n` +
       `Error: ${stderr}`
     )
   }
@@ -94,6 +108,35 @@ function getReauthCommand(): string {
 
 function getSetQuotaCommand(project?: string): string {
   return `gcloud auth application-default set-quota-project ${project || "<YOUR_PROJECT_ID>"}`
+}
+
+/**
+ * Auto-reauth: run `gcloud auth application-default login` with the required
+ * scopes, opening the browser automatically.  Blocks until the user completes
+ * the consent flow (or the process exits).
+ *
+ * Returns true if the login succeeded.
+ */
+async function autoReauth(): Promise<boolean> {
+  const args = [
+    "gcloud", "auth", "application-default", "login",
+    `--scopes=${ALL_SCOPES.join(",")}`,
+  ]
+  const proc = Bun.spawn(args, {
+    // Inherit stdio so the user can see progress and the browser opens normally
+    stdin: "inherit",
+    stdout: "inherit",
+    stderr: "inherit",
+  })
+  const exitCode = await proc.exited
+
+  if (exitCode !== 0) {
+    return false
+  }
+
+  // Re-set the quota project after a fresh login (login wipes it)
+  const qp = await autoSetQuotaProject()
+  return qp !== null
 }
 
 /**
@@ -151,11 +194,35 @@ export async function googleApi(
     const reason = parsed?.error?.details?.[0]?.reason || ""
     const message = parsed?.error?.message || errorText
 
-    // Insufficient scopes — tell the user exactly what to run
+    // Insufficient scopes — automatically re-auth and retry
     if (reason === "ACCESS_TOKEN_SCOPE_INSUFFICIENT") {
+      const ok = await autoReauth()
+      if (ok) {
+        // Retry the original request with fresh credentials
+        const newToken = await getAccessToken()
+        const newQuota = getQuotaProject()
+        const retryHeaders: Record<string, string> = {
+          Authorization: `Bearer ${newToken}`,
+          "Content-Type": "application/json",
+          ...(newQuota ? { "x-goog-user-project": newQuota } : {}),
+        }
+        const retry = await fetch(`${baseUrl}${endpoint}`, {
+          ...options,
+          headers: { ...retryHeaders, ...options.headers },
+        })
+        if (retry.ok) {
+          const text = await retry.text()
+          return text ? JSON.parse(text) : {}
+        }
+        const retryError = await retry.text()
+        throw new Error(
+          `${apiName} API: re-auth succeeded but request still failed (${retry.status}): ${retryError}`
+        )
+      }
+      // Auto-reauth failed — fall back to manual instructions
       throw new Error(
-        `${apiName} API: insufficient authentication scopes.\n\n` +
-        `Fix: Run these commands:\n` +
+        `${apiName} API: insufficient scopes and automatic re-auth failed.\n\n` +
+        `Fix: Run these commands manually:\n` +
         `  ${getReauthCommand()}\n` +
         `  ${getSetQuotaCommand(quotaProject)}\n`
       )

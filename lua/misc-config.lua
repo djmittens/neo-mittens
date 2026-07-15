@@ -162,8 +162,11 @@ vim.o.colorcolumn = "80,120"
 vim.o.cursorline = true
 vim.o.number = true
 
--- indentation settings, weird stuff huh
-vim.o.smartindent = true
+-- indentation settings
+-- NOTE: smartindent is a crude C-style heuristic that misbehaves in Python
+-- (bogus on-Enter cursor jumps). Filetype indent scripts handle this correctly,
+-- so we rely on autoindent + the per-filetype indent plugin instead.
+vim.o.smartindent = false
 vim.o.autoindent = true
 vim.o.expandtab = true
 vim.o.tabstop = 2
@@ -189,6 +192,9 @@ vim.diagnostic.config({
       [vim.diagnostic.severity.INFO]  = 'I',
       [vim.diagnostic.severity.HINT]  = 'H',
     },
+    -- Above gitsigns' sign_priority (100) so E/W win the single sign column
+    -- slot on modified lines instead of being hidden by the git change sign.
+    priority = 200,
   },
 })
 
