@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # /// script
 # requires-python = ">=3.10"
-# dependencies = ["duckduckgo-search>=7.0"]
+# dependencies = ["ddgs>=9.0"]
 # ///
 """
 DuckDuckGo web search. Returns JSON results to stdout.
@@ -17,7 +17,7 @@ import argparse
 import json
 import sys
 
-from duckduckgo_search import DDGS
+from ddgs import DDGS
 
 
 def main() -> int:
