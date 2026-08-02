@@ -1,0 +1,241 @@
+#!/usr/bin/env bash
+# audio-switch - pick or cycle the default PipeWire audio output (sink).
+#
+# Usage:
+#   audio-switch            # wofi picker (default)
+#   audio-switch menu       # same as above
+#   audio-switch toggle     # flip between the FAVORITES below
+#   audio-switch next       # cycle to the next sink (all of them)
+#   audio-switch prev       # cycle to the previous sink (all of them)
+#   audio-switch list       # print "name<TAB>label" in menu order
+#
+# Existing playback streams are moved to the new sink so audio follows
+# immediately instead of only applying to newly started applications.
+set -euo pipefail
+trap 'exit 0' INT
+
+have() { command -v "$1" >/dev/null 2>&1; }
+
+notify() {
+  have notify-send && notify-send -u low -a "audio-switch" "$@" >/dev/null 2>&1 || true
+}
+
+die() {
+  notify "Error" "$1"
+  printf 'audio-switch: %s\n' "$1" >&2
+  exit 1
+}
+
+for dep in pactl jq; do
+  have "$dep" || die "$dep not found"
+done
+
+# Virtual sinks that shouldn't be offered as real outputs.
+EXCLUDE_RE='^(easyeffects_sink|auto_null)$'
+
+# Preferred outputs, as "sink name|friendly label", in toggle order.
+# `toggle` flips between these; they also sort to the top of the picker with
+# these labels instead of their unhelpful PipeWire descriptions.
+FAVORITES=(
+  "alsa_output.usb-Generic_USB_Audio-00.HiFi__Speaker__sink|Speakers"
+  "alsa_output.pci-0000_01_00.1.pro-output-7|TV (HDMI)"
+)
+
+# Emits: name<TAB>description
+#
+# Sinks whose active port is "not available" (e.g. a headphone jack with
+# nothing plugged in) are skipped: PipeWire silently refuses to make them the
+# default and falls back to another sink, which looks like a broken switch.
+# Ports reporting "availability unknown" and sinks with no ports at all (HDMI
+# pro-audio outputs) are kept, since those are usable.
+list_sinks() {
+  pactl -f json list sinks |
+    jq -r --arg ex "$EXCLUDE_RE" '
+      .[]
+      | select(.name | test($ex) | not)
+      | . as $s
+      | (($s.ports // [])
+         | map(select(.name == $s.active_port))
+         | first
+         | .availability) as $avail
+      | select($avail != "not available")
+      | "\($s.name)\t\($s.description)"
+    '
+}
+
+# Succeeds and prints the friendly label if $1 is a favorite sink.
+fav_label() {
+  local entry
+  for entry in "${FAVORITES[@]}"; do
+    if [ "${entry%%|*}" = "$1" ]; then
+      printf '%s' "${entry#*|}"
+      return 0
+    fi
+  done
+  return 1
+}
+
+# Emits: name<TAB>label for every available sink, favorites first (in
+# FAVORITES order, using their labels), then everything else by description.
+# This is the single ordered list that menu/toggle/cycle all agree on.
+list_display() {
+  local -a names=() descs=()
+  local name desc entry fav i
+
+  while IFS=$'\t' read -r name desc; do
+    names+=("$name")
+    descs+=("$desc")
+  done < <(list_sinks)
+
+  for entry in "${FAVORITES[@]}"; do
+    fav="${entry%%|*}"
+    for i in "${!names[@]}"; do
+      if [ "${names[$i]}" = "$fav" ]; then
+        printf '%s\t%s\n' "$fav" "${entry#*|}"
+        break
+      fi
+    done
+  done
+
+  for i in "${!names[@]}"; do
+    fav_label "${names[$i]}" >/dev/null && continue
+    printf '%s\t%s\n' "${names[$i]}" "${descs[$i]}"
+  done
+}
+
+set_sink() {
+  local sink="$1" desc="$2" id actual
+  pactl set-default-sink "$sink"
+
+  # set-default-sink exits 0 even when PipeWire rejects the sink and falls
+  # back elsewhere, so confirm what actually stuck. The change is applied
+  # asynchronously, so poll briefly instead of reading once (a single
+  # immediate read returns the previous sink and makes rapid repeat
+  # invocations compute the wrong "next" entry).
+  local tries
+  actual=''
+  for tries in $(seq 1 20); do
+    actual="$(pactl get-default-sink 2>/dev/null || echo '')"
+    [ "$actual" = "$sink" ] && break
+    sleep 0.05
+  done
+
+  if [ "$actual" != "$sink" ]; then
+    notify "Audio output" "Could not switch to $desc (device unavailable)"
+    printf 'audio-switch: %s was rejected, default is now %s\n' "$sink" "$actual" >&2
+    return 1
+  fi
+
+  # Move already-running streams; they don't follow the default automatically
+  # when they were routed to an explicit target.
+  while read -r id _; do
+    [ -n "${id:-}" ] || continue
+    pactl move-sink-input "$id" "$sink" >/dev/null 2>&1 || true
+  done < <(pactl list short sink-inputs)
+
+  notify "Audio output" "$desc"
+}
+
+# Flip between the FAVORITES. If the current output isn't one of them, jump
+# to the first favorite rather than doing nothing.
+toggle() {
+  local -a names=() labels=()
+  local name label
+  while IFS=$'\t' read -r name label; do
+    if fav_label "$name" >/dev/null; then
+      names+=("$name")
+      labels+=("$label")
+    fi
+  done < <(list_display)
+
+  local count=${#names[@]}
+  [ "$count" -gt 0 ] || die "no preferred output is available"
+
+  local current idx=-1 i
+  current="$(pactl get-default-sink 2>/dev/null || echo '')"
+  for i in "${!names[@]}"; do
+    if [ "${names[$i]}" = "$current" ]; then idx=$i; break; fi
+  done
+
+  local next=$(((idx + 1) % count))
+  set_sink "${names[$next]}" "${labels[$next]}"
+}
+
+cycle() {
+  local direction="$1"
+  local -a names=() descs=()
+  local name desc
+  while IFS=$'\t' read -r name desc; do
+    names+=("$name")
+    descs+=("$desc")
+  done < <(list_display)
+
+  local count=${#names[@]}
+  [ "$count" -gt 0 ] || die "no audio sinks found"
+
+  local current
+  current="$(pactl get-default-sink 2>/dev/null || echo '')"
+
+  local idx=0 i
+  for i in "${!names[@]}"; do
+    if [ "${names[$i]}" = "$current" ]; then idx=$i; break; fi
+  done
+
+  local next
+  if [ "$direction" = "prev" ]; then
+    next=$(((idx - 1 + count) % count))
+  else
+    next=$(((idx + 1) % count))
+  fi
+
+  set_sink "${names[$next]}" "${descs[$next]}"
+}
+
+menu() {
+  local current menu_input choice name desc
+  current="$(pactl get-default-sink 2>/dev/null || echo '')"
+
+  # Mark the active sink so the picker shows current state at a glance.
+  menu_input="$(
+    while IFS=$'\t' read -r name desc; do
+      if [ "$name" = "$current" ]; then
+        printf '* %s\n' "$desc"
+      else
+        printf '  %s\n' "$desc"
+      fi
+    done < <(list_display)
+  )"
+
+  [ -n "$menu_input" ] || die "no audio sinks found"
+
+  if have wofi; then
+    choice="$(printf '%s\n' "$menu_input" |
+      wofi --dmenu --prompt "Audio Output" --insensitive --width 600)" || exit 0
+  elif have rofi; then
+    choice="$(printf '%s\n' "$menu_input" |
+      rofi -dmenu -i -p "Audio Output")" || exit 0
+  else
+    die "neither wofi nor rofi found"
+  fi
+
+  [ -n "${choice:-}" ] || exit 0
+  choice="${choice:2}" # strip the "* " / "  " marker
+
+  while IFS=$'\t' read -r name desc; do
+    if [ "$desc" = "$choice" ]; then
+      set_sink "$name" "$desc"
+      exit 0
+    fi
+  done < <(list_display)
+
+  die "sink not found: $choice"
+}
+
+case "${1:-menu}" in
+  menu | '') menu ;;
+  toggle) toggle ;;
+  next) cycle next ;;
+  prev) cycle prev ;;
+  list) list_display ;;
+  *) die "unknown command: $1 (expected menu|toggle|next|prev|list)" ;;
+esac

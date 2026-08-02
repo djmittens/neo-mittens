@@ -139,6 +139,7 @@ local valk_binary = vim.fn.expand('~/src/valkyria/build/valk')
 if vim.loop.fs_stat(valk_binary) then
   vim.lsp.config('valk', {
     cmd = { valk_binary, vim.fn.expand('~/src/valkyria/scripts/lsp/main.valk') },
+    cmd_cwd = vim.fn.expand('~/src/valkyria'),
     cmd_env = { VALK_HEAP_HARD_LIMIT = '4294967296' },
     filetypes = { 'valk' },
     root_markers = { '.git', 'CMakeLists.txt' },

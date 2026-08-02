@@ -36,6 +36,26 @@ require("lazy").setup({
     }
   },
   { 'neovim/nvim-lspconfig', config = function() require('neo-mittens.plugins.lsp').on_lsp_attach() end },
+  { -- auto signature help while typing a call in insert mode.
+    -- Neovim's builtin vim.lsp.buf.signature_help() is manual-only (see `gs` in
+    -- plugins/lsp.lua) and its float closes on the very next keystroke, so this
+    -- plugin owns the "keep it open and track the active parameter" behaviour.
+    'ray-x/lsp_signature.nvim',
+    event = 'InsertEnter',
+    opts = {
+      bind = true,                      -- mandatory, otherwise border config is ignored
+      handler_opts = { border = 'rounded' }, -- match the bordered cmp windows
+      -- Inlay hints are already on globally (plugins/lsp.lua), which shows
+      -- parameter names at the call site. The virtual "🐼 param" hint would
+      -- duplicate that, so float-only.
+      hint_enable = false,
+      floating_window_above_cur_line = true, -- keep clear of the cmp popup
+      doc_lines = 5,                    -- cap the docstring tail (default 10)
+      max_height = 12,
+      fix_pos = false,                  -- close once the last arg is typed
+      select_signature_key = '<M-n>',   -- cycle overloads (clangd/C++)
+    },
+  },
   { 'hrsh7th/cmp-nvim-lsp' },
   {
     'L3MON4D3/LuaSnip',
