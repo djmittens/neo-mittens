@@ -33,13 +33,75 @@ done
 # Virtual sinks that shouldn't be offered as real outputs.
 EXCLUDE_RE='^(easyeffects_sink|auto_null)$'
 
-# Preferred outputs, as "sink name|friendly label", in toggle order.
+# Preferred outputs, as "matcher|friendly label", in toggle order.
 # `toggle` flips between these; they also sort to the top of the picker with
 # these labels instead of their unhelpful PipeWire descriptions.
+#
+# A matcher is either a literal sink name, or "eld:<display name prefix>" to
+# look the sink up by the connected display's EDID/ELD monitor name.
+#
+# Use eld: for anything behind the GPU's HDMI/DP audio. That card runs the
+# `pro-audio` profile so every HDMI PCM (hw:1,{3,7,8,9}) is exposed as its own
+# `pro-output-N` sink, but the HDA driver assigns those PCM devices to physical
+# connectors dynamically at boot. `pro-output-7` was the TV until a reboot
+# handed 7 to the DisplayPort monitor and 3 to the TV, which silently pointed
+# "TV (HDMI)" at the desktop monitor. The monitor name is the only identity
+# here that survives a reboot.
 FAVORITES=(
   "alsa_output.usb-Generic_USB_Audio-00.HiFi__Speaker__sink|Speakers"
-  "alsa_output.pci-0000_01_00.1.pro-output-7|TV (HDMI)"
+  "eld:LG TV|TV (HDMI)"
 )
+
+# Prints the sink whose ports carry the ELD monitor name starting with $1.
+#
+# PipeWire reads the display's ELD and uses its monitor name as the port alias
+# ("LG TV SSCR2:playback_AUX0"), which is the only place the physical display
+# is identifiable once the card is in pro-audio (the node description stays a
+# generic "... Pro 3"). Fails if pw-dump is missing or nothing matches.
+resolve_eld() {
+  local pat="$1" name
+  have pw-dump || return 1
+  name="$(pw-dump 2>/dev/null | jq -r --arg pat "$pat" '
+    . as $all
+    | ($all
+       | map(select(.type == "PipeWire:Interface:Port")
+             | select((.info.props["port.alias"] // "")
+                      | test("^" + $pat + "[^:]*:playback_"; "i"))
+             | .info.props["node.id"])
+       | unique) as $ids
+    | $all[]
+    | select(.type == "PipeWire:Interface:Node")
+    | select(.info.props["media.class"] == "Audio/Sink")
+    | select([.id] | inside($ids))
+    | .info.props["node.name"]
+  ' 2>/dev/null | head -n1)"
+  [ -n "$name" ] || return 1
+  printf '%s' "$name"
+}
+
+# FAVORITES with every matcher resolved to a concrete sink name. Entries that
+# resolve to nothing (TV powered off, so no ELD) are dropped, which is what we
+# want: an unresolvable favorite is an unavailable output.
+FAV_NAMES=()
+FAV_LABELS=()
+resolve_favorites() {
+  local entry matcher label name
+  for entry in "${FAVORITES[@]}"; do
+    matcher="${entry%%|*}"
+    label="${entry#*|}"
+    case "$matcher" in
+      eld:*)
+        name="$(resolve_eld "${matcher#eld:}")" || continue
+        ;;
+      *)
+        name="$matcher"
+        ;;
+    esac
+    FAV_NAMES+=("$name")
+    FAV_LABELS+=("$label")
+  done
+}
+resolve_favorites
 
 # Emits: name<TAB>description
 #
@@ -65,10 +127,10 @@ list_sinks() {
 
 # Succeeds and prints the friendly label if $1 is a favorite sink.
 fav_label() {
-  local entry
-  for entry in "${FAVORITES[@]}"; do
-    if [ "${entry%%|*}" = "$1" ]; then
-      printf '%s' "${entry#*|}"
+  local i
+  for i in "${!FAV_NAMES[@]}"; do
+    if [ "${FAV_NAMES[$i]}" = "$1" ]; then
+      printf '%s' "${FAV_LABELS[$i]}"
       return 0
     fi
   done
@@ -80,18 +142,17 @@ fav_label() {
 # This is the single ordered list that menu/toggle/cycle all agree on.
 list_display() {
   local -a names=() descs=()
-  local name desc entry fav i
+  local name desc f i
 
   while IFS=$'\t' read -r name desc; do
     names+=("$name")
     descs+=("$desc")
   done < <(list_sinks)
 
-  for entry in "${FAVORITES[@]}"; do
-    fav="${entry%%|*}"
+  for f in "${!FAV_NAMES[@]}"; do
     for i in "${!names[@]}"; do
-      if [ "${names[$i]}" = "$fav" ]; then
-        printf '%s\t%s\n' "$fav" "${entry#*|}"
+      if [ "${names[$i]}" = "${FAV_NAMES[$f]}" ]; then
+        printf '%s\t%s\n' "${FAV_NAMES[$f]}" "${FAV_LABELS[$f]}"
         break
       fi
     done
