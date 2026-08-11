@@ -179,6 +179,45 @@ impl AppConfig {
         email.to_string()
     }
 
+    /// The email already attributed to `battletag`, if any.
+    ///
+    /// BattleTags are unique per Battle.net account, so at most one email
+    /// should ever own one. Callers use this to avoid reassigning a tag that
+    /// another account already claims — two accounts sharing a tag makes them
+    /// render identically in the list (see `display_name`) and silently
+    /// collide in any BattleTag-keyed map or cache.
+    pub fn email_for_battletag(&self, battletag: &str) -> Option<&str> {
+        self.accounts
+            .iter()
+            .find(|(_, meta)| meta.battletag.as_deref() == Some(battletag))
+            .map(|(email, _)| email.as_str())
+    }
+
+    /// Attribute `battletag` to `email` unless another account already claims
+    /// it. Returns true if the config changed (caller is responsible for
+    /// persisting).
+    ///
+    /// Battle.net's `login_cache` exposes no email->BattleTag mapping (its
+    /// `name` column is an opaque hash), so we infer one from recency: the
+    /// newest row is assumed to belong to `SavedAccountNames[0]`. That holds
+    /// only right after a real login. Switching accounts reorders
+    /// SavedAccountNames *without* authenticating, so the newest tag can
+    /// outlive its own session and would then be misattributed to whoever
+    /// just became active. An existing claim was learned the same way but at
+    /// a moment when it was correct, so it wins over a fresh guess.
+    pub fn learn_battletag(&mut self, email: &str, battletag: String) -> bool {
+        if matches!(self.email_for_battletag(&battletag), Some(owner) if owner != email) {
+            return false;
+        }
+        if self.accounts.get(email).and_then(|m| m.battletag.as_deref())
+            == Some(battletag.as_str())
+        {
+            return false;
+        }
+        self.set_battletag(email, battletag);
+        true
+    }
+
     /// Set a nickname for an account.
     pub fn set_nickname(&mut self, email: &str, nickname: String) {
         let meta = self.accounts.entry(email.to_string()).or_insert(AccountMeta {
@@ -249,6 +288,79 @@ mod tests {
         // Second toggle unbans.
         assert!(!cfg.toggle_banned(email));
         assert!(!cfg.is_banned(email));
+    }
+
+    /// Regression: a BattleTag lingering as the newest `login_cache` row was
+    /// being re-stamped onto whichever email sat at SavedAccountNames[0] after
+    /// a switch, leaving two accounts sharing one tag. Both then rendered with
+    /// the same `display_name`, so one looked like it had vanished from the
+    /// list. `email_for_battletag` is the lookup that lets the caller refuse.
+    #[test]
+    fn battletag_owner_lookup_identifies_existing_claim() {
+        let mut cfg = AppConfig::default();
+        cfg.set_battletag("onyx@example.com", "OnyxYeti#21315".to_string());
+        cfg.set_battletag("smurf@example.com", "Pogo#11926".to_string());
+
+        assert_eq!(
+            cfg.email_for_battletag("Pogo#11926"),
+            Some("smurf@example.com")
+        );
+        // A tag nobody owns is free to assign.
+        assert_eq!(cfg.email_for_battletag("Stranger#0001"), None);
+        // Distinct accounts keep distinct display names.
+        assert_ne!(
+            cfg.display_name("onyx@example.com"),
+            cfg.display_name("smurf@example.com")
+        );
+    }
+
+    /// The exact corruption seen in the wild: switching to `onyx` put it at
+    /// SavedAccountNames[0] while `login_cache`'s newest row was still the
+    /// previous session's `Pogo#11926`. Startup then attributed Pogo to onyx,
+    /// so both rows rendered as "Pogo#11926" and onyx looked like it had
+    /// vanished from the list.
+    #[test]
+    fn learn_battletag_refuses_to_steal_another_accounts_tag() {
+        let mut cfg = AppConfig::default();
+        cfg.set_battletag("onyx@example.com", "OnyxYeti#21315".to_string());
+        cfg.set_battletag("smurf@example.com", "Pogo#11926".to_string());
+
+        // Stale-but-owned tag must not be reattributed to the active account.
+        assert!(!cfg.learn_battletag("onyx@example.com", "Pogo#11926".to_string()));
+        assert_eq!(
+            cfg.accounts["onyx@example.com"].battletag.as_deref(),
+            Some("OnyxYeti#21315")
+        );
+        assert_eq!(
+            cfg.accounts["smurf@example.com"].battletag.as_deref(),
+            Some("Pogo#11926")
+        );
+    }
+
+    #[test]
+    fn learn_battletag_populates_unclaimed_tag() {
+        let mut cfg = AppConfig::default();
+        // A genuinely new account still gets its tag captured.
+        assert!(cfg.learn_battletag("fresh@example.com", "Newbie#1111".to_string()));
+        assert_eq!(
+            cfg.accounts["fresh@example.com"].battletag.as_deref(),
+            Some("Newbie#1111")
+        );
+        // Re-learning the same tag for the same owner is a no-op (no rewrite,
+        // so callers don't churn the config file on every refresh).
+        assert!(!cfg.learn_battletag("fresh@example.com", "Newbie#1111".to_string()));
+    }
+
+    #[test]
+    fn learn_battletag_updates_owners_changed_tag() {
+        let mut cfg = AppConfig::default();
+        cfg.set_battletag("main@example.com", "OldName#1234".to_string());
+        // A rename is still the same account, so it may update its own tag.
+        assert!(cfg.learn_battletag("main@example.com", "NewName#5678".to_string()));
+        assert_eq!(
+            cfg.accounts["main@example.com"].battletag.as_deref(),
+            Some("NewName#5678")
+        );
     }
 
     #[test]

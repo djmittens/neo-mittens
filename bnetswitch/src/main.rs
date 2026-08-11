@@ -1450,14 +1450,7 @@ impl App {
             None => return,
         };
         if let Some(tag) = config::read_most_recent_battletag(&self.install.prefix) {
-            let needs_update = self
-                .app_config
-                .accounts
-                .get(&active)
-                .and_then(|m| m.battletag.as_deref())
-                != Some(tag.as_str());
-            if needs_update {
-                self.app_config.set_battletag(&active, tag);
+            if self.app_config.learn_battletag(&active, tag) {
                 let _ = self.app_config.save();
             }
         }
@@ -1897,22 +1890,19 @@ fn main() -> Result<()> {
     // expose a direct email -> BattleTag mapping (the `name` column is an
     // opaque hash of the account ID). Instead, we use ROWID-based recency:
     // the most recently inserted/updated entry in `login_cache` corresponds
-    // to whoever is currently logged in, which is `accounts[0]`.
+    // to whoever last authenticated, which is *usually* `accounts[0]`.
     //
     // This means each time a user switches and Battle.net successfully
     // authenticates, we capture that account's BattleTag the next time
     // bnetswitch runs. Over multiple switches, every account gets populated.
+    //
+    // `learn_battletag` holds the correctness guard for that "usually" — see
+    // its docs. Keep this going through the same helper as
+    // `refresh_active_battletag`; duplicating the logic here once let an
+    // unguarded copy silently overwrite tags on every startup.
     if let Some(active_email) = accounts.first() {
         if let Some(tag) = config::read_most_recent_battletag(&install.prefix) {
-            // Only auto-populate if the user hasn't manually set a BattleTag.
-            // A nickname always wins over auto-detection (set via `n` hotkey).
-            let needs_update = app_config
-                .accounts
-                .get(active_email)
-                .and_then(|m| m.battletag.as_deref())
-                != Some(tag.as_str());
-            if needs_update {
-                app_config.set_battletag(active_email, tag);
+            if app_config.learn_battletag(active_email, tag) {
                 let _ = app_config.save();
             }
         }
@@ -2367,10 +2357,14 @@ fn run_tui(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut App)
                         }
                     }
                 }
-                KeyCode::Char('n') => {
+                // Both open a capture-input modal that acts on the *accounts*
+                // selection, so they're meaningless in the LFG view — and
+                // worse, entering that mode there used to swallow every
+                // subsequent keystroke with no visible prompt.
+                KeyCode::Char('n') if app.view == View::Accounts => {
                     app.start_nickname_edit();
                 }
-                KeyCode::Char('p') => {
+                KeyCode::Char('p') if app.view == View::Accounts => {
                     app.start_placement_edit();
                 }
                 KeyCode::Char('b') if app.view == View::Accounts => {
@@ -2896,6 +2890,62 @@ fn classify_role(
     }
 }
 
+/// Draw the text-entry modals (nickname, placement).
+///
+/// These MUST render in every view. Both are captured input modes: while
+/// `editing_nickname`/`editing_placement` is set, the event loop routes every
+/// keystroke into the input buffer and only Enter/Esc exits. If a view can
+/// enter that state but never draws the popup, the TUI soft-locks — the user
+/// sees an unchanged screen while their keys silently accumulate in a buffer.
+/// That regressed once when the LFG branch of `ui` returned before reaching
+/// the popup code, so keep this call on every render path.
+fn render_modal_popups(f: &mut ratatui::Frame, app: &App) {
+    if app.editing_nickname {
+        let area = centered_rect(50, 20, f.area());
+        f.render_widget(Clear, area);
+        let input = Paragraph::new(Line::from(vec![
+            Span::raw(&app.nickname_input),
+            Span::styled("_", Style::default().add_modifier(Modifier::SLOW_BLINK)),
+        ]))
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title("Set Nickname (Enter to save, Esc to cancel)")
+                .border_style(Style::default().fg(Color::Yellow)),
+        );
+        f.render_widget(input, area);
+    }
+
+    // Placement editing popup. Shows input + format hint so the user
+    // doesn't need to remember the syntax.
+    if app.editing_placement {
+        let area = centered_rect(60, 24, f.area());
+        f.render_widget(Clear, area);
+        let lines = vec![
+            Line::from(Span::styled(
+                "Format: <T|D|S> <division> <tier 1-5> <season#>",
+                Style::default().fg(Color::DarkGray),
+            )),
+            Line::from(Span::styled(
+                "Examples: T Diamond 3 12  |  S GM 2 22  |  D Plat 1 18",
+                Style::default().fg(Color::DarkGray),
+            )),
+            Line::from(""),
+            Line::from(vec![
+                Span::raw(&app.placement_input),
+                Span::styled("_", Style::default().add_modifier(Modifier::SLOW_BLINK)),
+            ]),
+        ];
+        let input = Paragraph::new(lines).block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title("Manual Placement (Enter to save, Esc to cancel)")
+                .border_style(Style::default().fg(Color::Magenta)),
+        );
+        f.render_widget(input, area);
+    }
+}
+
 fn ui(f: &mut ratatui::Frame, app: &mut App) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
@@ -2948,6 +2998,9 @@ fn ui(f: &mut ratatui::Frame, app: &mut App) {
             Span::raw(" Quit"),
         ]));
         f.render_widget(help, chunks[3]);
+        // Draw before returning: this early return is exactly what hid the
+        // capture-input modals and soft-locked the LFG view.
+        render_modal_popups(f, app);
         return;
     }
 
@@ -3187,54 +3240,7 @@ fn ui(f: &mut ratatui::Frame, app: &mut App) {
     ]));
     f.render_widget(help, chunks[3]);
 
-    // Nickname editing popup
-    if app.editing_nickname {
-        let area = centered_rect(50, 20, f.area());
-        f.render_widget(Clear, area);
-        let input = Paragraph::new(Line::from(vec![
-            Span::raw(&app.nickname_input),
-            Span::styled("_", Style::default().add_modifier(Modifier::SLOW_BLINK)),
-        ]))
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .title("Set Nickname (Enter to save, Esc to cancel)")
-                .border_style(Style::default().fg(Color::Yellow)),
-        );
-        f.render_widget(input, area);
-    }
-
-    // Placement editing popup. Shows input + format hint so the user
-    // doesn't need to remember the syntax.
-    if app.editing_placement {
-        let area = centered_rect(60, 24, f.area());
-        f.render_widget(Clear, area);
-        let lines = vec![
-            Line::from(Span::styled(
-                "Format: <T|D|S> <division> <tier 1-5> <season#>",
-                Style::default().fg(Color::DarkGray),
-            )),
-            Line::from(Span::styled(
-                "Examples: T Diamond 3 12  |  S GM 2 22  |  D Plat 1 18",
-                Style::default().fg(Color::DarkGray),
-            )),
-            Line::from(""),
-            Line::from(vec![
-                Span::raw(&app.placement_input),
-                Span::styled(
-                    "_",
-                    Style::default().add_modifier(Modifier::SLOW_BLINK),
-                ),
-            ]),
-        ];
-        let input = Paragraph::new(lines).block(
-            Block::default()
-                .borders(Borders::ALL)
-                .title("Manual Placement (Enter to save, Esc to cancel)")
-                .border_style(Style::default().fg(Color::Magenta)),
-        );
-        f.render_widget(input, area);
-    }
+    render_modal_popups(f, app);
 
     // Account detail overlay: the only place the full email is shown. Opened
     // with 'd', closed with 'd' or Esc.
