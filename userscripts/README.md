@@ -116,15 +116,43 @@ The bridge keeps itself connected across system suspends and network drops:
   silence as a dead (half-open) connection and force-reconnects — half-open
   sockets after a suspend often never fire `onerror`, so this is the signal
   that recovers them.
-- SSE reconnects with capped exponential backoff and **never permanently
-  downgrades** to HTTP polling; polling only bridges the gap until SSE is
-  back.
+- Action delivery falls back through three tiers, in order:
+  1. native `EventSource`,
+  2. one long-lived streaming `GM_xmlhttpRequest` reading the same
+     `/events` stream,
+  3. long-polling `/actions/long` (one request per 25s).
+
+  Firefox 153+ enforces Local Network Access permission, so tier 1 is
+  normally refused for `http://127.0.0.1` from `https://discord.com` and
+  tier 2 carries traffic. Tier 1 is re-probed every 10 minutes in case the
+  permission is granted.
+
 - A wall-clock-gap detector notices when timers were frozen (suspend) and
   rebuilds the connection plus re-backfills the LFG list on resume.
 - `visibilitychange` (tab focus) and the `online` event also trigger a
   reconnect + session re-register.
 
 No manual Discord-tab reload should be needed after a suspend or Wi-Fi blip.
+
+## Why the transport avoids short polling
+
+Tampermonkey keeps a record per `GM_xmlhttpRequest` in its background page
+and does not reliably release completed ones, so memory cost scales with
+the **number of requests**, not their size. All extensions share one
+Firefox WebExtensions process, so this shows up as a single enormous
+process rather than as "Tampermonkey using memory".
+
+An earlier version short-polled `/actions` every 2s. That was ~43k
+requests/day and grew the shared extension process to 8 GB in three days.
+Anything added to this bridge should keep total request volume low — prefer
+one long-lived request over many short ones, and never add a fast retry
+loop for the "bnetswitch is down" case.
+
+Run the SSE frame-parser tests with:
+
+```sh
+node userscripts/sse-parser.test.mjs
+```
 
 ## Privacy
 
