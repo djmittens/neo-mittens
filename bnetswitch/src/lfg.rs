@@ -49,7 +49,9 @@
 //! - `POST /lfg/message` — userscript posts a new LFG embed
 //! - `POST /lfg/remove`  — userscript notifies that an embed was deleted
 //! - `GET /lfg/active`   — TUI / userscript reads current active LFGs
-//! - `GET /actions`      — userscript long-polls for actions to execute
+//! - `GET /actions`      — userscript polls for actions to execute
+//! - `GET /actions/long` — blocking variant; also returns boot_id +
+//!   session state so one request replaces three timers
 //! - `POST /actions/ack` — userscript reports completion
 //! - `POST /status`      — userscript reports voice/account state
 //! - `GET /health`       — sanity check
@@ -69,7 +71,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
 use std::convert::Infallible;
 use std::sync::{Arc, Mutex, OnceLock};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tokio::sync::broadcast;
 use tower_http::cors::{Any, CorsLayer};
 
@@ -484,6 +486,7 @@ fn build_router(state: AppState) -> Router {
         .route("/lfg/remove", post(handle_lfg_remove))
         .route("/lfg/active", get(handle_lfg_active))
         .route("/actions", get(handle_actions))
+        .route("/actions/long", get(handle_actions_long))
         .route("/actions/ack", post(handle_actions_ack))
         .route("/register", post(handle_register))
         .route("/status", post(handle_status))
@@ -654,6 +657,135 @@ async fn handle_actions(
     };
     let body = serde_json::to_string(&actions).unwrap_or_else(|_| "[]".to_string());
     json_ok(&body)
+}
+
+#[derive(Deserialize)]
+struct LongPollQuery {
+    /// Max milliseconds to hold the request open before returning an empty
+    /// action list. Clamped to 60s so a bad client can't pin a task forever.
+    #[serde(default)]
+    wait_ms: Option<u64>,
+}
+
+/// Long-polling sibling of `GET /actions`.
+///
+/// ## Why this exists
+///
+/// The userscript cannot open a native `EventSource` to `http://127.0.0.1`
+/// from `https://discord.com`. Firefox 153+ enforces Local Network Access
+/// permission, so the request is refused before it leaves the page:
+///
+/// ```text
+/// Local Network Access permission required: top-level site
+/// "https://discord.com", attempting to access target
+/// "http://127.0.0.1:7172/events" via fetch. Secure context: True
+/// ```
+///
+/// That means all traffic has to go through Tampermonkey's
+/// `GM_xmlhttpRequest`, which is exempt because it runs in the extension
+/// with `@connect 127.0.0.1`.
+///
+/// Tampermonkey keeps a per-request record in its background page and does
+/// not reliably release completed ones, so **request count** is what costs
+/// memory, not bytes transferred. The old 2s short-poll of `/actions`
+/// issued ~43k requests/day and leaked ~8 GB into the WebExtensions process
+/// over three days. Holding one request open until an action actually
+/// exists cuts that by ~12x *and* improves latency, since we return the
+/// instant `notify_tx` fires rather than on the next 2s tick.
+///
+/// The response bundles `boot_id`, `is_primary` and `session_count` so this
+/// single round-trip also replaces the separate `/health` boot-id poll and
+/// the periodic `/register` call — three timers collapse into one.
+async fn handle_actions_long(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(query): Query<LongPollQuery>,
+) -> Response {
+    if !is_authorized(&headers) {
+        return json_error(StatusCode::UNAUTHORIZED, "missing or bad bearer token");
+    }
+    maybe_register_session(&state.lfg, &headers);
+    let session_id = extract_session_id(&headers);
+
+    let wait = Duration::from_millis(query.wait_ms.unwrap_or(25_000).min(60_000));
+    let deadline = Instant::now() + wait;
+
+    // Subscribe *before* the first drain, otherwise an action queued while
+    // we build the first response would be missed and wait a full cycle.
+    let mut notify_rx = state.notify_tx.subscribe();
+
+    loop {
+        let actions = drain_actions_for(&state, session_id.as_deref());
+        if !actions.is_empty() {
+            return long_poll_response(&state, session_id.as_deref(), actions);
+        }
+
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return long_poll_response(&state, session_id.as_deref(), Vec::new());
+        }
+
+        match tokio::time::timeout(remaining, notify_rx.recv()).await {
+            // Deadline hit — loop re-checks once more, then returns empty.
+            Err(_) => continue,
+            // Woken by a queued action, or we lagged and may have missed
+            // one. Either way the answer is the same: re-drain.
+            Ok(Ok(())) | Ok(Err(broadcast::error::RecvError::Lagged(_))) => continue,
+            // Sender gone (shutting down). Returning immediately avoids
+            // spinning on a channel that will never block again.
+            Ok(Err(broadcast::error::RecvError::Closed)) => {
+                return long_poll_response(&state, session_id.as_deref(), Vec::new());
+            }
+        }
+    }
+}
+
+/// Drain queued actions if this session is the primary one.
+///
+/// Split into its own function so the `MutexGuard` is provably dropped
+/// before the caller's `.await` — `std::sync::MutexGuard` is `!Send`, so
+/// holding it across an await point would not compile inside an axum
+/// handler, and holding it across a 25s wait would deadlock the TUI.
+fn drain_actions_for(state: &AppState, session_id: Option<&str>) -> Vec<LfgAction> {
+    let mut s = match state.lfg.lock() {
+        Ok(g) => g,
+        Err(_) => return Vec::new(),
+    };
+    s.prune_expired_actions();
+    let allow_drain = if s.sessions.is_empty() {
+        true
+    } else {
+        session_id.map(|sid| s.is_primary(sid)).unwrap_or(false)
+    };
+    if allow_drain {
+        s.action_queue.drain(..).collect()
+    } else {
+        Vec::new()
+    }
+}
+
+fn long_poll_response(
+    state: &AppState,
+    session_id: Option<&str>,
+    actions: Vec<LfgAction>,
+) -> Response {
+    let (is_primary, session_count) = match state.lfg.lock() {
+        Ok(s) => (
+            session_id
+                .map(|sid| s.is_primary(sid))
+                .unwrap_or_else(|| s.sessions.is_empty()),
+            s.sessions.len(),
+        ),
+        Err(_) => (false, 0),
+    };
+    let actions_json = serde_json::to_string(&actions).unwrap_or_else(|_| "[]".to_string());
+    json_ok(&format!(
+        r#"{{"boot_id":"{}","is_primary":{},"session_count":{},"actions":{}}}"#,
+        process_boot_id(),
+        is_primary,
+        session_count,
+        actions_json
+    ))
 }
 
 async fn handle_actions_ack(
@@ -1049,5 +1181,128 @@ mod tests {
         s.remove_message("a");
         assert_eq!(s.messages.len(), 1);
         assert_eq!(s.messages[0].message_id, "b");
+    }
+
+    // ------------------------------------------------------------------
+    // Long-poll (`GET /actions/long`)
+    //
+    // These guard the property the userscript's memory safety depends on:
+    // one request must cover a long window instead of many short ones. If
+    // the handler ever returns immediately when idle, the client falls back
+    // to a hot request loop and Tampermonkey's per-request retention grows
+    // the WebExtensions process by gigabytes a day.
+    // ------------------------------------------------------------------
+
+    use axum::body::Body;
+    use axum::http::Request;
+    use tower::ServiceExt;
+
+    fn test_app() -> (Router, Arc<Mutex<LfgState>>, broadcast::Sender<()>) {
+        let lfg = Arc::new(Mutex::new(LfgState::new()));
+        let (notify_tx, _) = broadcast::channel::<()>(16);
+        let state = AppState {
+            lfg: lfg.clone(),
+            notify_tx: notify_tx.clone(),
+        };
+        (build_router(state), lfg, notify_tx)
+    }
+
+    fn long_poll_req(wait_ms: u64) -> Request<Body> {
+        Request::builder()
+            .uri(format!("/actions/long?wait_ms={}", wait_ms))
+            .header("authorization", format!("Bearer {}", LFG_AUTH_TOKEN))
+            .header("x-bnet-session", "test-session")
+            .body(Body::empty())
+            .unwrap()
+    }
+
+    async fn body_json(resp: Response) -> serde_json::Value {
+        let bytes = axum::body::to_bytes(resp.into_body(), 1 << 20).await.unwrap();
+        serde_json::from_slice(&bytes).unwrap()
+    }
+
+    #[tokio::test]
+    async fn long_poll_holds_until_deadline_when_idle() {
+        let (app, _lfg, _tx) = test_app();
+        let started = Instant::now();
+        let resp = app.oneshot(long_poll_req(300)).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        // The whole point: an idle poll must block, not return instantly.
+        assert!(
+            started.elapsed() >= Duration::from_millis(250),
+            "idle long-poll returned after {:?}; it must hold ~wait_ms",
+            started.elapsed()
+        );
+        let v = body_json(resp).await;
+        assert_eq!(v["actions"].as_array().unwrap().len(), 0);
+        assert!(!v["boot_id"].as_str().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn long_poll_returns_early_when_action_queued() {
+        let (app, lfg, notify_tx) = test_app();
+
+        // Queue an action shortly after the poll starts, then notify.
+        let writer = tokio::spawn({
+            let lfg = lfg.clone();
+            async move {
+                tokio::time::sleep(Duration::from_millis(100)).await;
+                lfg.lock().unwrap().enqueue_action(LfgActionKind::LeaveVoice);
+                let _ = notify_tx.send(());
+            }
+        });
+
+        let started = Instant::now();
+        let resp = app.oneshot(long_poll_req(10_000)).await.unwrap();
+        writer.await.unwrap();
+
+        // Must wake on the notify, not sit out the full 10s window.
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "long-poll did not wake on notify (took {:?})",
+            started.elapsed()
+        );
+        let v = body_json(resp).await;
+        assert_eq!(v["actions"].as_array().unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn long_poll_reports_boot_id_and_session_state() {
+        let (app, _lfg, _tx) = test_app();
+        let v = body_json(app.oneshot(long_poll_req(0)).await.unwrap()).await;
+
+        // One round-trip has to carry what /health and /register used to,
+        // otherwise the client needs its own extra timers again.
+        assert_eq!(v["boot_id"].as_str().unwrap(), process_boot_id());
+        assert!(v["is_primary"].is_boolean());
+        assert!(v["session_count"].as_u64().unwrap() >= 1);
+    }
+
+    #[tokio::test]
+    async fn long_poll_rejects_bad_token() {
+        let (app, _lfg, _tx) = test_app();
+        let req = Request::builder()
+            .uri("/actions/long?wait_ms=0")
+            .header("authorization", "Bearer wrong")
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn long_poll_wait_is_clamped() {
+        // A client asking for an absurd hold must not pin a task for hours.
+        let (app, _lfg, _tx) = test_app();
+        let resp = tokio::time::timeout(
+            Duration::from_millis(500),
+            app.oneshot(long_poll_req(u64::MAX)),
+        )
+        .await;
+        // Still holding at 500ms is correct (clamped to 60s, not infinite);
+        // what we assert is that the clamp arithmetic didn't overflow and
+        // panic the handler.
+        assert!(resp.is_err(), "expected the poll to still be holding");
     }
 }

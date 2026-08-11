@@ -33,3 +33,9 @@ image = { version = "0.25", default-features = false, features = ["png"] }
 # rendering or plain Unicode in unsupported terminals (we use our own
 # Unicode glyph fallback in that case).
 ratatui-image = { version = "8", default-features = false, features = ["crossterm"] }
+
+[dev-dependencies]
+# `ServiceExt::oneshot` lets the LFG router be exercised in-process. The
+# real server binds a fixed port (LFG_PORT) which is usually already taken
+# by the running bnetswitch, so tests must not bind anything.
+tower = { version = "0.5", features = ["util"] }
