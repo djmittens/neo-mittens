@@ -825,6 +825,27 @@ impl App {
         }
     }
 
+    /// Surface the most recent failed userscript action in the status
+    /// bar. Called each tick alongside `drain_rank_updates`.
+    ///
+    /// Failures used to go only to stderr, which the alt-screen swallows,
+    /// so a nickname sync that never landed (stale DOM selectors, no auth
+    /// token yet, wrong guild in view) was indistinguishable from one
+    /// that worked.
+    fn drain_action_failures(&mut self) {
+        let state = match &self.lfg_state {
+            Some(s) => s.clone(),
+            None => return,
+        };
+        let failure = match state.lock() {
+            Ok(mut guard) => guard.last_action_error.take(),
+            Err(_) => return,
+        };
+        if let Some(f) = failure {
+            self.status = format!("Discord action {} failed: {}", f.id, f.error);
+        }
+    }
+
     /// Build the unified row list shown in the TUI.
     ///
     /// Order:
@@ -1023,8 +1044,9 @@ impl App {
 
     /// Enqueue `set_nickname` actions for each configured Discord guild,
     /// using the email's BattleTag (or the email itself if no tag is known)
-    /// as the nickname. The userscript polls /actions and executes the
-    /// DOM walk to actually rename us in each guild.
+    /// as the nickname. The userscript picks these up off /actions and
+    /// renames us in each guild via Discord's REST API (falling back to a
+    /// DOM walk of the per-server profile modal).
     ///
     /// No-op when:
     ///   - LFG bridge isn't running (lfg_state None)
@@ -2092,6 +2114,7 @@ fn run_tui(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut App)
         // Drain any completed background work first so the upcoming draw
         // reflects the latest state.
         app.drain_rank_updates();
+        app.drain_action_failures();
         terminal.draw(|f| ui(f, app))?;
 
         // Use poll() so we yield back to the loop on the tick interval
@@ -2681,6 +2704,7 @@ fn parse_placement_input(input: &str) -> Result<(Role, ranks::RankSnapshot), Str
         "silver" | "si" => Division::Silver,
         "gold" | "g" => Division::Gold,
         "platinum" | "plat" | "p" => Division::Platinum,
+        "emerald" | "emer" | "em" | "e" => Division::Emerald,
         "diamond" | "diam" | "di" => Division::Diamond,
         "master" | "mast" | "m" => Division::Master,
         "grandmaster" | "gm" => Division::Grandmaster,
@@ -2739,6 +2763,7 @@ fn division_color(div: Division) -> Color {
         Division::Silver => Color::Rgb(192, 192, 192),      // silver
         Division::Gold => Color::Rgb(255, 215, 0),          // gold
         Division::Platinum => Color::Rgb(127, 232, 233),    // teal-cyan
+        Division::Emerald => Color::Rgb(31, 168, 74),       // deep green
         Division::Diamond => Color::Rgb(176, 224, 230),     // pale blue
         Division::Master => Color::Rgb(255, 140, 0),        // orange
         Division::Grandmaster => Color::Rgb(255, 80, 130),  // pink

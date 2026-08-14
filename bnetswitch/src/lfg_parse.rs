@@ -35,12 +35,23 @@ pub enum Tier {
     Silver,
     Gold,
     Platinum,
+    /// Sits between Platinum and Diamond. Declaration order matters here:
+    /// `Ord` is derived, so the variant order IS the ladder order.
+    Emerald,
     Diamond,
     Master,
     Grandmaster,
     /// Top 500 / Champion. Single tier above Grandmaster.
     Champion,
 }
+
+/// Number of tiers on the ladder. Kept next to `Tier` so the icon array
+/// and the score bounds can't drift out of sync when a tier is added.
+pub const TIER_COUNT: usize = 9;
+
+/// Highest possible ladder score (`Champion 1`). Each tier spans 5
+/// divisions, so this is `TIER_COUNT * 5 - 1`.
+pub const MAX_LADDER_SCORE: u32 = TIER_COUNT as u32 * 5 - 1;
 
 impl Tier {
     fn rank(self) -> u8 {
@@ -49,10 +60,11 @@ impl Tier {
             Tier::Silver => 1,
             Tier::Gold => 2,
             Tier::Platinum => 3,
-            Tier::Diamond => 4,
-            Tier::Master => 5,
-            Tier::Grandmaster => 6,
-            Tier::Champion => 7,
+            Tier::Emerald => 4,
+            Tier::Diamond => 5,
+            Tier::Master => 6,
+            Tier::Grandmaster => 7,
+            Tier::Champion => 8,
         }
     }
 
@@ -63,6 +75,7 @@ impl Tier {
             Tier::Silver => "Si",
             Tier::Gold => "Go",
             Tier::Platinum => "Pl",
+            Tier::Emerald => "Em",
             Tier::Diamond => "Di",
             Tier::Master => "Ma",
             Tier::Grandmaster => "GM",
@@ -79,7 +92,8 @@ impl Tier {
     /// visually ambiguous. Now: shape escalates with tier rank:
     ///   - Bronze/Silver/Gold:   triangle / outline gem / boxed gem
     ///     (primitive shapes, plain stacking)
-    ///   - Platinum/Diamond:     filled gem / multi-faceted gem
+    ///   - Platinum/Emerald/
+    ///     Diamond:              filled gem / hexagon / multi-faceted gem
     ///     (refined gem progression)
     ///   - Master/Grandmaster/
     ///     Champion:             4-pt star / 5-pt star / circled star
@@ -90,6 +104,7 @@ impl Tier {
             Tier::Silver      => "◇", // outline diamond
             Tier::Gold        => "◈", // boxed diamond
             Tier::Platinum    => "◆", // filled diamond
+            Tier::Emerald     => "⬢", // filled hexagon (cut emerald)
             Tier::Diamond     => "❖", // multi-faceted diamond
             Tier::Master      => "✦", // 4-point star
             Tier::Grandmaster => "★", // 5-point star (classic)
@@ -110,20 +125,24 @@ impl Tier {
     ///   Bronze    → copper-brown
     ///   Silver    → silver-gray
     ///   Gold      → gold-yellow      (warm)
-    ///   Platinum  → SATURATED TEAL   (greenish, distinct from Diamond)
-    ///   Diamond   → SATURATED BLUE   (cyan-blue, distinct from Plat)
+    ///   Platinum  → LIGHT TEAL       (pale, high blue channel)
+    ///   Emerald   → DEEP GREEN       (dark, near-zero blue channel --
+    ///                                 that contrast is what separates
+    ///                                 it from Platinum's teal)
+    ///   Diamond   → SATURATED BLUE   (cyan-blue, distinct from Emerald)
     ///   Master    → VIOLET           (cool, distinct from GM)
     ///   GM        → CRIMSON          (warm red)
     ///   Champion  → ORANGE           (warmest, top of ladder)
-    /// Color cycle: brown → gray → yellow → green → blue → violet →
-    /// red → orange. Every neighbor is different hue *and* different
-    /// brightness.
+    /// Color cycle: brown → gray → yellow → teal → green → blue →
+    /// violet → red → orange. Every neighbor is different hue *and*
+    /// different brightness.
     pub fn color_rgb(self) -> (u8, u8, u8) {
         match self {
             Tier::Bronze      => (0xcd, 0x7f, 0x32), // copper-brown
             Tier::Silver      => (0xc0, 0xc0, 0xc0), // silver-gray
             Tier::Gold        => (0xff, 0xd7, 0x00), // warm gold
-            Tier::Platinum    => (0x4d, 0xc9, 0xb0), // saturated teal
+            Tier::Platinum    => (0x7d, 0xdd, 0xc8), // light teal
+            Tier::Emerald     => (0x1f, 0xa8, 0x4a), // deep green
             Tier::Diamond     => (0x4d, 0x9e, 0xff), // saturated blue
             Tier::Master      => (0xc2, 0x66, 0xff), // saturated violet
             Tier::Grandmaster => (0xff, 0x55, 0x77), // crimson
@@ -143,6 +162,7 @@ impl Tier {
             Division::Silver => Tier::Silver,
             Division::Gold => Tier::Gold,
             Division::Platinum => Tier::Platinum,
+            Division::Emerald => Tier::Emerald,
             Division::Diamond => Tier::Diamond,
             Division::Master => Tier::Master,
             Division::Grandmaster => Tier::Grandmaster,
@@ -189,7 +209,8 @@ impl RankPoint {
     /// (one per division).
     pub fn score(self) -> u32 {
         // 5 divisions per tier, division 1 (top) = 4, division 5 (bottom) = 0.
-        // So Bronze 5 = 0, Bronze 1 = 4, Silver 5 = 5, ..., Champion 1 = 39.
+        // So Bronze 5 = 0, Bronze 1 = 4, Silver 5 = 5, ..., Champion 1 =
+        // MAX_LADDER_SCORE (44 with Emerald on the ladder).
         let div_score = if self.division >= 1 && self.division <= 5 {
             5 - self.division
         } else {
@@ -204,10 +225,10 @@ impl RankPoint {
         format!("{} {}", self.tier.short(), self.division)
     }
 
-    /// Build a RankPoint from a 0..=39 ladder score (the inverse of
-    /// `score()`). Returns None for out-of-range scores.
+    /// Build a RankPoint from a `0..=MAX_LADDER_SCORE` ladder score (the
+    /// inverse of `score()`). Returns None for out-of-range scores.
     fn from_score(score: u32) -> Option<Self> {
-        if score > 39 {
+        if score > MAX_LADDER_SCORE {
             return None;
         }
         let tier_idx = (score / 5) as u8;
@@ -217,10 +238,11 @@ impl RankPoint {
             1 => Tier::Silver,
             2 => Tier::Gold,
             3 => Tier::Platinum,
-            4 => Tier::Diamond,
-            5 => Tier::Master,
-            6 => Tier::Grandmaster,
-            7 => Tier::Champion,
+            4 => Tier::Emerald,
+            5 => Tier::Diamond,
+            6 => Tier::Master,
+            7 => Tier::Grandmaster,
+            8 => Tier::Champion,
             _ => return None,
         };
         // div_offset 0 = bottom of tier (div 5), 4 = top (div 1)
@@ -232,7 +254,7 @@ impl RankPoint {
     /// Used for the Bronze-Diamond "5 division wide-group" rule when
     /// expanding a bare tier mention like "plat" -> Plat 5 to Diamond 5.
     fn add_divisions(self, n: u32) -> RankPoint {
-        let target = self.score().saturating_add(n).min(39);
+        let target = self.score().saturating_add(n).min(MAX_LADDER_SCORE);
         Self::from_score(target).unwrap_or(self)
     }
 }
@@ -512,6 +534,7 @@ fn tier_from_word(w: &str) -> Option<Tier> {
         "s" => Tier::Silver,
         "g" => Tier::Gold,
         "p" => Tier::Platinum,
+        "e" => Tier::Emerald,
         "d" => Tier::Diamond,
         "m" => Tier::Master,
         // Multi-char abbreviations + canonical names + observed typos
@@ -519,6 +542,8 @@ fn tier_from_word(w: &str) -> Option<Tier> {
         "si" | "sil" | "silv" | "silver" | "sliver" | "silvr" => Tier::Silver,
         "go" | "gld" | "gold" => Tier::Gold,
         "pl" | "plt" | "plat" | "plats" | "platinum" | "platinim" => Tier::Platinum,
+        "em" | "eme" | "emer" | "emrld" | "emerald" | "emeralds"
+            | "emarald" | "emrald" | "emerld" | "emerland" => Tier::Emerald,
         "di" | "dia" | "diam" | "dmnd" | "diamond"
             | "daimond" | "dimaond" | "dimoand" | "diomand" | "diamound"
             | "dia." => Tier::Diamond,
@@ -688,7 +713,7 @@ fn parse_rank_range(text: &str) -> (Option<RankPoint>, Option<RankPoint>) {
             }
             if let Some(min) = anchor {
                 let spread = tier_max_group_spread(min.tier);
-                let max = RankPoint::from_score((min.score() + spread).min(39))
+                let max = RankPoint::from_score((min.score() + spread).min(MAX_LADDER_SCORE))
                     .unwrap_or(RankPoint { tier: Tier::Champion, division: 1 });
                 return (Some(min), Some(max));
             }
@@ -744,7 +769,7 @@ fn parse_rank_range(text: &str) -> (Option<RankPoint>, Option<RankPoint>) {
                 anchor_rp
             };
             let max = if upper_open {
-                RankPoint::from_score((anchor_score + spread).min(39))
+                RankPoint::from_score((anchor_score + spread).min(MAX_LADDER_SCORE))
                     .unwrap_or(RankPoint { tier: Tier::Champion, division: 1 })
             } else {
                 anchor_rp
@@ -852,6 +877,8 @@ fn parse_rank_range(text: &str) -> (Option<RankPoint>, Option<RankPoint>) {
         ("grandmaster", Tier::Grandmaster),
         ("platinum", Tier::Platinum),
         ("champion", Tier::Champion),
+        ("emeralds", Tier::Emerald),
+        ("emerald", Tier::Emerald),
         ("diamond", Tier::Diamond),
         ("masters", Tier::Master),
         ("master", Tier::Master),
@@ -934,7 +961,7 @@ fn centered_pair_range(rp: RankPoint) -> (Option<RankPoint>, Option<RankPoint>) 
     let spread_each_side = tier_max_group_spread(rp.tier);
     let center_score = rp.score();
     let min_score = center_score.saturating_sub(spread_each_side);
-    let max_score = (center_score + spread_each_side).min(39);
+    let max_score = (center_score + spread_each_side).min(MAX_LADDER_SCORE);
     let min = RankPoint::from_score(min_score).unwrap_or(rp);
     let max = RankPoint::from_score(max_score).unwrap_or(rp);
     (Some(min), Some(max))
@@ -957,6 +984,7 @@ fn tier_max_group_spread(tier: Tier) -> u32 {
         | Tier::Silver
         | Tier::Gold
         | Tier::Platinum
+        | Tier::Emerald
         | Tier::Diamond
         | Tier::Master => 5,
         Tier::Grandmaster => 3,
@@ -985,6 +1013,7 @@ fn single_tier_range(tier: Tier) -> (Option<RankPoint>, Option<RankPoint>) {
         | Tier::Silver
         | Tier::Gold
         | Tier::Platinum
+        | Tier::Emerald
         | Tier::Diamond
         | Tier::Master => 5, // wide-group threshold = 1 tier
         Tier::Grandmaster => 3,
@@ -1237,14 +1266,88 @@ mod tests {
         assert_eq!(p.rank_max, Some(RankPoint { tier: Tier::Gold, division: 1 }));
     }
 
+    // ---- Emerald (tier added between Platinum and Diamond) ----
+
+    #[test]
+    fn emerald_sits_between_platinum_and_diamond() {
+        let em = RankPoint { tier: Tier::Emerald, division: 3 };
+        assert!(RankPoint { tier: Tier::Platinum, division: 1 } < em);
+        assert!(em < RankPoint { tier: Tier::Diamond, division: 5 });
+        // One tier is exactly 5 divisions, so Pl5 -> Em5 is a 5-div step.
+        assert_eq!(
+            RankPoint { tier: Tier::Platinum, division: 5 }.score() + 5,
+            RankPoint { tier: Tier::Emerald, division: 5 }.score()
+        );
+    }
+
+    #[test]
+    fn ladder_score_round_trips_through_emerald() {
+        // Every score maps back to the point that produced it. Catches
+        // an off-by-one in from_score's tier table after the insert.
+        for score in 0..=MAX_LADDER_SCORE {
+            let rp = RankPoint::from_score(score)
+                .unwrap_or_else(|| panic!("score {} did not decode", score));
+            assert_eq!(rp.score(), score);
+        }
+        assert_eq!(RankPoint::from_score(MAX_LADDER_SCORE + 1), None);
+        assert_eq!(
+            RankPoint::from_score(MAX_LADDER_SCORE),
+            Some(RankPoint { tier: Tier::Champion, division: 1 })
+        );
+    }
+
+    #[test]
+    fn parses_emerald_words_and_compact_forms() {
+        for text in ["emerald 2 dps", "em2 dps", "emer 2 dps", "e2 dps"] {
+            let p = parse(text);
+            // Em2 ±5 divs = Plat 2 .. Diamond 2.
+            assert_eq!(
+                p.rank_min,
+                Some(RankPoint { tier: Tier::Platinum, division: 2 }),
+                "unexpected min for {:?}",
+                text
+            );
+            assert_eq!(
+                p.rank_max,
+                Some(RankPoint { tier: Tier::Diamond, division: 2 }),
+                "unexpected max for {:?}",
+                text
+            );
+        }
+    }
+
+    #[test]
+    fn parses_bare_emerald_wide_group_range() {
+        // Bare tier -> tier bottom + 5 divs = Diamond 5.
+        let p = parse("emerald supp");
+        assert_eq!(p.rank_min, Some(RankPoint { tier: Tier::Emerald, division: 5 }));
+        assert_eq!(p.rank_max, Some(RankPoint { tier: Tier::Diamond, division: 5 }));
+    }
+
+    #[test]
+    fn parses_plat_to_emerald_explicit_range() {
+        let p = parse("plat to emerald");
+        assert_eq!(p.rank_min, Some(RankPoint { tier: Tier::Platinum, division: 5 }));
+        assert_eq!(p.rank_max, Some(RankPoint { tier: Tier::Emerald, division: 1 }));
+    }
+
+    #[test]
+    fn emerald_division_maps_to_emerald_tier() {
+        assert_eq!(
+            Tier::from_division(crate::ranks::Division::Emerald),
+            Tier::Emerald
+        );
+    }
+
     #[test]
     fn parses_single_rank_with_wide_group_rule() {
         // Per Blizzard's wide-group threshold: a bare "plat" mention
-        // expands to Plat 5 -> Diamond 5 (5 divisions up = next tier
-        // bottom). See single_tier_range docs.
+        // expands to Plat 5 -> Emerald 5 (5 divisions up = next tier
+        // bottom; Emerald is the tier above Platinum). See
+        // single_tier_range docs.
         let p = parse("plat supp");
         assert_eq!(p.rank_min, Some(RankPoint { tier: Tier::Platinum, division: 5 }));
-        assert_eq!(p.rank_max, Some(RankPoint { tier: Tier::Diamond, division: 5 }));
+        assert_eq!(p.rank_max, Some(RankPoint { tier: Tier::Emerald, division: 5 }));
     }
 
     #[test]
@@ -1258,18 +1361,18 @@ mod tests {
     fn specific_rank_expands_5_div_centered() {
         // "plat 3 dps" -- poster stating own rank.
         // Per Blizzard's pairing rule they can group with anyone within
-        // 5 divisions of P3: Gold 3 (P3-5) up through Diamond 3 (P3+5).
+        // 5 divisions of P3: Gold 3 (P3-5) up through Emerald 3 (P3+5).
         let p = parse("plat 3 dps");
         assert_eq!(p.rank_min, Some(RankPoint { tier: Tier::Gold, division: 3 }));
-        assert_eq!(p.rank_max, Some(RankPoint { tier: Tier::Diamond, division: 3 }));
+        assert_eq!(p.rank_max, Some(RankPoint { tier: Tier::Emerald, division: 3 }));
     }
 
     #[test]
     fn specific_rank_d3_compact_centered() {
         // "d3" compact form -- same ±5 div rule.
-        // D3 - 5 divs = Plat 3; D3 + 5 divs = Master 3.
+        // D3 - 5 divs = Emerald 3; D3 + 5 divs = Master 3.
         let p = parse("d3 looking for sup");
-        assert_eq!(p.rank_min, Some(RankPoint { tier: Tier::Platinum, division: 3 }));
+        assert_eq!(p.rank_min, Some(RankPoint { tier: Tier::Emerald, division: 3 }));
         assert_eq!(p.rank_max, Some(RankPoint { tier: Tier::Master, division: 3 }));
     }
 
@@ -1443,11 +1546,11 @@ mod tests {
     #[test]
     fn screenshot_example_2() {
         // From the user's screenshot: "plat supp"
-        // After wide-group rule: Plat 5 to Diamond 5.
+        // After wide-group rule: Plat 5 to Emerald 5.
         let p = parse("plat supp");
         assert_eq!(p.roles_needed, vec![Role::Support]);
         assert_eq!(p.rank_min.map(|r| r.tier), Some(Tier::Platinum));
-        assert_eq!(p.rank_max.map(|r| r.tier), Some(Tier::Diamond));
+        assert_eq!(p.rank_max.map(|r| r.tier), Some(Tier::Emerald));
         assert_eq!(p.rank_min.map(|r| r.division), Some(5));
         assert_eq!(p.rank_max.map(|r| r.division), Some(5));
     }
@@ -1593,20 +1696,21 @@ mod tests {
     }
 
     #[test]
-    fn parses_plat1_plus_caps_at_diamond1() {
-        // User's stated rule: "plat1+" -> Pl1..Di1 (5 divs up).
+    fn parses_plat1_plus_caps_at_emerald1() {
+        // User's stated rule: "plat1+" -> 5 divs up. With Emerald on the
+        // ladder that's Pl1..Em1 (it used to land on Diamond 1).
         let p = parse("plat 1+ tank");
         assert_eq!(p.rank_min, Some(RankPoint { tier: Tier::Platinum, division: 1 }));
-        assert_eq!(p.rank_max, Some(RankPoint { tier: Tier::Diamond, division: 1 }));
+        assert_eq!(p.rank_max, Some(RankPoint { tier: Tier::Emerald, division: 1 }));
     }
 
     #[test]
-    fn parses_plat3_and_up_caps_at_diamond3() {
+    fn parses_plat3_and_up_caps_at_emerald3() {
         // The seeray_1 case from the screenshot: "plat 3 and up" was
-        // parsed as Pl3..Ch1, should be Pl3..Di3.
+        // parsed as Pl3..Ch1, should be Pl3 + 5 divs = Em3.
         let p = parse("plat 3 and up");
         assert_eq!(p.rank_min, Some(RankPoint { tier: Tier::Platinum, division: 3 }));
-        assert_eq!(p.rank_max, Some(RankPoint { tier: Tier::Diamond, division: 3 }));
+        assert_eq!(p.rank_max, Some(RankPoint { tier: Tier::Emerald, division: 3 }));
     }
 
     #[test]
@@ -1627,9 +1731,9 @@ mod tests {
 
     #[test]
     fn parses_diamond_3_and_below_uses_5_div_spread() {
-        // "and below" mirrors "and up": Di3 - 5 divs = Plat 3.
+        // "and below" mirrors "and up": Di3 - 5 divs = Emerald 3.
         let p = parse("diamond 3 and below");
-        assert_eq!(p.rank_min, Some(RankPoint { tier: Tier::Platinum, division: 3 }));
+        assert_eq!(p.rank_min, Some(RankPoint { tier: Tier::Emerald, division: 3 }));
         assert_eq!(p.rank_max, Some(RankPoint { tier: Tier::Diamond, division: 3 }));
     }
 
@@ -1688,10 +1792,10 @@ mod tests {
 
     #[test]
     fn parses_and_above() {
-        // "plat 5 and above" -- Pl5 + 5 divs = Diamond 5. NOT Ch1.
+        // "plat 5 and above" -- Pl5 + 5 divs = Emerald 5. NOT Ch1.
         let p = parse("plat 5 and above");
         assert_eq!(p.rank_min, Some(RankPoint { tier: Tier::Platinum, division: 5 }));
-        assert_eq!(p.rank_max, Some(RankPoint { tier: Tier::Diamond, division: 5 }));
+        assert_eq!(p.rank_max, Some(RankPoint { tier: Tier::Emerald, division: 5 }));
     }
 
     #[test]

@@ -46,6 +46,13 @@ Userscripts let us drive DOM clicks the same way a human would, so:
 - Voice routing happens through your real Discord client's audio path.
 - Detection signal looks identical to manual clicks.
 
+One exception: **nickname sync** issues
+`PATCH /api/v9/guilds/<id>/members/@me` directly, reusing the session
+token the bridge already captures for history backfill. The DOM path for
+this broke silently whenever Discord reshuffled the guild-header popout,
+and it could only rename you in the guild the tab happened to be viewing.
+The DOM walk is still there as a fallback if the request is rejected.
+
 Still TOS-questionable; see the bnetswitch LFG module's docstring for
 the longer discussion.
 

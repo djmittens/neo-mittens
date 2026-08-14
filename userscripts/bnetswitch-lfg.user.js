@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         bnetswitch LFG bridge
 // @namespace    https://github.com/xyzyx/neo-mittens
-// @version      0.10.0
+// @version      0.10.1
 // @description  Taps Discord's WebSocket gateway directly to forward Overwatch LFG embeds + voice-state updates to bnetswitch's local HTTP server. Push-based, complete coverage, no DOM polling.
 // @match        https://discord.com/*
 // @match        https://canary.discord.com/*
@@ -69,9 +69,10 @@
 //   - Filters MESSAGE_CREATE/UPDATE for LFG Tool embeds in
 //     WATCHED_CHANNEL_IDS, parses author + description + voice channel
 //     ID + URL, POSTs to bnetswitch.
-//   - HTTP-polls /actions for join/nickname commands; executes via DOM
-//     walk for nickname-change (no gateway equivalent) and pushState for
-//     VC join.
+//   - HTTP-polls /actions for join/nickname commands. Nickname changes
+//     go through the REST API (PATCH /guilds/<id>/members/@me) using the
+//     token we capture off Discord's own requests, with the old DOM walk
+//     kept as a fallback; VC joins use gateway op 4 + pushState.
 //
 // =============================================================================
 
@@ -92,7 +93,7 @@
   // this file. Exposed via bnetswitchLfgDiagnose so we can confirm
   // which build is actually loaded after a TM update or loader reload
   // (the @version banner is only visible in TM's UI).
-  const USERSCRIPT_VERSION = "0.10.0";
+  const USERSCRIPT_VERSION = "0.10.1";
 
   // Per-userscript-instance ID for multi-browser leader election.
   // bnetswitch elects the most-recently-registered tab as primary
@@ -1705,15 +1706,36 @@
           break;
         }
         case "set_nickname": {
-          const urlMatch = window.location.pathname.match(/^\/channels\/(\d+)/);
-          const currentGuild = urlMatch ? urlMatch[1] : null;
-          if (currentGuild !== action.guild_id) {
-            throw new Error(
-              `wrong guild in view (current=${currentGuild || "none"}, ` +
-                `wanted=${action.guild_id}); switch tabs and try again`
+          // PRIMARY: REST. Guild-agnostic and immune to client redesigns.
+          try {
+            await setServerNicknameViaApi(action.guild_id, action.nickname);
+            break;
+          } catch (apiErr) {
+            warn(
+              "nickname REST path failed, trying DOM fallback:",
+              apiErr.message
             );
+            // FALLBACK: drive the UI like a human. Only possible when the
+            // tab is already viewing the target guild -- the popout we
+            // click lives in that guild's header.
+            const urlMatch = window.location.pathname.match(/^\/channels\/(\d+)/);
+            const currentGuild = urlMatch ? urlMatch[1] : null;
+            if (currentGuild !== action.guild_id) {
+              throw new Error(
+                `REST failed (${apiErr.message}) and DOM fallback needs the ` +
+                  `guild in view (current=${currentGuild || "none"}, ` +
+                  `wanted=${action.guild_id})`
+              );
+            }
+            try {
+              await setServerNickname(action.nickname);
+            } catch (domErr) {
+              throw new Error(
+                `REST failed (${apiErr.message}); DOM fallback failed ` +
+                  `(${domErr.message})`
+              );
+            }
           }
-          await setServerNickname(action.nickname);
           break;
         }
         case "leave_voice": {
@@ -2152,8 +2174,7 @@
    *  guild-member endpoint). For people actually in the voice channel the
    *  gateway cache almost always hits, so this is a rare path. */
   async function fetchDisplayName(userId) {
-    const token = __bnet_auth_token ||
-      (typeof usw !== "undefined" && usw.__bnet_auth_token) || null;
+    const token = getAuthToken();
     if (!token) {
       debug("name-copy: no auth token for REST profile fallback");
       return null;
@@ -2356,11 +2377,27 @@
       (el.className || "").toString().includes("hiddenVisually") ||
       (el.className || "").toString().includes("comboBoxInput");
 
+    // Fast path: Discord labels the field for screen readers. This
+    // survives class-name churn, which the label walk below does not.
+    const byLabel = document.querySelector(
+      'input[aria-label*="Nickname" i], input[placeholder*="Nickname" i]'
+    );
+    if (byLabel && !isWrongInput(byLabel)) return byLabel;
+
+    // Slow path: find the "Server Nickname" heading and walk forward to
+    // the first plausible text input under it. The heading text has been
+    // "Server Nickname" and "Nickname" at different times, so match
+    // loosely instead of on an exact string.
     const allEls = document.querySelectorAll(
-      'h1, h2, h3, h4, [class*="title_"], [class*="formText"]'
+      'h1, h2, h3, h4, label, legend, [class*="title_"], [class*="formText"]'
     );
     for (const h of allEls) {
-      if ((h.textContent || "").trim() !== "Server Nickname") continue;
+      const text = (h.textContent || "").trim();
+      if (!/^(server\s+)?nickname$/i.test(text)) continue;
+      // The input is sometimes a descendant of the label rather than a
+      // sibling of the heading.
+      const inner = h.querySelector?.('input[type="text"], input:not([type])');
+      if (inner && !isWrongInput(inner)) return inner;
       let el = h.nextElementSibling;
       for (let depth = 0; depth < 6 && el; depth++) {
         const candidate = el.querySelector?.('input[type="text"], input:not([type])');
@@ -2392,8 +2429,95 @@
     );
   }
 
+  /** The captured Discord auth token, from whichever world saw it first.
+   *  Populated by the XHR/fetch header hooks installed in the page world
+   *  (see "Auth token capture" above). */
+  function getAuthToken() {
+    return (
+      __bnet_auth_token ||
+      (typeof usw !== "undefined" && usw.__bnet_auth_token) ||
+      null
+    );
+  }
+
+  /** Set our per-server nickname through Discord's REST API.
+   *
+   *  This is the exact request Discord's own client fires when you hit
+   *  Save in the per-server profile modal:
+   *
+   *      PATCH /api/v9/guilds/<guild_id>/members/@me   {"nick": "..."}
+   *
+   *  Preferred over the DOM walk in setServerNickname() because it:
+   *    - doesn't care what Discord's markup looks like this week
+   *      (the DOM path broke silently whenever they reshuffled the
+   *      guild-header popout or the profile modal), and
+   *    - works no matter which guild/channel the tab is viewing --
+   *      the DOM path can only rename you in the guild on screen.
+   *
+   *  Requires the auth token, which we only have after Discord has made
+   *  at least one authenticated request in this tab. Callers should fall
+   *  back to the DOM path when this throws.
+   */
+  async function setServerNicknameViaApi(guildId, nickname) {
+    if (!guildId) throw new Error("no guild_id in action");
+    // An action can land before Discord has made its first authenticated
+    // request in a freshly-loaded tab. Give the header hooks a moment to
+    // catch one rather than burning the action -- actions aren't retried.
+    let token = getAuthToken();
+    for (let i = 0; i < 20 && !token; i++) {
+      await sleep(250);
+      token = getAuthToken();
+    }
+    if (!token) throw new Error("no Discord auth token captured yet");
+
+    const desired = (nickname || "").trim();
+    log(
+      "setServerNicknameViaApi: guild=" + guildId,
+      JSON.stringify(desired)
+    );
+
+    const headers = {
+      authorization: token,
+      "content-type": "application/json",
+      accept: "*/*",
+    };
+    // Discord fingerprints its own client with x-super-properties (and
+    // sends the user's locale alongside). Some write endpoints get
+    // stricter treatment without them, so replay whatever the page world
+    // captured off a real request rather than fabricating values.
+    const superProps = typeof usw !== "undefined" ? usw.__bnet_super_props : null;
+    if (superProps) headers["x-super-properties"] = superProps;
+    const locale = typeof usw !== "undefined" ? usw.__bnet_locale : null;
+    if (locale) headers["x-discord-locale"] = locale;
+
+    const res = await fetch("/api/v9/guilds/" + guildId + "/members/@me", {
+      method: "PATCH",
+      credentials: "include",
+      headers,
+      // "" clears the nickname (falls back to display name) -- same as
+      // what the modal's Reset button sends.
+      body: JSON.stringify({ nick: desired }),
+    });
+
+    if (!res.ok) {
+      const detail = await res.text().catch(() => "");
+      throw new Error(
+        "PATCH members/@me -> " + res.status + " " + detail.slice(0, 200)
+      );
+    }
+
+    // 200 carries the updated member object; confirm Discord actually
+    // took the value rather than silently normalizing it away.
+    const member = await res.json().catch(() => null);
+    const applied = member && typeof member.nick !== "undefined" ? member.nick : null;
+    log(
+      "nickname set via API; server reports nick=" + JSON.stringify(applied)
+    );
+    return applied;
+  }
+
   async function setServerNickname(nickname) {
-    log("setServerNickname:", JSON.stringify(nickname));
+    log("setServerNickname (DOM fallback):", JSON.stringify(nickname));
 
     const dropdown = document.querySelector('[aria-label*="server actions"]');
     if (!dropdown) throw new Error("server-actions dropdown not found");
@@ -2402,12 +2526,29 @@
       dropdown.click();
       await sleep(150);
 
-      const editProfile = document.getElementById(
-        "guild-header-popout-change-nickname"
-      );
+      // The menu item's id has changed over time
+      // ("...change-nickname" -> "...edit-server-profile"), so fall back
+      // to matching the visible label of any menu item.
+      let editProfile =
+        document.getElementById("guild-header-popout-change-nickname") ||
+        document.getElementById("guild-header-popout-edit-server-profile");
       if (!editProfile) {
+        editProfile = Array.from(
+          document.querySelectorAll('[role="menuitem"]')
+        ).find((el) =>
+          /nickname|server profile/i.test((el.textContent || "").trim())
+        );
+      }
+      if (!editProfile) {
+        const items = Array.from(document.querySelectorAll('[role="menuitem"]'))
+          .map((el) => (el.textContent || "").trim())
+          .filter(Boolean);
         document.body.click();
-        throw new Error('"Edit Per-server Profile" menu item not found');
+        throw new Error(
+          '"Edit Server Profile" menu item not found (menu items seen: ' +
+            (items.length ? items.join(" / ") : "none") +
+            ")"
+        );
       }
       editProfile.click();
 

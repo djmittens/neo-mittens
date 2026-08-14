@@ -134,11 +134,19 @@ function M.mason_setup()
   end
 end
 
--- Valkyria LSP (Valk script)
+-- Valkyria LSP: prefer the AOT binary (make lsp), fall back to running
+-- lsp/main.valk under the interpreter.
 local valk_binary = vim.fn.expand('~/src/valkyria/build/valk')
-if vim.loop.fs_stat(valk_binary) then
+local valk_lsp_binary = vim.fn.expand('~/src/valkyria/build/valk-lsp')
+if vim.loop.fs_stat(valk_lsp_binary) or vim.loop.fs_stat(valk_binary) then
+  local cmd
+  if vim.loop.fs_stat(valk_lsp_binary) then
+    cmd = { valk_lsp_binary }
+  else
+    cmd = { valk_binary, vim.fn.expand('~/src/valkyria/lsp/main.valk') }
+  end
   vim.lsp.config('valk', {
-    cmd = { valk_binary, vim.fn.expand('~/src/valkyria/scripts/lsp/main.valk') },
+    cmd = cmd,
     cmd_cwd = vim.fn.expand('~/src/valkyria'),
     cmd_env = { VALK_HEAP_HARD_LIMIT = '4294967296' },
     filetypes = { 'valk' },

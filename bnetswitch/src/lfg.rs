@@ -284,6 +284,21 @@ pub struct LfgState {
     /// Registered userscript sessions (browsers/tabs). Used to elect
     /// the "primary" tab that receives queued actions.
     pub sessions: std::collections::HashMap<String, SessionInfo>,
+    /// Most recent failed action ack, waiting to be shown in the TUI.
+    /// Taken (not cloned) by the UI loop so each failure is surfaced
+    /// exactly once. Without this, failures only reached stderr — which
+    /// the alt-screen TUI hides, so e.g. a broken nickname sync looked
+    /// like nothing happening at all.
+    pub last_action_error: Option<ActionFailure>,
+}
+
+/// A `POST /actions/ack` reporting `success: false`.
+#[derive(Clone, Debug)]
+pub struct ActionFailure {
+    /// The action id we handed the userscript.
+    pub id: String,
+    /// Error string reported by the userscript.
+    pub error: String,
 }
 
 impl LfgState {
@@ -809,11 +824,17 @@ async fn handle_actions_ack(
         Err(e) => return json_error(StatusCode::BAD_REQUEST, &format!("bad ack body: {}", e)),
     };
     if !ack.success {
-        eprintln!(
-            "[lfg] action {} failed: {}",
-            ack.id,
-            ack.error.unwrap_or_default()
-        );
+        let error = ack.error.unwrap_or_default();
+        eprintln!("[lfg] action {} failed: {}", ack.id, error);
+        // Also park it for the TUI. stderr is invisible under the
+        // alt-screen, so this is the only way the user learns that e.g.
+        // a nickname sync never landed.
+        if let Ok(mut guard) = state.lfg.lock() {
+            guard.last_action_error = Some(ActionFailure {
+                id: ack.id.clone(),
+                error,
+            });
+        }
     }
     json_ok(r#"{"ok":true}"#)
 }
