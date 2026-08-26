@@ -111,6 +111,26 @@ const MAX_LFG_HISTORY: usize = 256;
 #[allow(dead_code)] // used once TUI panel enqueues actions
 const ACTION_TTL_SECS: u64 = 60;
 
+/// How long we wait for a `POST /actions/ack` after handing an action to a
+/// userscript before declaring it lost.
+///
+/// Delivery is fire-and-forget: the moment an action is drained it is gone
+/// from the queue, so anything that eats it in transit (tab reloaded mid
+/// flight, SSE socket gone half-open across a suspend, the userscript
+/// discarding an in-flight response while switching transports) used to be
+/// indistinguishable from success. Nothing retried and nothing complained --
+/// the rename just never happened. Tracking in-flight actions and timing out
+/// the ack is what turns that silence into a status-bar message.
+///
+/// 30s is comfortably longer than the userscript's slowest legitimate path
+/// (`setServerNicknameViaApi` alone can spend 5s waiting for an auth token,
+/// then falls back to a DOM walk with its own sleeps).
+const ACK_TIMEOUT_SECS: u64 = 30;
+
+/// Cap on buffered failure reports, so a wedged userscript that fails every
+/// action can't grow this without bound before the TUI drains it.
+const MAX_ACTION_FAILURES: usize = 16;
+
 // ============================================================================
 // Wire types
 // ============================================================================
@@ -243,6 +263,21 @@ pub enum LfgActionKind {
     LeaveVoice,
 }
 
+impl LfgActionKind {
+    /// Short human label for status-bar messages. An action id alone
+    /// ("act-1787121309414 was never confirmed") tells the user nothing
+    /// about what actually failed to happen.
+    pub fn describe(&self) -> String {
+        match self {
+            LfgActionKind::JoinByMessage { .. } => "join voice".to_string(),
+            LfgActionKind::SetNickname { nickname, .. } => {
+                format!("set nickname to '{}'", nickname)
+            }
+            LfgActionKind::LeaveVoice => "leave voice".to_string(),
+        }
+    }
+}
+
 /// What the userscript reports back about its / Discord's current state.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct VoiceStatus {
@@ -284,20 +319,45 @@ pub struct LfgState {
     /// Registered userscript sessions (browsers/tabs). Used to elect
     /// the "primary" tab that receives queued actions.
     pub sessions: std::collections::HashMap<String, SessionInfo>,
-    /// Most recent failed action ack, waiting to be shown in the TUI.
-    /// Taken (not cloned) by the UI loop so each failure is surfaced
-    /// exactly once. Without this, failures only reached stderr — which
-    /// the alt-screen TUI hides, so e.g. a broken nickname sync looked
-    /// like nothing happening at all.
-    pub last_action_error: Option<ActionFailure>,
+    /// Failed / lost actions waiting to be shown in the TUI. Drained (not
+    /// cloned) by the UI loop so each failure is surfaced exactly once.
+    /// Without this, failures only reached stderr — which the alt-screen TUI
+    /// hides, so e.g. a broken nickname sync looked like nothing happening
+    /// at all.
+    ///
+    /// A queue rather than a single slot: a switch enqueues one action per
+    /// guild, and with an `Option` the second failure silently overwrote the
+    /// first before the TUI ever ticked.
+    pub action_failures: VecDeque<ActionFailure>,
+    /// Actions handed to a userscript that have not been acked yet, keyed
+    /// by action id. Populated at every drain site, cleared on ack, and
+    /// swept for timeouts — this is what makes a lost action observable.
+    pub in_flight: std::collections::HashMap<String, InFlightAction>,
+    /// Monotonic counter feeding `enqueue_action`'s id. Wall-clock ms alone
+    /// collided: the per-guild enqueue loop runs well inside one millisecond,
+    /// so every action in a multi-guild sync shared an id and their acks
+    /// cross-attributed.
+    next_action_seq: u64,
 }
 
-/// A `POST /actions/ack` reporting `success: false`.
+/// An action delivered to a userscript, awaiting its ack.
+#[derive(Clone, Debug)]
+pub struct InFlightAction {
+    /// What the action was, for the timeout message.
+    pub description: String,
+    /// Unix epoch seconds after which we give up waiting for the ack.
+    pub ack_deadline: u64,
+}
+
+/// An action that failed, was lost, or expired — queued for the TUI.
+///
+/// Carries only the human-readable reason: the message is self-describing
+/// ("'set nickname to X' failed: ..."), and the opaque action id it used to
+/// also carry meant nothing to the user. The id is still written to stderr
+/// by `push_failure` for log correlation.
 #[derive(Clone, Debug)]
 pub struct ActionFailure {
-    /// The action id we handed the userscript.
-    pub id: String,
-    /// Error string reported by the userscript.
+    /// Human-readable reason, ready to drop into the status bar.
     pub error: String,
 }
 
@@ -326,7 +386,13 @@ impl LfgState {
     /// Enqueue an action for the userscript to perform.
     #[allow(dead_code)] // used once TUI panel enqueues actions
     pub fn enqueue_action(&mut self, kind: LfgActionKind) -> String {
-        let id = format!("act-{}", now_ms());
+        // Wall clock alone is not unique: the caller enqueues one action per
+        // configured guild in a tight loop, so several land in the same
+        // millisecond and used to share an id. Acks are matched by id, so
+        // collisions cross-attributed results between guilds. The sequence
+        // number makes the id unique regardless of clock resolution.
+        self.next_action_seq = self.next_action_seq.wrapping_add(1);
+        let id = format!("act-{}-{}", now_ms(), self.next_action_seq);
         let action = LfgAction {
             id: id.clone(),
             kind,
@@ -336,11 +402,85 @@ impl LfgState {
         id
     }
 
+    /// Record a failure for the TUI to surface. Bounded; oldest dropped.
+    ///
+    /// Deliberately does NOT write to stderr. bnetswitch's stderr is the same
+    /// pty ratatui is driving, so an `eprintln!` here does not go to a log --
+    /// it paints raw text over the alt-screen, duplicating the status line on
+    /// top of the rendered one. The failure queue *is* the delivery channel.
+    fn push_failure(&mut self, error: String) {
+        self.action_failures.push_back(ActionFailure { error });
+        while self.action_failures.len() > MAX_ACTION_FAILURES {
+            self.action_failures.pop_front();
+        }
+    }
+
     /// Drain expired actions. Called opportunistically before
     /// returning the queue to the userscript.
+    ///
+    /// An expiry here means the action sat the full `ACTION_TTL_SECS`
+    /// without any primary session ever collecting it — i.e. no Discord tab
+    /// was connected. That is the single most likely reason a switch does
+    /// not rename you, and it used to be a silent `retain()`.
     pub fn prune_expired_actions(&mut self) {
         let now = now_secs();
-        self.action_queue.retain(|a| a.expires_at > now);
+        if self.action_queue.iter().all(|a| a.expires_at > now) {
+            return;
+        }
+        let (expired, live): (Vec<_>, Vec<_>) = self
+            .action_queue
+            .drain(..)
+            .partition(|a| a.expires_at <= now);
+        self.action_queue = live.into();
+        for a in expired {
+            self.push_failure(format!(
+                "{} — expired after {}s, no Discord tab picked it up \
+                 (tab closed, or the bridge was disconnected)",
+                a.kind.describe(),
+                ACTION_TTL_SECS
+            ));
+        }
+    }
+
+    /// Record actions we just handed to a userscript so a missing ack can be
+    /// detected. Called at every drain site.
+    pub fn mark_delivered(&mut self, actions: &[LfgAction]) {
+        let deadline = now_secs() + ACK_TIMEOUT_SECS;
+        for a in actions {
+            self.in_flight.insert(
+                a.id.clone(),
+                InFlightAction {
+                    description: a.kind.describe(),
+                    ack_deadline: deadline,
+                },
+            );
+        }
+    }
+
+    /// Report any delivered action whose ack never arrived.
+    ///
+    /// Called from the TUI tick as well as the HTTP paths, because the
+    /// interesting case is precisely when the userscript has gone quiet and
+    /// no further requests will arrive to trigger a sweep.
+    pub fn sweep_unacked_actions(&mut self) {
+        let now = now_secs();
+        if self.in_flight.values().all(|f| f.ack_deadline > now) {
+            return;
+        }
+        let lost: Vec<(String, String)> = self
+            .in_flight
+            .iter()
+            .filter(|(_, f)| f.ack_deadline <= now)
+            .map(|(id, f)| (id.clone(), f.description.clone()))
+            .collect();
+        for (id, description) in lost {
+            self.in_flight.remove(&id);
+            self.push_failure(format!(
+                "{} — delivered but never confirmed within {}s, the Discord tab \
+                 dropped it (reloaded, suspended, or switched transports mid-flight)",
+                description, ACK_TIMEOUT_SECS
+            ));
+        }
     }
 
     /// Register a new userscript session, or refresh an existing one.
@@ -657,6 +797,7 @@ async fn handle_actions(
     let session_id = extract_session_id(&headers);
     let mut s = state.lfg.lock().unwrap();
     s.prune_expired_actions();
+    s.sweep_unacked_actions();
     let allow_drain = if s.sessions.is_empty() {
         true
     } else {
@@ -670,6 +811,7 @@ async fn handle_actions(
     } else {
         Vec::new()
     };
+    s.mark_delivered(&actions);
     let body = serde_json::to_string(&actions).unwrap_or_else(|_| "[]".to_string());
     json_ok(&body)
 }
@@ -767,16 +909,19 @@ fn drain_actions_for(state: &AppState, session_id: Option<&str>) -> Vec<LfgActio
         Err(_) => return Vec::new(),
     };
     s.prune_expired_actions();
+    s.sweep_unacked_actions();
     let allow_drain = if s.sessions.is_empty() {
         true
     } else {
         session_id.map(|sid| s.is_primary(sid)).unwrap_or(false)
     };
-    if allow_drain {
+    let actions: Vec<LfgAction> = if allow_drain {
         s.action_queue.drain(..).collect()
     } else {
         Vec::new()
-    }
+    };
+    s.mark_delivered(&actions);
+    actions
 }
 
 fn long_poll_response(
@@ -823,17 +968,20 @@ async fn handle_actions_ack(
         Ok(a) => a,
         Err(e) => return json_error(StatusCode::BAD_REQUEST, &format!("bad ack body: {}", e)),
     };
-    if !ack.success {
-        let error = ack.error.unwrap_or_default();
-        eprintln!("[lfg] action {} failed: {}", ack.id, error);
-        // Also park it for the TUI. stderr is invisible under the
-        // alt-screen, so this is the only way the user learns that e.g.
-        // a nickname sync never landed.
-        if let Ok(mut guard) = state.lfg.lock() {
-            guard.last_action_error = Some(ActionFailure {
-                id: ack.id.clone(),
-                error,
-            });
+    if let Ok(mut guard) = state.lfg.lock() {
+        // Either outcome resolves the action: stop waiting for its ack, or
+        // the timeout sweep would report a success as "never confirmed".
+        let pending = guard.in_flight.remove(&ack.id);
+        if !ack.success {
+            let error = ack.error.unwrap_or_default();
+            // Park it for the TUI. stderr is invisible under the alt-screen,
+            // so this is the only way the user learns that e.g. a nickname
+            // sync never landed.
+            let described = match pending {
+                Some(f) => format!("{} — {}", f.description, error),
+                None => error,
+            };
+            guard.push_failure(described);
         }
     }
     json_ok(r#"{"ok":true}"#)
@@ -1017,6 +1165,7 @@ async fn handle_events(
                 };
 
                 s.prune_expired_actions();
+                s.sweep_unacked_actions();
 
                 let is_primary = if s.sessions.is_empty() {
                     true
@@ -1027,11 +1176,13 @@ async fn handle_events(
                         .unwrap_or(false)
                 };
 
-                if is_primary {
+                let drained: Vec<LfgAction> = if is_primary {
                     s.action_queue.drain(..).collect()
                 } else {
                     Vec::new()
-                }
+                };
+                s.mark_delivered(&drained);
+                drained
             };
 
             // Push each action as an SSE event.
@@ -1155,6 +1306,95 @@ mod tests {
             voice_channel_url: None,
             guild_id: None,
         }
+    }
+
+    fn nick_action(n: &str) -> LfgActionKind {
+        LfgActionKind::SetNickname {
+            guild_id: "94882524378968064".into(),
+            nickname: n.into(),
+        }
+    }
+
+    /// The per-guild enqueue loop runs inside a single millisecond, so
+    /// wall-clock-only ids collided and acks cross-attributed.
+    #[test]
+    fn enqueue_action_ids_are_unique_within_one_millisecond() {
+        let mut s = LfgState::new();
+        let ids: Vec<String> = (0..50).map(|_| s.enqueue_action(nick_action("x"))).collect();
+        let unique: std::collections::HashSet<_> = ids.iter().collect();
+        assert_eq!(unique.len(), ids.len(), "action ids collided: {:?}", ids);
+    }
+
+    /// An action nobody ever collected must be reported, not silently
+    /// dropped — this is the "switched accounts with no Discord tab open"
+    /// case that made the rename look like it just did nothing.
+    #[test]
+    fn expired_action_is_reported_not_silently_dropped() {
+        let mut s = LfgState::new();
+        s.enqueue_action(nick_action("OliveLion#25432"));
+        s.action_queue[0].expires_at = now_secs() - 1;
+
+        s.prune_expired_actions();
+
+        assert!(s.action_queue.is_empty());
+        let f = s.action_failures.pop_front().expect("expiry must be reported");
+        assert!(f.error.contains("set nickname to 'OliveLion#25432'"), "{}", f.error);
+        assert!(f.error.contains("expired"), "{}", f.error);
+    }
+
+    /// Delivered-but-never-acked is the transport-switch / tab-reload case.
+    #[test]
+    fn delivered_action_without_ack_times_out() {
+        let mut s = LfgState::new();
+        s.enqueue_action(nick_action("Pogo#11926"));
+        let delivered: Vec<LfgAction> = s.action_queue.drain(..).collect();
+        s.mark_delivered(&delivered);
+
+        // Not yet past the deadline: silence is still legitimate.
+        s.sweep_unacked_actions();
+        assert!(s.action_failures.is_empty());
+
+        for f in s.in_flight.values_mut() {
+            f.ack_deadline = now_secs() - 1;
+        }
+        s.sweep_unacked_actions();
+
+        let f = s.action_failures.pop_front().expect("lost action must be reported");
+        assert!(f.error.contains("set nickname to 'Pogo#11926'"), "{}", f.error);
+        assert!(f.error.contains("never confirmed"), "{}", f.error);
+        assert!(s.in_flight.is_empty(), "swept actions must not report twice");
+    }
+
+    /// A successful ack must clear the in-flight entry, or the sweep would
+    /// later report a perfectly good action as lost.
+    #[test]
+    fn acked_action_does_not_time_out() {
+        let mut s = LfgState::new();
+        let id = s.enqueue_action(nick_action("Kermit#11168"));
+        let delivered: Vec<LfgAction> = s.action_queue.drain(..).collect();
+        s.mark_delivered(&delivered);
+
+        assert!(s.in_flight.remove(&id).is_some(), "ack should find the entry");
+
+        for f in s.in_flight.values_mut() {
+            f.ack_deadline = now_secs() - 1;
+        }
+        s.sweep_unacked_actions();
+        assert!(s.action_failures.is_empty(), "acked action was reported as lost");
+    }
+
+    /// One failure per guild must not clobber the previous one before the
+    /// TUI has ticked.
+    #[test]
+    fn multiple_failures_are_queued_not_overwritten() {
+        let mut s = LfgState::new();
+        s.enqueue_action(nick_action("first"));
+        s.enqueue_action(nick_action("second"));
+        for a in s.action_queue.iter_mut() {
+            a.expires_at = now_secs() - 1;
+        }
+        s.prune_expired_actions();
+        assert_eq!(s.action_failures.len(), 2);
     }
 
     #[test]

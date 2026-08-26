@@ -94,10 +94,25 @@ pub struct AppConfig {
     /// are never injected into the login list.
     #[serde(default)]
     pub remembered_emails: Vec<String>,
+
+    /// How often (in seconds) to poll competitive career stats per
+    /// account for the longitudinal history in `stats.rs`. Set to 0 to
+    /// disable stats tracking entirely.
+    ///
+    /// Default: 15 minutes. There is little point polling faster --
+    /// OverFast caches these responses for 10 minutes and Blizzard's
+    /// career pages themselves update with a lag, so most extra polls
+    /// would just write tombstones.
+    #[serde(default = "default_stats_poll_interval")]
+    pub stats_poll_interval_secs: u64,
 }
 
 fn default_lfg_stale_secs() -> u64 {
     10 * 60 // 10 minutes
+}
+
+fn default_stats_poll_interval() -> u64 {
+    15 * 60 // 15 minutes
 }
 
 fn default_warm_launch_ttl() -> u64 {
@@ -125,6 +140,7 @@ impl Default for AppConfig {
             lfg_dedupe_by_author: true,
             lfg_dedupe_by_voice_channel: true,
             remembered_emails: Vec::new(),
+            stats_poll_interval_secs: default_stats_poll_interval(),
         }
     }
 }
@@ -275,6 +291,39 @@ impl AppConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A config written before `stats_poll_interval_secs` existed must
+    /// still load, picking up the default rather than failing the parse
+    /// and silently resetting every account's metadata.
+    #[test]
+    fn config_without_stats_interval_still_loads() {
+        let toml_src = r#"
+use_lutris = true
+auto_launch = true
+remembered_emails = ["a@example.com"]
+
+[accounts."a@example.com"]
+battletag = "Player#1234"
+banned = false
+"#;
+        let cfg: AppConfig = toml::from_str(toml_src).expect("legacy config parses");
+        assert_eq!(cfg.stats_poll_interval_secs, default_stats_poll_interval());
+        assert_eq!(
+            cfg.accounts.get("a@example.com").unwrap().battletag.as_deref(),
+            Some("Player#1234")
+        );
+    }
+
+    /// 0 is the documented "disable stats tracking" value and must
+    /// survive a round trip rather than being coerced to the default.
+    #[test]
+    fn stats_interval_zero_round_trips() {
+        let mut cfg = AppConfig::default();
+        cfg.stats_poll_interval_secs = 0;
+        let s = toml::to_string_pretty(&cfg).unwrap();
+        let back: AppConfig = toml::from_str(&s).unwrap();
+        assert_eq!(back.stats_poll_interval_secs, 0);
+    }
 
     #[test]
     fn ban_toggle_round_trips() {

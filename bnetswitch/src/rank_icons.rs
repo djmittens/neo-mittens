@@ -31,7 +31,7 @@
 
 use anyhow::{Context, Result};
 use image::DynamicImage;
-use ratatui_image::picker::Picker;
+use ratatui_image::picker::{Picker, ProtocolType};
 use ratatui_image::protocol::Protocol;
 use ratatui_image::{Image, Resize};
 use ratatui::buffer::Buffer;
@@ -39,7 +39,30 @@ use ratatui::layout::Rect;
 use ratatui::widgets::Widget;
 
 use crate::lfg_parse::{Tier, TIER_COUNT};
-use crate::term_caps::TermCaps;
+use crate::term_caps::{GraphicsProto, TermCaps};
+
+/// Pixels-per-cell for `Picker::from_fontsize`, obtained WITHOUT touching
+/// stdin.
+///
+/// `crossterm::terminal::window_size()` is a `TIOCGWINSZ` ioctl on the tty:
+/// it asks the kernel, not the terminal, so there is no escape sequence to
+/// write and no reply to read back. That is the whole point -- see the long
+/// note in `RankIcons::try_new` about why reading stdin here wedges the
+/// keyboard.
+///
+/// Terminals that don't report a pixel size return zeros; 8x16 is the
+/// classic VGA cell and only affects icon scaling, never input handling.
+fn detect_font_size() -> (u16, u16) {
+    const FALLBACK: (u16, u16) = (8, 16);
+    match crossterm::terminal::window_size() {
+        Ok(ws) if ws.width > 0 && ws.height > 0 && ws.columns > 0 && ws.rows > 0 => {
+            let w = ws.width / ws.columns;
+            let h = ws.height / ws.rows;
+            if w > 0 && h > 0 { (w, h) } else { FALLBACK }
+        }
+        _ => FALLBACK,
+    }
+}
 
 // ============================================================================
 // Embedded PNG bytes (compiled into the binary)
@@ -128,26 +151,41 @@ impl RankIcons {
             return Ok(None);
         }
 
-        // Picker reads font cell dimensions (pixels per cell) so it can
-        // size images correctly. `from_query_stdio()` does several
-        // things in one call:
-        //   1. Detects tmux via $TERM / $TERM_PROGRAM and runs
-        //      `tmux set -p allow-passthrough on` so escapes traverse
-        //      to the outer terminal.
-        //   2. Detects outer terminal via env hints (KITTY_WINDOW_ID,
-        //      ITERM_SESSION_ID, WEZTERM_EXECUTABLE).
-        //   3. Sends a graphics capability query through tmux
-        //      passthrough (when in tmux) and parses the response.
-        //   4. Reads font cell size from the same query.
+        // NEVER use `Picker::from_query_stdio()` here.
         //
-        // We do NOT fall back to Picker::from_fontsize() on error --
-        // that constructor produces a Picker with is_tmux=false, which
-        // breaks rendering inside tmux+kitty (escapes leak as raw
-        // text). If the query fails, we report the error to the
-        // caller, which records the failure and falls back to the
-        // Unicode glyph path.
-        let picker = Picker::from_query_stdio()
-            .map_err(|e| anyhow::anyhow!("Picker::from_query_stdio failed: {:?}", e))?;
+        // It writes a capability query to the terminal and reads the reply
+        // back off STDIN, on a detached helper thread with a 1s timeout. The
+        // timeout abandons the thread but cannot cancel its blocking
+        // `read(0, ..)`. Inside tmux the reply frequently never arrives in
+        // the form it wants, so that thread survives for the life of the
+        // process sitting in `read()` on the same fd crossterm polls for key
+        // events -- and it wins races against the event loop.
+        //
+        // The symptom is brutal and looks nothing like a graphics bug: the
+        // TUI silently stops accepting keystrokes. Enter no longer switches
+        // accounts, so no nickname action is ever queued, and the whole
+        // thing looks like "the nickname sync is broken". It also corrupts
+        // the display, because the half-consumed query reply gets painted
+        // into the frame (`┌Accountsc(10rswitchable,P0Gpending...`).
+        //
+        // `from_fontsize()` gets us everything that mattered, with no stdin
+        // access at all: as of ratatui-image 8.1.1 it calls the same
+        // `detect_tmux_and_outer_protocol_from_env()`, so it sets `is_tmux`
+        // correctly AND still runs `tmux set -p allow-passthrough on`. (The
+        // note this replaced claimed from_fontsize forces is_tmux=false --
+        // that was true of an older version and is now stale.)
+        //
+        // We then override the protocol with our own `TermCaps` detection,
+        // which is env-based, deliberately side-effect free, and is already
+        // the thing gating `supports_images()` above.
+        let mut picker = Picker::from_fontsize(detect_font_size());
+        picker.set_protocol_type(match caps.graphics {
+            GraphicsProto::Kitty => ProtocolType::Kitty,
+            GraphicsProto::Sixel => ProtocolType::Sixel,
+            GraphicsProto::ITerm2 => ProtocolType::Iterm2,
+            // Unreachable: supports_images() already returned above.
+            GraphicsProto::None => ProtocolType::Halfblocks,
+        });
 
         // Decode the tier PNGs into protocols sized for our 2x1 cell
         // area. Each protocol caches the encoded image bytes; render is
