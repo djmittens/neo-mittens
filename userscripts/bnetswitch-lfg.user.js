@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         bnetswitch LFG bridge
 // @namespace    https://github.com/xyzyx/neo-mittens
-// @version      0.10.1
+// @version      0.12.0
 // @description  Taps Discord's WebSocket gateway directly to forward Overwatch LFG embeds + voice-state updates to bnetswitch's local HTTP server. Push-based, complete coverage, no DOM polling.
 // @match        https://discord.com/*
 // @match        https://canary.discord.com/*
@@ -1454,6 +1454,268 @@
   injectGatewayTap();
 
   // ============================================================================
+  // Monetization / ad removal
+  //
+  // Discord seeds paid surfaces through the client: a sponsored "Quest" bar
+  // (a brand ad with a "Get Reward!" button) above the account panel, Nitro
+  // and Shop tabs in the home sidebar, gift buttons in the chat box and
+  // profile popouts, and Nitro upsells wedged into the emoji picker,
+  // soundboard, and profile editor. None of that is wanted here, so we hide
+  // the lot with a stylesheet injected at document-start.
+  //
+  // WHY CSS AND NOT JS: these are React subtrees Discord re-mounts on
+  // navigation, quest rotation, and popout open/close. A JS sweep would have
+  // to re-run on every re-render (ie a MutationObserver, which v0.8 removed
+  // on purpose). A stylesheet applies to whatever exists at paint time, for
+  // free, forever. document-start injection means the ad never flashes.
+  //
+  // SELECTOR STRATEGY, most durable first:
+  //   1. `data-*` hooks     -- eg li[data-settings-sidebar-item="nitro_panel"].
+  //                            Discord uses these for its own test/telemetry
+  //                            wiring, so they survive restyles.
+  //   2. `href` values      -- eg a[href="/quest-home"]. Routes change far
+  //                            less often than markup.
+  //   3. `aria-label` text  -- eg [aria-label="Send a gift"].
+  //   4. class substrings   -- last resort. Discord ships hashed CSS-module
+  //                            names (`questRewardTile_a1b2c3`), so we match
+  //                            `*=` on the readable prefix, same convention
+  //                            as VOICE_USER_SELECTOR below. We use `*=` and
+  //                            not `^=` because these elements usually carry
+  //                            several classes and the one we want is rarely
+  //                            first.
+  //
+  // Several rules hide a WRAPPER via :has() rather than the ad itself, eg the
+  // quest bar is a `questRewardTile` inside a `mask` box inside the panels
+  // section. Hiding only the tile leaves the mask behind as an empty gap.
+  //
+  // SELECTORS DERIVED FROM: Disblock Origin ("Adblock for Discord", TheSunCat
+  // and contributors) <https://codeberg.org/AllPurposeMat/Disblock-Origin>,
+  // which tracks Discord's markup churn far more closely than we can. That
+  // project declares no license, so we reference its selectors -- which are
+  // factual observations about Discord's DOM -- rather than vendoring its
+  // file. If a group below stops working, diff against upstream first.
+  //
+  // TO TURN A GROUP BACK ON: delete its name from PROMO_BLOCK_GROUPS.
+  // TO DEBUG A GROUP: run bnetswitchQuestProbe() in the console; it reports
+  // per-group match counts, so a group reporting 0 is one Discord renamed.
+  // ============================================================================
+
+  // TOKEN-PREFIX MATCHING (why `[class*="quest"]` is a bug):
+  //
+  // `class` is a space-separated list, and `*=` matches anywhere in the raw
+  // attribute string -- including *inside* a token. So `[class*="quest" i]`
+  // also matches `re|quest|`, and Discord ships plenty of real classes built
+  // on "request" (friend requests, request buttons, join-request rows). Those
+  // are live UI, and we were hiding them.
+  //
+  // The readable half of a hashed CSS-module name is always a token PREFIX
+  // (`questRewardTile_a1b2c3`), never a free-floating substring, so match it
+  // as one: the token either starts the attribute, or follows a space.
+  function classPrefix(name) {
+    return `:is([class^="${name}" i], [class*=" ${name}" i])`;
+  }
+
+  // Same idea for `data-*` values, which delimit words with - or _ rather
+  // than spaces (`data-list-item-id="quests___123"`, `friends-request-...`).
+  function dataPrefix(attr, name) {
+    return (
+      `:is([${attr}^="${name}" i],` +
+      ` [${attr}*="-${name}" i],` +
+      ` [${attr}*="_${name}" i])`
+    );
+  }
+
+  // Groups enabled by default. Remove a name to stop hiding that surface.
+  const PROMO_BLOCK_GROUPS = [
+    "questPanel",
+    "questsMisc",
+    "homeTabs",
+    "gifts",
+    "settingsTabs",
+    "upsells",
+  ];
+
+  const PROMO_RULES = {
+    // The bar from the bottom-left user area -- the one this started with.
+    questPanel: [
+      // Wrapper first: the tile sits in a `mask` box that would otherwise
+      // remain as an empty strip above the account panel.
+      `section[class*="panels"] > [class*="mask"]:has(${classPrefix("questRewardTile")})`,
+      `section[class*="panels"] ${classPrefix("questRewardTile")}`,
+      // Scoped catch-all, in case the tile is renamed. Safe because it is
+      // confined to the user-area panel and the channel sidebar; the real
+      // Quests page renders in the main content area and is untouched.
+      `section[aria-label="User area"] ${classPrefix("quest")}`,
+      `section[class*="panels_" i] ${classPrefix("quest")}`,
+      `[class*="sidebar_" i] ${classPrefix("quest")}`,
+    ],
+
+    // Quest surfaces sprinkled elsewhere in the client.
+    questsMisc: [
+      classPrefix("questBar"),
+      classPrefix("questPromo"),
+      dataPrefix("data-list-item-id", "quest"),
+      dataPrefix("data-test-id", "quest"),
+      // Quest icon on members-list rows.
+      `div[class*="member__"] svg${classPrefix("questsIcon")}`,
+      // Members-list quest popout (identified by its CDN image).
+      'div[id*="popout_"]:has(div[class*="imgWrapper__"] img[src^="https://cdn.discordapp.com/quests"])',
+      // Promoted quest cards in the "Active Now" friends sidebar.
+      `div[class*="itemCard_"] > div div:has(div${classPrefix("questRewardTile")})`,
+      // Completed-quest badge on profiles.
+      'div[class*="tags"] div[role="group"] > a[href="https://discord.com/discovery/quests"]',
+      // Quests block inside the gift inventory.
+      'div[class*="container_"][style*="discovery/quest-mountain"]',
+    ],
+
+    // "Nitro" / "Shop" / "Quests" rows in the home (DM list) sidebar.
+    // Hide the whole <li>, not the <a>, or an empty row is left behind.
+    homeTabs: [
+      'li[role="listitem"]:has(> div > a[href="/store"])',
+      'li[role="listitem"]:has(> div > a[href="/shop"])',
+      'li[role="listitem"]:has(> div > a[href="/quest-home"])',
+      'li[role="listitem"]:has(a[href="/store"], a[href="/shop"], a[href="/quest-home"])',
+    ],
+
+    // Gift buttons: chat box, user header, DM profile sidebar, profile popout.
+    gifts: [
+      '[aria-label="Send a gift"]',
+      '[class*="giftButton" i]',
+      '[class*="profileButtons"] [aria-label*="gift" i]',
+    ],
+
+    // User Settings sidebar. NOTE: `billing_panel` is deliberately NOT hidden.
+    // Hiding the page where you cancel a subscription is how you end up
+    // paying for one you forgot about.
+    settingsTabs: [
+      'li[data-settings-sidebar-item="nitro_panel"]',
+      'li[data-settings-sidebar-item="premium_guild_subscriptions_panel"]',
+      'li[data-settings-sidebar-item="subscriptions_panel"]',
+      'li[data-settings-sidebar-item="gift_panel"]',
+    ],
+
+    // Nitro upsells embedded in otherwise-useful UI. These hide only the
+    // upsell chrome; the feature around it (emoji picker, soundboard,
+    // profile editor) keeps working.
+    upsells: [
+      'aside[class*="upsellContainer"]',
+      'div[class*="floatingNitroUpsell"]',
+      'div[class*="premiumUpsell"]',
+      'button[class*="premiumUpsell"]',
+      'div[class*="upsellOverlayContainer"]',
+      'div[class*="upsellBanner_"]',
+      'div[class*="premiumFeatureBorder"]',
+      'div[class*="premiumIconWrapper"]',
+      // "your message is too long, get Nitro" nag under the character count.
+      '[class*="characterCount"] > div[class*="upsell_"]',
+      // "sneak peek" banner.
+      'div[class*="notice"][class*="colorPremium"]',
+      // Emoji picker: "Powered by Nitro" text, upsell rows, dividers.
+      'div[class*="nitroTextAndBadge"]',
+      'div[class*="tooltipPremiumContent"]',
+      'div[class*="emojiPickerListWrapper"] div[class*="upsellContainer"]',
+      'div[class*="nitroTopDividerContainer"]',
+      'div[class*="nitroBottomDivider"]',
+      'button[class*="shinyButton"]:has(div[class*="premiumSubscribeButton"])',
+      // Profile editor "try it out" / guild profile upsells.
+      'div[class*="tryItOutSection_"]',
+      'div[class*="guildProfileUpsell_"]',
+    ],
+  };
+
+  const PROMO_STYLE_ID = "bnet-no-promo-style";
+
+  // Each group is emitted as its own rule block. CSS discards an ENTIRE rule
+  // if any one selector in its comma list fails to parse, so grouping keeps a
+  // future broken selector from taking every other rule down with it.
+  function buildPromoCss() {
+    const blocks = [];
+    for (const group of PROMO_BLOCK_GROUPS) {
+      const rules = PROMO_RULES[group];
+      if (!rules) {
+        warn("unknown promo block group:", group);
+        continue;
+      }
+      blocks.push(`/* ${group} */\n${rules.join(",\n")} {\n  display: none !important;\n}\n`);
+    }
+    return blocks.join("\n");
+  }
+
+  function injectPromoBlockCss() {
+    try {
+      if (document.getElementById(PROMO_STYLE_ID)) return;
+      const css = buildPromoCss();
+
+      // GM_addElement bypasses Discord's strict CSP (see injectGatewayTap).
+      // Pass an explicit parent: at document-start <head> may not exist yet,
+      // and the default parent lookup would throw.
+      if (typeof GM_addElement === "function") {
+        try {
+          GM_addElement(document.head || document.documentElement, "style", {
+            id: PROMO_STYLE_ID,
+            textContent: css,
+          });
+          return;
+        } catch (e) {
+          warn("GM_addElement(style) failed, falling back:", e && e.message);
+        }
+      }
+
+      const style = document.createElement("style");
+      style.id = PROMO_STYLE_ID;
+      style.textContent = css;
+      (document.head || document.documentElement).appendChild(style);
+    } catch (err) {
+      warn("promo css injection failed:", err && err.message);
+    }
+  }
+
+  injectPromoBlockCss();
+  // Re-assert once <head> exists, in case we ran before it was parsed and
+  // Discord's bundle replaced documentElement's children.
+  if (document.readyState === "loading") {
+    document.addEventListener("DOMContentLoaded", injectPromoBlockCss, { once: true });
+  }
+
+  // Console diagnostic: bnetswitchQuestProbe()
+  //
+  // Reports how many elements each group currently matches. A group at 0 is
+  // either not on screen right now (settings tabs only exist while User
+  // Settings is open) or renamed by Discord. `invalid` lists selectors this
+  // browser refuses to parse, which is the other way a group silently dies.
+  function questProbe() {
+    const out = {
+      styleInjected: !!document.getElementById(PROMO_STYLE_ID),
+      enabled: PROMO_BLOCK_GROUPS.slice(),
+      groups: {},
+      invalid: [],
+    };
+    for (const [group, rules] of Object.entries(PROMO_RULES)) {
+      let count = 0;
+      const hits = [];
+      for (const sel of rules) {
+        let found;
+        try {
+          found = document.querySelectorAll(sel);
+        } catch (err) {
+          out.invalid.push({ group, selector: sel, error: err && err.message });
+          continue;
+        }
+        if (found.length) {
+          count += found.length;
+          hits.push({ selector: sel, n: found.length });
+        }
+      }
+      out.groups[group] = { matched: count, hits };
+    }
+    console.log("[bnetswitch-lfg] promo probe:", out);
+    return out;
+  }
+  try {
+    (typeof unsafeWindow !== "undefined" ? unsafeWindow : window).bnetswitchQuestProbe = questProbe;
+  } catch (_) {}
+
+  // ============================================================================
   // Cross-world event bridge (userscript world side)
   //
   // The page-world script forwards gateway events two ways:
@@ -2506,13 +2768,45 @@
       );
     }
 
-    // 200 carries the updated member object; confirm Discord actually
-    // took the value rather than silently normalizing it away.
+    // 200 carries the updated member object. VERIFY the value actually
+    // landed -- do not infer success from the status code.
+    //
+    // Discord will happily 200 a nickname change it then does not apply:
+    // AutoMod name filters accept the write and revert it, and a quarantined
+    // member (flags bit 7) has every name change silently dropped. This code
+    // used to only *log* the returned nick while still acking success, so a
+    // rejected rename was indistinguishable from a successful one -- the
+    // action reported OK to bnetswitch and the name never moved. That is the
+    // entire reason this failed invisibly, so the comparison below is the
+    // load-bearing part of this function.
     const member = await res.json().catch(() => null);
-    const applied = member && typeof member.nick !== "undefined" ? member.nick : null;
-    log(
-      "nickname set via API; server reports nick=" + JSON.stringify(applied)
-    );
+    if (!member || typeof member.nick === "undefined") {
+      throw new Error(
+        "PATCH members/@me -> " + res.status +
+          " but the response carried no `nick` field"
+      );
+    }
+
+    // Discord trims surrounding whitespace, so compare on the same footing.
+    const applied = (member.nick || "").trim();
+    if (applied !== desired) {
+      // Surface the known silent-revert cause explicitly; "AutoMod ate it"
+      // is not something you would ever guess from a 200.
+      const AUTOMOD_QUARANTINED_USERNAME = 1 << 7;
+      const quarantined =
+        typeof member.flags === "number" &&
+        (member.flags & AUTOMOD_QUARANTINED_USERNAME) !== 0;
+      throw new Error(
+        "Discord accepted the request (" + res.status + ") but kept nick=" +
+          JSON.stringify(member.nick) + " instead of " + JSON.stringify(desired) +
+          (quarantined
+            ? " -- member is AUTOMOD_QUARANTINED_USERNAME, so this guild's " +
+              "AutoMod is blocking the name"
+            : " -- rejected by a guild name filter, or you lack Change Nickname here")
+      );
+    }
+
+    log("nickname set via API; Discord confirms nick=" + JSON.stringify(applied));
     return applied;
   }
 
@@ -3016,10 +3310,18 @@
           // a timeout and we'd be back to a fast retry loop.
           LONG_POLL_WAIT_MS + 10000
         );
-        if (!longPollActive || gen !== longPollGen) return;
-        noteSseActivity();
-        backoff = LONG_POLL_MIN_BACKOFF_MS;
+        // Being superseded means STOP LOOPING -- it does not mean throw this
+        // response away. The server drains the action queue to build it, so
+        // whatever arrived here exists nowhere else; discarding it lost the
+        // action outright (bnetswitch now reports these as "delivered but
+        // never confirmed"). Apply first, exit after.
+        const superseded = !longPollActive || gen !== longPollGen;
+        if (!superseded) {
+          noteSseActivity();
+          backoff = LONG_POLL_MIN_BACKOFF_MS;
+        }
         await applyServerSnapshot(res);
+        if (superseded) return;
       } catch (e) {
         if (!longPollActive || gen !== longPollGen) return;
         // bnetswitch is down or restarting. Back off exponentially: a dead
