@@ -13,6 +13,8 @@ echo "================================================"
 echo ""
 echo "This will set up all services on this machine:"
 echo "  - OpenCode WebUI (remote coding)"
+echo "  - yarr RSS Reader"
+echo "  - rss-proxy (full-text proxy for yarr)"
 echo "  - Backup server (TODO)"
 echo "  - CI server (TODO)"
 echo "  - AI/LLM server (TODO)"
@@ -57,6 +59,20 @@ echo ""
 if [ -f "${SCRIPT_DIR}/opencode/install.sh" ]; then
     echo "--- Installing OpenCode WebUI ---"
     "${SCRIPT_DIR}/opencode/install.sh"
+    echo ""
+fi
+
+# yarr RSS Reader
+if [ -f "${SCRIPT_DIR}/rss/install.sh" ]; then
+    echo "--- Installing yarr RSS Reader ---"
+    "${SCRIPT_DIR}/rss/install.sh"
+    echo ""
+fi
+
+# rss-proxy (on-demand full-text proxy for yarr)
+if [ -f "${SCRIPT_DIR}/rssproxy/install.sh" ]; then
+    echo "--- Installing rss-proxy ---"
+    "${SCRIPT_DIR}/rssproxy/install.sh"
     echo ""
 fi
 

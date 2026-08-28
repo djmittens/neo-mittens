@@ -1,0 +1,27 @@
+# Camoufox render sidecar.
+# Built on the Playwright Python base image, which already ships all the browser
+# system libraries (gtk, dbus-glib, libxt, fonts, ...) Camoufox's Firefox needs -
+# avoiding host-level package installs entirely.
+FROM mcr.microsoft.com/playwright/python:v1.49.0-jammy
+
+WORKDIR /app
+
+# Camoufox (anti-fingerprint Firefox) + its browser build baked into the image.
+# The [geoip] extra bundles the MaxMind DB so Camoufox can align the spoofed browser's
+# timezone/locale/WebRTC with the exit IP (a coherent fingerprint that anti-bots check).
+RUN pip install --no-cache-dir "camoufox[geoip]" && python -m camoufox fetch
+# Pre-download the MaxMind GeoIP DB into the image so the container doesn't fetch ~66MB on
+# every (--rm) start.
+RUN python -c "from camoufox.locale import download_mmdb; download_mmdb()"
+# Pin Playwright to match Camoufox's bundled Firefox 135. camoufox leaves playwright
+# unpinned, so pip otherwise pulls a much newer Playwright (1.61) whose Firefox protocol
+# is incompatible - its Node driver crashes on pageError events (missing location.url),
+# killing the browser. Separate layer so the cached camoufox-fetch layer is preserved.
+RUN pip install --no-cache-dir "playwright==1.51.0"
+
+COPY sidecar.py /app/sidecar.py
+
+ENV PORT=7072
+EXPOSE 7072
+
+CMD ["python", "/app/sidecar.py"]

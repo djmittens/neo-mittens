@@ -1,0 +1,32 @@
+[Unit]
+Description=yarr RSS Reader
+After=network-online.target tailscaled.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h
+
+# No authentication (YARR_AUTH unset). Service is open to anything that can reach
+# this host on the LAN/Tailscale. To enable auth later, add:
+#   Environment="YARR_AUTH=username:password"
+
+# Bind to LOOPBACK only. Exposure to the tailnet is handled by `tailscale serve`
+# (HTTPS, tailnet-only) - see install.sh / README. Binding 127.0.0.1 keeps the service
+# off the wifi/LAN entirely, so no auth is needed.
+# DB lives under $HOME, which on obelisk is bind-mounted onto the 1.7TB /data partition
+# (so it's on the big disk, user-owned, no sudo needed).
+# Absolute binary path because systemd --user PATH may not include ~/.local/bin.
+ExecStart=%h/.local/bin/yarr -addr 127.0.0.1:7070 -db %h/.local/share/yarr/storage.db
+
+# Restart on failure
+Restart=on-failure
+RestartSec=10
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=yarr
+
+[Install]
+WantedBy=default.target

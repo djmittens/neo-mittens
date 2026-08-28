@@ -38,7 +38,7 @@ function M.on_lsp_attach()
       end
 
       local client = vim.lsp.get_client_by_id(event.data.client_id)
-      if client and client.supports_method('textDocument/documentHighlight') then
+      if client and client:supports_method('textDocument/documentHighlight') then
         local hl_group = vim.api.nvim_create_augroup('lsp_document_highlight_' .. event.buf, { clear = true })
         vim.api.nvim_create_autocmd({ 'CursorHold', 'CursorHoldI' }, {
           group = hl_group,
@@ -68,11 +68,19 @@ function M.mason_setup()
   end
 end
 
--- Valkyria LSP (Valk script)
-local valk_binary = vim.fn.expand('~/src/valkyria/build/valk')
-if vim.loop.fs_stat(valk_binary) then
+-- Valkyria LSP — prefer the AOT binary at build/valk-lsp; fall back to the
+-- tree-walker only if the AOT binary is absent.
+local valk_aot = vim.fn.expand('~/src/valkyria/build/valk-lsp')
+local valk_tw = vim.fn.expand('~/src/valkyria/build/valk')
+local valk_cmd
+if vim.loop.fs_stat(valk_aot) then
+  valk_cmd = { valk_aot }
+elseif vim.loop.fs_stat(valk_tw) then
+  valk_cmd = { valk_tw, vim.fn.expand('~/src/valkyria/scripts/lsp/main.valk') }
+end
+if valk_cmd then
   vim.lsp.config('valk', {
-    cmd = { valk_binary, vim.fn.expand('~/src/valkyria/scripts/lsp/main.valk') },
+    cmd = valk_cmd,
     cmd_env = { VALK_HEAP_HARD_LIMIT = '4294967296' },
     filetypes = { 'valk' },
     root_markers = { '.git', 'CMakeLists.txt' },

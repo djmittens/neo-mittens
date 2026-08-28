@@ -41,6 +41,19 @@ Or install services individually:
 - **Access**: http://localhost:4096 or http://[tailscale-ip]:4096
 - **Docs**: [server/opencode/README.md](opencode/README.md)
 
+### yarr RSS Reader
+- **Path**: `server/rss/`
+- **Port**: 7070 (binds loopback; exposed via `tailscale serve`)
+- **Access**: https://[host].[tailnet].ts.net:7070 (tailnet-only HTTPS; Fever API at `/fever`)
+- **Docs**: [server/rss/README.md](rss/README.md)
+
+### rss-proxy (full-text proxy for yarr)
+- **Path**: `server/rssproxy/`
+- **Port**: 7071 (binds loopback; exposed via `tailscale serve`)
+- **Access**: https://[host].[tailnet].ts.net:7071 (tailnet-only HTTPS)
+- **Purpose**: on-demand full text + image fixing for aggregator/hostile feeds; stock yarr
+- **Docs**: [server/rssproxy/README.md](rssproxy/README.md)
+
 ### Backup Server
 - **Path**: `server/backup/`
 - **Status**: TODO
@@ -127,6 +140,16 @@ systemctl --user status opencode-webui
 systemctl --user restart opencode-webui
 journalctl --user -u opencode-webui -f
 
+# yarr RSS Reader
+systemctl --user status yarr
+systemctl --user restart yarr
+journalctl --user -u yarr -f
+
+# rss-proxy (full-text proxy for yarr)
+systemctl --user status rss-proxy
+systemctl --user restart rss-proxy
+journalctl --user -u rss-proxy -f
+
 # Add more as you create them...
 ```
 
@@ -136,6 +159,8 @@ Key files to backup:
 - This repo (server configs)
 - `~/.config/systemd/user/*.service` (if modified outside repo)
 - Service-specific data directories
+  - `~/.local/share/yarr/storage.db` (yarr RSS feeds + read state, single SQLite file; on /data via /home bind mount)
+  - `~/.local/share/rssproxy/cache.db` (rss-proxy article cache; regenerable, optional to back up)
 - Secrets file (if using one)
 
 ## TODO
