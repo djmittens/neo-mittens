@@ -7,6 +7,7 @@ mod lfg_parse;
 mod lutris;
 mod rank_icons;
 mod ranks;
+mod stats;
 mod switcher;
 mod tcno;
 mod term_caps;
@@ -227,6 +228,10 @@ fn lfg_sort_key(
 struct RankUpdate {
     email: String,
     ranks: Result<RoleRanks, String>,
+    /// Present only when the request asked for a stats poll.
+    /// `Ok(None)` means the profile is private (404), which is a
+    /// definitive answer rather than a failure.
+    stats: Option<Result<Option<stats::RecordOutcome>, String>>,
 }
 
 /// One queued fetch request, sent from the TUI main loop to the worker.
@@ -234,6 +239,10 @@ struct FetchRequest {
     email: String,
     battletag: String,
     force: bool,
+    /// Also poll the competitive career stats and append to the
+    /// longitudinal log. Decided by the caller (which owns the poll
+    /// interval config) rather than the worker.
+    want_stats: bool,
 }
 
 /// Run as a long-lived background thread. Pulls fetch requests off
@@ -251,22 +260,73 @@ fn fetch_worker(req_rx: mpsc::Receiver<FetchRequest>, res_tx: mpsc::Sender<RankU
 
     let mut last_request_at: Option<std::time::Instant> = None;
 
-    while let Ok(req) = req_rx.recv() {
-        // Honor the inter-request gap.
-        if let Some(prev) = last_request_at {
+    // Sleep out whatever remains of the inter-request gap.
+    fn pace(last: &mut Option<std::time::Instant>, gap: Duration) {
+        if let Some(prev) = *last {
             let elapsed = prev.elapsed();
-            if elapsed < MIN_GAP {
-                std::thread::sleep(MIN_GAP - elapsed);
+            if elapsed < gap {
+                std::thread::sleep(gap - elapsed);
             }
         }
+    }
+
+    while let Ok(req) = req_rx.recv() {
+        pace(&mut last_request_at, MIN_GAP);
 
         let result = fetch_with_retry(&req.battletag, req.force);
         last_request_at = Some(std::time::Instant::now());
+
+        // The stats poll is a second HTTP call, so it takes its own slot
+        // in the rate budget. Skipped when the rank fetch failed: the
+        // season number comes from that response, and tagging a snapshot
+        // with the wrong season is worse than not recording it.
+        let stats_result = if req.want_stats && result.is_ok() {
+            let season = result.as_ref().ok().and_then(|r| r.current_season);
+            pace(&mut last_request_at, MIN_GAP);
+            let out = poll_stats(&req.battletag, season);
+            last_request_at = Some(std::time::Instant::now());
+            Some(out)
+        } else {
+            None
+        };
+
         let _ = res_tx.send(RankUpdate {
             email: req.email,
             ranks: result,
+            stats: stats_result,
         });
     }
+}
+
+/// Fetch the competitive career stat block and append it to the
+/// account's longitudinal log.
+///
+/// `Ok(None)` is a private/nonexistent profile — the same condition
+/// `ranks.rs` maps to `not_found`, and not worth retrying.
+///
+/// One retry on transient failure. Unlike ranks (which the UI shows
+/// live), a missed stats poll just means the next sweep picks it up, so
+/// there's no reason to spend a long backoff chain here.
+fn poll_stats(
+    battletag: &str,
+    season: Option<u32>,
+) -> Result<Option<stats::RecordOutcome>, String> {
+    let mut last_err = String::new();
+    for attempt in 0..2 {
+        if attempt > 0 {
+            std::thread::sleep(Duration::from_millis(2000));
+        }
+        match stats::fetch_career(battletag, season) {
+            Ok(None) => return Ok(None),
+            Ok(Some(snapshot)) => {
+                return stats::record_observation(battletag, &snapshot)
+                    .map(Some)
+                    .map_err(|e| e.to_string());
+            }
+            Err(e) => last_err = e.to_string(),
+        }
+    }
+    Err(last_err)
 }
 
 /// Fetch with up to 2 retries on transient errors, exponential backoff.
@@ -353,6 +413,14 @@ struct App {
     rank_rx: mpsc::Receiver<RankUpdate>,
     /// Sends fetch requests to the worker thread.
     fetch_request_tx: mpsc::Sender<FetchRequest>,
+    /// Epoch seconds of the last completed competitive stats poll per
+    /// email. Seeded once from disk at startup and maintained in memory
+    /// thereafter: the alternative is re-reading every account's stats
+    /// log on every 100ms tick to decide whether a poll is due.
+    stats_last_poll: HashMap<String, u64>,
+    /// When the stats sweep last ran. `None` until the first sweep, so
+    /// startup triggers one immediately.
+    last_stats_sweep: Option<std::time::Instant>,
     /// Which view is currently displayed. Toggled with 'g'.
     view: View,
     /// Selected row index within the LFG list, when `view == Lfg`.
@@ -477,6 +545,8 @@ impl App {
             failed_emails: std::collections::HashMap::new(),
             rank_rx: res_rx,
             fetch_request_tx: req_tx,
+            stats_last_poll: HashMap::new(),
+            last_stats_sweep: None,
             view: View::Accounts,
             lfg_list_state: ListState::default(),
             lfg_selected_message_id: None,
@@ -773,11 +843,53 @@ impl App {
         }
     }
 
+    /// Seed `stats_last_poll` from the on-disk logs. Runs once at
+    /// startup so a restart doesn't immediately re-poll every account.
+    fn load_stats_poll_times(&mut self) {
+        for (email, meta) in &self.app_config.accounts {
+            if let Some(tag) = &meta.battletag {
+                if let Ok(Some(ts)) = stats::last_poll_ts(tag) {
+                    self.stats_last_poll.insert(email.clone(), ts);
+                }
+            }
+        }
+    }
+
+    /// True when this account is eligible for a competitive stats poll.
+    ///
+    /// Banned accounts are excluded: they can't play, so their counters
+    /// are frozen and every poll would just extend a tombstone.
+    fn stats_poll_due(&self, email: &str) -> bool {
+        let interval = self.app_config.stats_poll_interval_secs;
+        if interval == 0 {
+            return false; // Tracking disabled.
+        }
+        if self
+            .app_config
+            .accounts
+            .get(email)
+            .is_some_and(|m| m.banned)
+        {
+            return false;
+        }
+        match self.stats_last_poll.get(email) {
+            Some(last) => {
+                stats::Snapshot::now_epoch().saturating_sub(*last) >= interval
+            }
+            None => true,
+        }
+    }
+
     /// Queue a single rank fetch on the worker thread.
     fn queue_rank_fetch(&mut self, email: String, battletag: String, force: bool) {
         if self.fetching_emails.contains(&email) {
             return; // Already queued or in-flight.
         }
+        // Piggyback the stats poll onto whatever rank fetch is already
+        // happening. When ranks are still within their 1h TTL that call
+        // is a cache hit and costs no HTTP request, so a due stats poll
+        // effectively costs one request rather than two.
+        let want_stats = self.stats_poll_due(&email);
         self.fetching_emails.insert(email.clone());
         // Worker receiver dropped only on app shutdown, so send is
         // basically infallible here. If it does fail we just leave the
@@ -786,6 +898,7 @@ impl App {
             email,
             battletag,
             force,
+            want_stats,
         });
     }
 
@@ -807,12 +920,80 @@ impl App {
         }
     }
 
+    /// Periodically queue stats polls for accounts whose interval has
+    /// elapsed, so history keeps accumulating while the TUI sits open
+    /// rather than only on startup and manual refresh.
+    ///
+    /// Called every tick; cheap because it early-outs on a wall-clock
+    /// check before touching the account map.
+    fn sweep_stats_polls(&mut self) {
+        /// How often to *look* for due accounts. Independent of the
+        /// per-account poll interval — this just bounds how long an
+        /// account can sit overdue.
+        const SWEEP_EVERY: Duration = Duration::from_secs(60);
+
+        if self.app_config.stats_poll_interval_secs == 0 {
+            return;
+        }
+        if let Some(last) = self.last_stats_sweep {
+            if last.elapsed() < SWEEP_EVERY {
+                return;
+            }
+        }
+        self.last_stats_sweep = Some(std::time::Instant::now());
+
+        let due: Vec<(String, String)> = self
+            .app_config
+            .accounts
+            .iter()
+            .filter(|(_, meta)| !meta.banned)
+            .filter_map(|(email, meta)| {
+                meta.battletag
+                    .as_ref()
+                    .map(|tag| (email.clone(), tag.clone()))
+            })
+            .filter(|(email, _)| self.stats_poll_due(email))
+            .collect();
+
+        for (email, battletag) in due {
+            // force=false: the rank half should hit its TTL cache, so
+            // this costs one HTTP request for the stats endpoint alone.
+            self.queue_rank_fetch(email, battletag, false);
+        }
+    }
+
     /// Drain pending rank update messages from the channel, applying
     /// them to state. Called from the main loop on each tick so updates
     /// appear without requiring a key press.
     fn drain_rank_updates(&mut self) {
         while let Ok(update) = self.rank_rx.try_recv() {
             self.fetching_emails.remove(&update.email);
+
+            // Record the poll attempt regardless of outcome. A failing
+            // account would otherwise be retried on every single sweep,
+            // turning a private profile or a persistent network problem
+            // into a request loop against OverFast.
+            if let Some(stats_result) = update.stats {
+                self.stats_last_poll
+                    .insert(update.email.clone(), stats::Snapshot::now_epoch());
+
+                match stats_result {
+                    // New competitive games landed in the log — the one
+                    // outcome worth telling the user about.
+                    Ok(Some(stats::RecordOutcome::Delta)) => {
+                        let who = self.display_name_for(&update.email);
+                        self.status = format!("{}: new competitive games recorded", who);
+                    }
+                    Ok(_) => {}
+                    Err(e) => {
+                        // Non-fatal: history just has a gap. Surface it
+                        // but don't disturb rank rendering.
+                        let who = self.display_name_for(&update.email);
+                        self.status = format!("{}: stats poll failed ({})", who, e);
+                    }
+                }
+            }
+
             match update.ranks {
                 Ok(r) => {
                     self.failed_emails.remove(&update.email);
@@ -822,6 +1003,49 @@ impl App {
                     self.failed_emails.insert(update.email, e);
                 }
             }
+        }
+    }
+
+    /// Best available human label for an account, for status messages.
+    /// Prefers nickname, then BattleTag; never the email, which is
+    /// deliberately hidden outside the detail overlay.
+    fn display_name_for(&self, email: &str) -> String {
+        match self.app_config.accounts.get(email) {
+            Some(meta) => meta
+                .nickname
+                .clone()
+                .or_else(|| meta.battletag.clone())
+                .unwrap_or_else(|| "account".to_string()),
+            None => "account".to_string(),
+        }
+    }
+
+    /// Surface the most recent failed userscript action in the status
+    /// bar. Called each tick alongside `drain_rank_updates`.
+    ///
+    /// Failures used to go only to stderr, which the alt-screen swallows,
+    /// so a nickname sync that never landed (stale DOM selectors, no auth
+    /// token yet, wrong guild in view) was indistinguishable from one
+    /// that worked.
+    fn drain_action_failures(&mut self) {
+        let state = match &self.lfg_state {
+            Some(s) => s.clone(),
+            None => return,
+        };
+        let failure = match state.lock() {
+            Ok(mut guard) => {
+                // Time out actions that were handed over but never confirmed.
+                // This has to run on the TUI tick, not just on HTTP requests:
+                // the case we care about is the userscript having gone silent,
+                // where no further request would ever trigger the sweep.
+                guard.prune_expired_actions();
+                guard.sweep_unacked_actions();
+                guard.action_failures.pop_front()
+            }
+            Err(_) => return,
+        };
+        if let Some(f) = failure {
+            self.status = format!("Discord action failed: {}", f.error);
         }
     }
 
@@ -1023,8 +1247,9 @@ impl App {
 
     /// Enqueue `set_nickname` actions for each configured Discord guild,
     /// using the email's BattleTag (or the email itself if no tag is known)
-    /// as the nickname. The userscript polls /actions and executes the
-    /// DOM walk to actually rename us in each guild.
+    /// as the nickname. The userscript picks these up off /actions and
+    /// renames us in each guild via Discord's REST API (falling back to a
+    /// DOM walk of the per-server profile modal).
     ///
     /// No-op when:
     ///   - LFG bridge isn't running (lfg_state None)
@@ -1450,14 +1675,7 @@ impl App {
             None => return,
         };
         if let Some(tag) = config::read_most_recent_battletag(&self.install.prefix) {
-            let needs_update = self
-                .app_config
-                .accounts
-                .get(&active)
-                .and_then(|m| m.battletag.as_deref())
-                != Some(tag.as_str());
-            if needs_update {
-                self.app_config.set_battletag(&active, tag);
+            if self.app_config.learn_battletag(&active, tag) {
                 let _ = self.app_config.save();
             }
         }
@@ -1897,22 +2115,19 @@ fn main() -> Result<()> {
     // expose a direct email -> BattleTag mapping (the `name` column is an
     // opaque hash of the account ID). Instead, we use ROWID-based recency:
     // the most recently inserted/updated entry in `login_cache` corresponds
-    // to whoever is currently logged in, which is `accounts[0]`.
+    // to whoever last authenticated, which is *usually* `accounts[0]`.
     //
     // This means each time a user switches and Battle.net successfully
     // authenticates, we capture that account's BattleTag the next time
     // bnetswitch runs. Over multiple switches, every account gets populated.
+    //
+    // `learn_battletag` holds the correctness guard for that "usually" — see
+    // its docs. Keep this going through the same helper as
+    // `refresh_active_battletag`; duplicating the logic here once let an
+    // unguarded copy silently overwrite tags on every startup.
     if let Some(active_email) = accounts.first() {
         if let Some(tag) = config::read_most_recent_battletag(&install.prefix) {
-            // Only auto-populate if the user hasn't manually set a BattleTag.
-            // A nickname always wins over auto-detection (set via `n` hotkey).
-            let needs_update = app_config
-                .accounts
-                .get(active_email)
-                .and_then(|m| m.battletag.as_deref())
-                != Some(tag.as_str());
-            if needs_update {
-                app_config.set_battletag(active_email, tag);
+            if app_config.learn_battletag(active_email, tag) {
                 let _ = app_config.save();
             }
         }
@@ -1946,6 +2161,9 @@ fn main() -> Result<()> {
     // Show whatever's in the on-disk rank cache immediately so the TUI
     // isn't a sea of "—" while background fetches run.
     app.load_cached_ranks();
+    // Seed stats poll times from disk before the first refresh, so a
+    // quick restart doesn't re-poll every account's career stats.
+    app.load_stats_poll_times();
     // Kick off non-forced fetches; fresh cached entries (< 1h old) will
     // short-circuit without making HTTP calls.
     app.refresh_all_ranks(false);
@@ -2102,6 +2320,10 @@ fn run_tui(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut App)
         // Drain any completed background work first so the upcoming draw
         // reflects the latest state.
         app.drain_rank_updates();
+        app.drain_action_failures();
+        // Keep the longitudinal stats log growing while the TUI is open,
+        // not just on startup and manual refresh.
+        app.sweep_stats_polls();
         terminal.draw(|f| ui(f, app))?;
 
         // Use poll() so we yield back to the loop on the tick interval
@@ -2367,10 +2589,14 @@ fn run_tui(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut App)
                         }
                     }
                 }
-                KeyCode::Char('n') => {
+                // Both open a capture-input modal that acts on the *accounts*
+                // selection, so they're meaningless in the LFG view — and
+                // worse, entering that mode there used to swallow every
+                // subsequent keystroke with no visible prompt.
+                KeyCode::Char('n') if app.view == View::Accounts => {
                     app.start_nickname_edit();
                 }
-                KeyCode::Char('p') => {
+                KeyCode::Char('p') if app.view == View::Accounts => {
                     app.start_placement_edit();
                 }
                 KeyCode::Char('b') if app.view == View::Accounts => {
@@ -2687,6 +2913,7 @@ fn parse_placement_input(input: &str) -> Result<(Role, ranks::RankSnapshot), Str
         "silver" | "si" => Division::Silver,
         "gold" | "g" => Division::Gold,
         "platinum" | "plat" | "p" => Division::Platinum,
+        "emerald" | "emer" | "em" | "e" => Division::Emerald,
         "diamond" | "diam" | "di" => Division::Diamond,
         "master" | "mast" | "m" => Division::Master,
         "grandmaster" | "gm" => Division::Grandmaster,
@@ -2745,6 +2972,7 @@ fn division_color(div: Division) -> Color {
         Division::Silver => Color::Rgb(192, 192, 192),      // silver
         Division::Gold => Color::Rgb(255, 215, 0),          // gold
         Division::Platinum => Color::Rgb(127, 232, 233),    // teal-cyan
+        Division::Emerald => Color::Rgb(31, 168, 74),       // deep green
         Division::Diamond => Color::Rgb(176, 224, 230),     // pale blue
         Division::Master => Color::Rgb(255, 140, 0),        // orange
         Division::Grandmaster => Color::Rgb(255, 80, 130),  // pink
@@ -2896,6 +3124,62 @@ fn classify_role(
     }
 }
 
+/// Draw the text-entry modals (nickname, placement).
+///
+/// These MUST render in every view. Both are captured input modes: while
+/// `editing_nickname`/`editing_placement` is set, the event loop routes every
+/// keystroke into the input buffer and only Enter/Esc exits. If a view can
+/// enter that state but never draws the popup, the TUI soft-locks — the user
+/// sees an unchanged screen while their keys silently accumulate in a buffer.
+/// That regressed once when the LFG branch of `ui` returned before reaching
+/// the popup code, so keep this call on every render path.
+fn render_modal_popups(f: &mut ratatui::Frame, app: &App) {
+    if app.editing_nickname {
+        let area = centered_rect(50, 20, f.area());
+        f.render_widget(Clear, area);
+        let input = Paragraph::new(Line::from(vec![
+            Span::raw(&app.nickname_input),
+            Span::styled("_", Style::default().add_modifier(Modifier::SLOW_BLINK)),
+        ]))
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title("Set Nickname (Enter to save, Esc to cancel)")
+                .border_style(Style::default().fg(Color::Yellow)),
+        );
+        f.render_widget(input, area);
+    }
+
+    // Placement editing popup. Shows input + format hint so the user
+    // doesn't need to remember the syntax.
+    if app.editing_placement {
+        let area = centered_rect(60, 24, f.area());
+        f.render_widget(Clear, area);
+        let lines = vec![
+            Line::from(Span::styled(
+                "Format: <T|D|S> <division> <tier 1-5> <season#>",
+                Style::default().fg(Color::DarkGray),
+            )),
+            Line::from(Span::styled(
+                "Examples: T Diamond 3 12  |  S GM 2 22  |  D Plat 1 18",
+                Style::default().fg(Color::DarkGray),
+            )),
+            Line::from(""),
+            Line::from(vec![
+                Span::raw(&app.placement_input),
+                Span::styled("_", Style::default().add_modifier(Modifier::SLOW_BLINK)),
+            ]),
+        ];
+        let input = Paragraph::new(lines).block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title("Manual Placement (Enter to save, Esc to cancel)")
+                .border_style(Style::default().fg(Color::Magenta)),
+        );
+        f.render_widget(input, area);
+    }
+}
+
 fn ui(f: &mut ratatui::Frame, app: &mut App) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
@@ -2948,6 +3232,9 @@ fn ui(f: &mut ratatui::Frame, app: &mut App) {
             Span::raw(" Quit"),
         ]));
         f.render_widget(help, chunks[3]);
+        // Draw before returning: this early return is exactly what hid the
+        // capture-input modals and soft-locked the LFG view.
+        render_modal_popups(f, app);
         return;
     }
 
@@ -3187,54 +3474,7 @@ fn ui(f: &mut ratatui::Frame, app: &mut App) {
     ]));
     f.render_widget(help, chunks[3]);
 
-    // Nickname editing popup
-    if app.editing_nickname {
-        let area = centered_rect(50, 20, f.area());
-        f.render_widget(Clear, area);
-        let input = Paragraph::new(Line::from(vec![
-            Span::raw(&app.nickname_input),
-            Span::styled("_", Style::default().add_modifier(Modifier::SLOW_BLINK)),
-        ]))
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .title("Set Nickname (Enter to save, Esc to cancel)")
-                .border_style(Style::default().fg(Color::Yellow)),
-        );
-        f.render_widget(input, area);
-    }
-
-    // Placement editing popup. Shows input + format hint so the user
-    // doesn't need to remember the syntax.
-    if app.editing_placement {
-        let area = centered_rect(60, 24, f.area());
-        f.render_widget(Clear, area);
-        let lines = vec![
-            Line::from(Span::styled(
-                "Format: <T|D|S> <division> <tier 1-5> <season#>",
-                Style::default().fg(Color::DarkGray),
-            )),
-            Line::from(Span::styled(
-                "Examples: T Diamond 3 12  |  S GM 2 22  |  D Plat 1 18",
-                Style::default().fg(Color::DarkGray),
-            )),
-            Line::from(""),
-            Line::from(vec![
-                Span::raw(&app.placement_input),
-                Span::styled(
-                    "_",
-                    Style::default().add_modifier(Modifier::SLOW_BLINK),
-                ),
-            ]),
-        ];
-        let input = Paragraph::new(lines).block(
-            Block::default()
-                .borders(Borders::ALL)
-                .title("Manual Placement (Enter to save, Esc to cancel)")
-                .border_style(Style::default().fg(Color::Magenta)),
-        );
-        f.render_widget(input, area);
-    }
+    render_modal_popups(f, app);
 
     // Account detail overlay: the only place the full email is shown. Opened
     // with 'd', closed with 'd' or Esc.

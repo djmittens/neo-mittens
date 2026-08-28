@@ -1,0 +1,1128 @@
+{
+ "all-heroes": [
+  {
+   "category": "hero_specific",
+   "label": "Hero Specific",
+   "stats": [
+    {
+     "key": "protect",
+     "label": "Protect",
+     "value": 1
+    }
+   ]
+  },
+  {
+   "category": "best",
+   "label": "Best",
+   "stats": [
+    {
+     "key": "eliminations_most_in_game",
+     "label": "Eliminations - Most in Game",
+     "value": 43
+    },
+    {
+     "key": "final_blows_most_in_game",
+     "label": "Final Blows - Most in Game",
+     "value": 27
+    },
+    {
+     "key": "all_damage_done_most_in_game",
+     "label": "All Damage Done - Most in Game",
+     "value": 27363
+    },
+    {
+     "key": "healing_done_most_in_game",
+     "label": "Healing Done - Most in Game",
+     "value": 852
+    },
+    {
+     "key": "offensive_assists_most_in_game",
+     "label": "Offensive Assists - Most in Game",
+     "value": 6
+    },
+    {
+     "key": "objective_kills_most_in_game",
+     "label": "Objective Kills - Most in Game",
+     "value": 16
+    },
+    {
+     "key": "objective_time_most_in_game",
+     "label": "Objective Time - Most in Game",
+     "value": 226
+    },
+    {
+     "key": "multikill_best",
+     "label": "Multikill - Best",
+     "value": 4
+    },
+    {
+     "key": "solo_kills_most_in_game",
+     "label": "Solo Kills - Most in Game",
+     "value": 27
+    },
+    {
+     "key": "time_spent_on_fire_most_in_game",
+     "label": "Time Spent on Fire - Most in Game",
+     "value": 246
+    },
+    {
+     "key": "melee_final_blows_most_in_game",
+     "label": "Melee Final Blows - Most in Game",
+     "value": 6
+    },
+    {
+     "key": "kill_streak_best",
+     "label": "Kill Streak - Best",
+     "value": 16
+    },
+    {
+     "key": "hero_damage_done_most_in_game",
+     "label": "Hero Damage Done - Most in Game",
+     "value": 15998
+    },
+    {
+     "key": "barrier_damage_done_most_in_game",
+     "label": "Barrier Damage Done - Most in Game",
+     "value": 3683
+    },
+    {
+     "key": "assists_most_in_game",
+     "label": "Assists - Most in Game",
+     "value": 6
+    },
+    {
+     "key": "objective_contest_time_most_in_game",
+     "label": "Objective Contest Time - Most in Game",
+     "value": 115
+    },
+    {
+     "key": "kill_streak_best",
+     "label": "Kill Streak - Best",
+     "value": 16
+    },
+    {
+     "key": "time_spent_on_fire_most_in_game",
+     "label": "Time Spent on Fire - Most in Game",
+     "value": 80
+    }
+   ]
+  },
+  {
+   "category": "average",
+   "label": "Average",
+   "stats": [
+    {
+     "key": "protects_avg_per_10_min",
+     "label": "Protects - Avg per 10 min",
+     "value": 0.02
+    },
+    {
+     "key": "hero_damage_done_avg_per_10_min",
+     "label": "Hero Damage Done - Avg per 10 Min",
+     "value": 7064
+    },
+    {
+     "key": "deaths_avg_per_10_min",
+     "label": "Deaths - Avg per 10 Min",
+     "value": 8.49
+    },
+    {
+     "key": "assists_avg_per_10_min",
+     "label": "Assists - Avg per 10 min",
+     "value": 0.31
+    },
+    {
+     "key": "eliminations_avg_per_10_min",
+     "label": "Eliminations - Avg per 10 Min",
+     "value": 17.29
+    },
+    {
+     "key": "healing_done_avg_per_10_min",
+     "label": "Healing Done - Avg per 10 Min",
+     "value": 219
+    },
+    {
+     "key": "final_blows_avg_per_10_min",
+     "label": "Final Blows - Avg per 10 Min",
+     "value": 9.7
+    },
+    {
+     "key": "time_spent_on_fire_avg_per_10_min",
+     "label": "Time Spent on Fire - Avg per 10 Min",
+     "value": 69
+    },
+    {
+     "key": "objective_contest_time_avg_per_10_min",
+     "label": "Objective Contest Time - Avg per 10 Min",
+     "value": 22
+    },
+    {
+     "key": "solo_kills_avg_per_10_min",
+     "label": "Solo Kills - Avg per 10 Min",
+     "value": 1.99
+    },
+    {
+     "key": "objective_kills_avg_per_10_min",
+     "label": "Objective Kills - Avg per 10 Min",
+     "value": 3.7
+    },
+    {
+     "key": "objective_time_avg_per_10_min",
+     "label": "Objective Time - Avg per 10 Min",
+     "value": 40
+    }
+   ]
+  },
+  {
+   "category": "game",
+   "label": "Game",
+   "stats": [
+    {
+     "key": "game_tied",
+     "label": "Game Tied",
+     "value": 1
+    },
+    {
+     "key": "time_played",
+     "label": "Time Played",
+     "value": 35059
+    },
+    {
+     "key": "games_played",
+     "label": "Games Played",
+     "value": 52
+    },
+    {
+     "key": "games_won",
+     "label": "Games Won",
+     "value": 27
+    },
+    {
+     "key": "games_lost",
+     "label": "Games Lost",
+     "value": 24
+    },
+    {
+     "key": "hero_wins",
+     "label": "Hero Wins",
+     "value": 27
+    }
+   ]
+  },
+  {
+   "category": "combat",
+   "label": "Combat",
+   "stats": [
+    {
+     "key": "melee_final_blows",
+     "label": "Melee Final Blows",
+     "value": 73
+    },
+    {
+     "key": "damage_done",
+     "label": "Damage Done",
+     "value": 412758
+    },
+    {
+     "key": "hero_damage_done",
+     "label": "Hero Damage Done",
+     "value": 412758
+    },
+    {
+     "key": "deaths",
+     "label": "Deaths",
+     "value": 496
+    },
+    {
+     "key": "eliminations",
+     "label": "Eliminations",
+     "value": 1010
+    },
+    {
+     "key": "objective_kills",
+     "label": "Objective Kills",
+     "value": 216
+    },
+    {
+     "key": "final_blows",
+     "label": "Final Blows",
+     "value": 567
+    },
+    {
+     "key": "time_spent_on_fire",
+     "label": "Time Spent on Fire",
+     "value": 4057
+    },
+    {
+     "key": "objective_contest_time",
+     "label": "Objective Contest Time",
+     "value": 1277
+    },
+    {
+     "key": "solo_kills",
+     "label": "Solo Kills",
+     "value": 116
+    },
+    {
+     "key": "objective_time",
+     "label": "Objective Time",
+     "value": 2334
+    },
+    {
+     "key": "multikills",
+     "label": "Multikills",
+     "value": 23
+    },
+    {
+     "key": "of_match_on_fire",
+     "label": "of Match on Fire",
+     "value": 12
+    }
+   ]
+  },
+  {
+   "category": "assists",
+   "label": "Assists",
+   "stats": [
+    {
+     "key": "offensive_assists",
+     "label": "Offensive Assists",
+     "value": 3
+    },
+    {
+     "key": "assists",
+     "label": "Assists",
+     "value": 18
+    },
+    {
+     "key": "healing_done",
+     "label": "Healing Done",
+     "value": 12810
+    }
+   ]
+  },
+  {
+   "category": "match_awards",
+   "label": "Match Awards",
+   "stats": [
+    {
+     "key": "cards",
+     "label": "Cards",
+     "value": 9
+    }
+   ]
+  }
+ ],
+ "genji": [
+  {
+   "category": "hero_specific",
+   "label": "Hero Specific",
+   "stats": [
+    {
+     "key": "dragonblade_kills",
+     "label": "Dragonblade Kills",
+     "value": 140
+    },
+    {
+     "key": "dragonblade_kills_most_in_game",
+     "label": "Dragonblade Kills - Most in Game",
+     "value": 7
+    },
+    {
+     "key": "damage_deflected",
+     "label": "Damage Deflected",
+     "value": 72160
+    },
+    {
+     "key": "damage_reflected_most_in_game",
+     "label": "Damage Reflected - Most in Game",
+     "value": 3866
+    },
+    {
+     "key": "swift_strike_resets",
+     "label": "Swift Strike Resets",
+     "value": 801
+    },
+    {
+     "key": "swift_strike_resets_most_in_game",
+     "label": "Swift Strike Resets - Most in Game",
+     "value": 801
+    },
+    {
+     "key": "ultimates_reflected",
+     "label": "Ultimates Reflected",
+     "value": 2
+    },
+    {
+     "key": "ultimates_reflected_most_in_game_nyi",
+     "label": "Ultimates Reflected - Most in Game NYI",
+     "value": 2
+    },
+    {
+     "key": "ultimates_reflected_avg_per_10_min_nyi",
+     "label": "Ultimates Reflected - Avg per 10 Min NYI",
+     "value": 0.04
+    },
+    {
+     "key": "dragonblade_kills_avg_per_10_min",
+     "label": "Dragonblade Kills - Avg per 10 Min",
+     "value": 2.68
+    },
+    {
+     "key": "damage_reflected_avg_per_10_min",
+     "label": "Damage Reflected - Avg per 10 Min",
+     "value": 1380
+    }
+   ]
+  },
+  {
+   "category": "best",
+   "label": "Best",
+   "stats": [
+    {
+     "key": "eliminations_most_in_life",
+     "label": "Eliminations - Most in Life",
+     "value": 16
+    },
+    {
+     "key": "all_damage_done_most_in_life",
+     "label": "All Damage Done - Most in Life",
+     "value": 6640
+    },
+    {
+     "key": "weapon_accuracy_best_in_game",
+     "label": "Weapon Accuracy - Best in Game",
+     "value": 38
+    },
+    {
+     "key": "kill_streak_best",
+     "label": "Kill Streak - Best",
+     "value": 16
+    },
+    {
+     "key": "all_damage_done_most_in_game",
+     "label": "All Damage Done - Most in Game",
+     "value": 16819
+    },
+    {
+     "key": "healing_done_most_in_game",
+     "label": "Healing Done - Most in Game",
+     "value": 696
+    },
+    {
+     "key": "eliminations_most_in_game",
+     "label": "Eliminations - Most in Game",
+     "value": 41
+    },
+    {
+     "key": "final_blows_most_in_game",
+     "label": "Final Blows - Most in Game",
+     "value": 25
+    },
+    {
+     "key": "objective_kills_most_in_game",
+     "label": "Objective Kills - Most in Game",
+     "value": 9
+    },
+    {
+     "key": "objective_time_most_in_game",
+     "label": "Objective Time - Most in Game",
+     "value": 115
+    },
+    {
+     "key": "multikill_best",
+     "label": "Multikill - Best",
+     "value": 4
+    },
+    {
+     "key": "solo_kills_most_in_game",
+     "label": "Solo Kills - Most in Game",
+     "value": 6
+    },
+    {
+     "key": "critical_hits_most_in_game",
+     "label": "Critical Hits - Most in Game",
+     "value": 46
+    },
+    {
+     "key": "critical_hits_most_in_life",
+     "label": "Critical Hits - Most in Life",
+     "value": 22
+    },
+    {
+     "key": "melee_final_blows_most_in_game",
+     "label": "Melee Final Blows - Most in Game",
+     "value": 6
+    },
+    {
+     "key": "hero_damage_done_most_in_game",
+     "label": "Hero Damage Done - Most in Game",
+     "value": 15026
+    },
+    {
+     "key": "hero_damage_done_most_in_life",
+     "label": "Hero Damage Done - Most in Life",
+     "value": 5150
+    },
+    {
+     "key": "assists_most_in_game",
+     "label": "Assists - Most in Game",
+     "value": 2
+    },
+    {
+     "key": "critical_hit_kills_most_in_game",
+     "label": "Critical Hit Kills - Most in Game",
+     "value": 6
+    },
+    {
+     "key": "obj_contest_time_most_in_game",
+     "label": "Obj Contest Time - Most in Game",
+     "value": 115
+    },
+    {
+     "key": "time_spent_on_fire_most_in_game",
+     "label": "Time Spent on Fire - Most in Game",
+     "value": 80
+    }
+   ]
+  },
+  {
+   "category": "average",
+   "label": "Average",
+   "stats": [
+    {
+     "key": "healing_done_avg_per_10_min",
+     "label": "Healing Done - Avg per 10 Min",
+     "value": 210
+    },
+    {
+     "key": "swift_strike_resets_avg_per_10_min_nyi",
+     "label": "Swift Strike Resets - Avg per 10 Min NYI",
+     "value": 15.31
+    },
+    {
+     "key": "deaths_avg_per_10_min",
+     "label": "Deaths - Avg per 10 Min",
+     "value": 8.22
+    },
+    {
+     "key": "eliminations_avg_per_10_min",
+     "label": "Eliminations - Avg per 10 Min",
+     "value": 17.13
+    },
+    {
+     "key": "hero_damage_done_avg_per_10_min",
+     "label": "Hero Damage Done - Avg per 10 Min",
+     "value": 7033
+    },
+    {
+     "key": "assists_avg_per_10_min",
+     "label": "Assists - Avg per 10 min",
+     "value": 0.04
+    },
+    {
+     "key": "objective_time_avg_per_10_min",
+     "label": "Objective Time - Avg per 10 Min",
+     "value": 35
+    },
+    {
+     "key": "melee_final_blows_avg_per_10_min",
+     "label": "Melee Final Blows - Avg per 10 Min",
+     "value": 1.34
+    },
+    {
+     "key": "all_damage_done_avg_per_10_min",
+     "label": "All Damage Done - Avg per 10 Min",
+     "value": 8043
+    },
+    {
+     "key": "critical_hits_avg_per_10_min",
+     "label": "Critical Hits - Avg per 10 Min",
+     "value": 20.0
+    },
+    {
+     "key": "eliminations_per_life",
+     "label": "Eliminations per Life",
+     "value": 2.08
+    },
+    {
+     "key": "objective_kills_avg_per_10_min",
+     "label": "Objective Kills - Avg per 10 Min",
+     "value": 3.29
+    },
+    {
+     "key": "time_spent_on_fire_avg_per_10_min",
+     "label": "Time Spent on Fire - Avg per 10 Min",
+     "value": 66
+    },
+    {
+     "key": "critical_hit_kills_avg_per_10_min",
+     "label": "Critical Hit Kills - Avg per 10 Min",
+     "value": 1.03
+    },
+    {
+     "key": "obj_contest_time_avg_per_10_min",
+     "label": "Obj Contest Time - Avg per 10 Min",
+     "value": 20
+    },
+    {
+     "key": "solo_kills_avg_per_10_min",
+     "label": "Solo Kills - Avg per 10 Min",
+     "value": 1.97
+    },
+    {
+     "key": "final_blows_avg_per_10_min",
+     "label": "Final Blows - Avg per 10 Min",
+     "value": 9.77
+    }
+   ]
+  },
+  {
+   "category": "game",
+   "label": "Game",
+   "stats": [
+    {
+     "key": "time_played",
+     "label": "Time Played",
+     "value": 31382
+    },
+    {
+     "key": "games_played",
+     "label": "Games Played",
+     "value": 48
+    },
+    {
+     "key": "games_won",
+     "label": "Games Won",
+     "value": 26
+    },
+    {
+     "key": "game_tied",
+     "label": "Game Tied",
+     "value": 1
+    },
+    {
+     "key": "games_won",
+     "label": "Games Won",
+     "value": 26
+    },
+    {
+     "key": "games_won",
+     "label": "Games Won",
+     "value": 26
+    },
+    {
+     "key": "hero_wins",
+     "label": "Hero Wins",
+     "value": 26
+    },
+    {
+     "key": "win_percentage",
+     "label": "Win Percentage",
+     "value": 56
+    },
+    {
+     "key": "games_lost",
+     "label": "Games Lost",
+     "value": 20
+    }
+   ]
+  },
+  {
+   "category": "combat",
+   "label": "Combat",
+   "stats": [
+    {
+     "key": "eliminations",
+     "label": "Eliminations",
+     "value": 896
+    },
+    {
+     "key": "deaths",
+     "label": "Deaths",
+     "value": 430
+    },
+    {
+     "key": "final_blows",
+     "label": "Final Blows",
+     "value": 511
+    },
+    {
+     "key": "solo_kills",
+     "label": "Solo Kills",
+     "value": 103
+    },
+    {
+     "key": "all_damage_done",
+     "label": "All Damage Done",
+     "value": 420697
+    },
+    {
+     "key": "objective_kills",
+     "label": "Objective Kills",
+     "value": 172
+    },
+    {
+     "key": "objective_time",
+     "label": "Objective Time",
+     "value": 1808
+    },
+    {
+     "key": "multikills",
+     "label": "Multikills",
+     "value": 20
+    },
+    {
+     "key": "melee_final_blows",
+     "label": "Melee Final Blows",
+     "value": 70
+    },
+    {
+     "key": "critical_hits",
+     "label": "Critical Hits",
+     "value": 1046
+    },
+    {
+     "key": "hero_damage_done",
+     "label": "Hero Damage Done",
+     "value": 367834
+    },
+    {
+     "key": "critical_hit_kills",
+     "label": "Critical Hit Kills",
+     "value": 54
+    },
+    {
+     "key": "obj_contest_time",
+     "label": "Obj Contest Time",
+     "value": 1069
+    },
+    {
+     "key": "time_spent_on_fire",
+     "label": "Time Spent on Fire",
+     "value": 3436
+    },
+    {
+     "key": "critical_hit_accuracy",
+     "label": "Critical Hit Accuracy",
+     "value": 11
+    },
+    {
+     "key": "weapon_accuracy",
+     "label": "Weapon Accuracy",
+     "value": 30
+    }
+   ]
+  },
+  {
+   "category": "assists",
+   "label": "Assists",
+   "stats": [
+    {
+     "key": "healing_done",
+     "label": "Healing Done",
+     "value": 10981
+    },
+    {
+     "key": "assists",
+     "label": "Assists",
+     "value": 2
+    }
+   ]
+  },
+  {
+   "category": "match_awards",
+   "label": "Match Awards",
+   "stats": [
+    {
+     "key": "cards",
+     "label": "Cards",
+     "value": 8
+    }
+   ]
+  }
+ ],
+ "bastion": [
+  {
+   "category": "hero_specific",
+   "label": "Hero Specific",
+   "stats": [
+    {
+     "key": "artillery_kills",
+     "label": "Artillery Kills",
+     "value": 3
+    },
+    {
+     "key": "artillery_kills_most_in_game",
+     "label": "Artillery Kills - Most in Game",
+     "value": 2
+    },
+    {
+     "key": "recon_kills",
+     "label": "Recon Kills",
+     "value": 28
+    },
+    {
+     "key": "recon_kills_most_in_game",
+     "label": "Recon Kills - Most in Game",
+     "value": 14
+    },
+    {
+     "key": "assault_kills",
+     "label": "Assault Kills",
+     "value": 13
+    },
+    {
+     "key": "tank_kills_most_in_game",
+     "label": "Tank Kills - Most in Game",
+     "value": 5
+    },
+    {
+     "key": "tactical_grenade_kills",
+     "label": "Tactical Grenade Kills",
+     "value": 18
+    },
+    {
+     "key": "tactical_grenade_kills_most_in_game",
+     "label": "Tactical Grenade Kills - Most in Game",
+     "value": 7
+    },
+    {
+     "key": "artillery_kills_avg_per_10_min",
+     "label": "Artillery Kills - Avg per 10 Min",
+     "value": 1.16
+    },
+    {
+     "key": "tactical_grenade_kills_avg_per_10_min",
+     "label": "Tactical Grenade Kills - Avg per 10 Min",
+     "value": 6.97
+    },
+    {
+     "key": "assault_kills_avg_per_10_min",
+     "label": "Assault Kills - Avg per 10 Min",
+     "value": 5.03
+    },
+    {
+     "key": "recon_kills_avg_per_10_min",
+     "label": "Recon Kills - Avg per 10 Min",
+     "value": 10.84
+    }
+   ]
+  },
+  {
+   "category": "best",
+   "label": "Best",
+   "stats": [
+    {
+     "key": "eliminations_most_in_life",
+     "label": "Eliminations - Most in Life",
+     "value": 7
+    },
+    {
+     "key": "all_damage_done_most_in_life",
+     "label": "All Damage Done - Most in Life",
+     "value": 3535
+    },
+    {
+     "key": "weapon_accuracy_best_in_game",
+     "label": "Weapon Accuracy - Best in Game",
+     "value": 35
+    },
+    {
+     "key": "kill_streak_best",
+     "label": "Kill Streak - Best",
+     "value": 7
+    },
+    {
+     "key": "all_damage_done_most_in_game",
+     "label": "All Damage Done - Most in Game",
+     "value": 11245
+    },
+    {
+     "key": "eliminations_most_in_game",
+     "label": "Eliminations - Most in Game",
+     "value": 22
+    },
+    {
+     "key": "final_blows_most_in_game",
+     "label": "Final Blows - Most in Game",
+     "value": 12
+    },
+    {
+     "key": "objective_kills_most_in_game",
+     "label": "Objective Kills - Most in Game",
+     "value": 13
+    },
+    {
+     "key": "objective_time_most_in_game",
+     "label": "Objective Time - Most in Game",
+     "value": 95
+    },
+    {
+     "key": "multikill_best",
+     "label": "Multikill - Best",
+     "value": 3
+    },
+    {
+     "key": "solo_kills_most_in_game",
+     "label": "Solo Kills - Most in Game",
+     "value": 3
+    },
+    {
+     "key": "critical_hits_most_in_game",
+     "label": "Critical Hits - Most in Game",
+     "value": 18
+    },
+    {
+     "key": "critical_hits_most_in_life",
+     "label": "Critical Hits - Most in Life",
+     "value": 8
+    },
+    {
+     "key": "hero_damage_done_most_in_game",
+     "label": "Hero Damage Done - Most in Game",
+     "value": 8023
+    },
+    {
+     "key": "hero_damage_done_most_in_life",
+     "label": "Hero Damage Done - Most in Life",
+     "value": 2564
+    },
+    {
+     "key": "assists_most_in_game",
+     "label": "Assists - Most in Game",
+     "value": 3
+    },
+    {
+     "key": "critical_hit_kills_most_in_game",
+     "label": "Critical Hit Kill - Most in Game",
+     "value": 1
+    },
+    {
+     "key": "obj_contest_time_most_in_game",
+     "label": "Obj Contest Time - Most in Game",
+     "value": 95
+    },
+    {
+     "key": "time_spent_on_fire_most_in_game",
+     "label": "Time Spent on Fire - Most in Game",
+     "value": 35
+    }
+   ]
+  },
+  {
+   "category": "average",
+   "label": "Average",
+   "stats": [
+    {
+     "key": "deaths_avg_per_10_min",
+     "label": "Deaths - Avg per 10 Min",
+     "value": 9.68
+    },
+    {
+     "key": "eliminations_avg_per_10_min",
+     "label": "Eliminations - Avg per 10 Min",
+     "value": 18.59
+    },
+    {
+     "key": "hero_damage_done_avg_per_10_min",
+     "label": "Hero Damage Done - Avg per 10 Min",
+     "value": 8070
+    },
+    {
+     "key": "assists_avg_per_10_min",
+     "label": "Assists - Avg per 10 min",
+     "value": 2.71
+    },
+    {
+     "key": "objective_time_avg_per_10_min",
+     "label": "Objective Time - Avg per 10 Min",
+     "value": 55
+    },
+    {
+     "key": "all_damage_done_avg_per_10_min",
+     "label": "All Damage Done - Avg per 10 Min",
+     "value": 10755
+    },
+    {
+     "key": "critical_hits_avg_per_10_min",
+     "label": "Critical Hits - Avg per 10 Min",
+     "value": 13.17
+    },
+    {
+     "key": "eliminations_per_life",
+     "label": "Eliminations per Life",
+     "value": 1.92
+    },
+    {
+     "key": "objective_kills_avg_per_10_min",
+     "label": "Objective Kills - Avg per 10 Min",
+     "value": 7.75
+    },
+    {
+     "key": "time_spent_on_fire_avg_per_10_min",
+     "label": "Time Spent on Fire - Avg per 10 Min",
+     "value": 91
+    },
+    {
+     "key": "critical_hit_kills_avg_per_10_min",
+     "label": "Critical Hit Kills - Avg per 10 Min",
+     "value": 0.39
+    },
+    {
+     "key": "obj_contest_time_avg_per_10_min",
+     "label": "Obj Contest Time - Avg per 10 Min",
+     "value": 48
+    },
+    {
+     "key": "solo_kills_avg_per_10_min",
+     "label": "Solo Kills - Avg per 10 Min",
+     "value": 2.32
+    },
+    {
+     "key": "final_blows_avg_per_10_min",
+     "label": "Final Blows - Avg per 10 Min",
+     "value": 9.68
+    }
+   ]
+  },
+  {
+   "category": "game",
+   "label": "Game",
+   "stats": [
+    {
+     "key": "time_played",
+     "label": "Time Played",
+     "value": 1549
+    },
+    {
+     "key": "games_played",
+     "label": "Games Played",
+     "value": 2
+    },
+    {
+     "key": "games_won",
+     "label": "Games Won",
+     "value": 1
+    },
+    {
+     "key": "games_won",
+     "label": "Games Won",
+     "value": 1
+    },
+    {
+     "key": "games_won",
+     "label": "Games Won",
+     "value": 1
+    },
+    {
+     "key": "hero_wins",
+     "label": "Hero Wins",
+     "value": 1
+    },
+    {
+     "key": "win_percentage",
+     "label": "Win Percentage",
+     "value": 35
+    },
+    {
+     "key": "games_lost",
+     "label": "Games Lost",
+     "value": 1
+    }
+   ]
+  },
+  {
+   "category": "combat",
+   "label": "Combat",
+   "stats": [
+    {
+     "key": "eliminations",
+     "label": "Eliminations",
+     "value": 48
+    },
+    {
+     "key": "deaths",
+     "label": "Deaths",
+     "value": 25
+    },
+    {
+     "key": "final_blows",
+     "label": "Final Blows",
+     "value": 25
+    },
+    {
+     "key": "solo_kills",
+     "label": "Solo Kills",
+     "value": 6
+    },
+    {
+     "key": "all_damage_done",
+     "label": "All Damage Done",
+     "value": 27770
+    },
+    {
+     "key": "objective_kills",
+     "label": "Objective Kills",
+     "value": 20
+    },
+    {
+     "key": "objective_time",
+     "label": "Objective Time",
+     "value": 143
+    },
+    {
+     "key": "multikills",
+     "label": "Multikill",
+     "value": 1
+    },
+    {
+     "key": "critical_hits",
+     "label": "Critical Hits",
+     "value": 34
+    },
+    {
+     "key": "hero_damage_done",
+     "label": "Hero Damage Done",
+     "value": 20838
+    },
+    {
+     "key": "critical_hit_kills",
+     "label": "Critical Hit Kill",
+     "value": 1
+    },
+    {
+     "key": "obj_contest_time",
+     "label": "Obj Contest Time",
+     "value": 125
+    },
+    {
+     "key": "time_spent_on_fire",
+     "label": "Time Spent on Fire",
+     "value": 235
+    },
+    {
+     "key": "critical_hit_accuracy",
+     "label": "Critical Hit Accuracy",
+     "value": 4
+    },
+    {
+     "key": "weapon_accuracy",
+     "label": "Weapon Accuracy",
+     "value": 28
+    }
+   ]
+  },
+  {
+   "category": "assists",
+   "label": "Assists",
+   "stats": [
+    {
+     "key": "assists",
+     "label": "Assists",
+     "value": 7
+    }
+   ]
+  }
+ ]
+}

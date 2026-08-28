@@ -1,0 +1,303 @@
+#!/usr/bin/env bash
+#
+# git-worktree — create/switch git worktrees under <repo>/.worktrees
+#
+# Given a branch name or a PR (number / #number), open (or reuse) a worktree
+# in .worktrees/<slug> and drop you into a subshell there.
+#
+# Resolution order for the argument:
+#   1. PR number   (e.g. "123" or "#123")   -> checks out the PR branch
+#   2. exact local branch
+#   3. exact remote branch (origin/<name>)  -> creates tracking local branch
+#   4. fuzzy match via fzf over local+remote branches and open PRs
+#   5. otherwise -> create a NEW branch off the current HEAD
+#
+# With no argument (or an ambiguous one) it opens an fzf picker.
+#
+# Usage:
+#   git-worktree [branch|pr]
+#   git-worktree --list        # list existing worktrees
+#   git-worktree --help
+#
+# Tip: source the accompanying `wt` shell function to cd your *current*
+# shell instead of spawning a subshell. See --help.
+
+set -euo pipefail
+
+PROG="${0##*/}"
+
+die() { printf '%s: %s\n' "$PROG" "$*" >&2; exit 1; }
+info() { printf '\033[36m%s\033[0m %s\n' "==>" "$*" >&2; }
+
+usage() {
+	cat >&2 <<EOF
+$PROG — create/switch git worktrees under .worktrees/
+
+Usage:
+  $PROG [<branch>|<pr-number>|#<pr-number>]
+  $PROG --list
+  $PROG --help
+
+Behavior:
+  * PR number (123 or #123)  -> worktree tracking that PR's branch (needs gh)
+  * existing local branch    -> reuse or create its worktree
+  * existing remote branch   -> create a local tracking branch + worktree
+  * fuzzy match (fzf)        -> pick from branches + open PRs
+  * anything else            -> new branch off current HEAD
+
+If run directly it spawns a subshell inside the worktree; exit to return.
+To switch your *current* shell instead, use the \`wt\` function that
+bootstrap.sh installs into your shell rc:
+
+  wt [<branch>|<pr>]     # cd's your current shell into the worktree
+  wt --list              # list existing worktrees
+
+(\`wt\` just wraps: cd "\$($PROG --print-dir "\$@")")
+EOF
+}
+
+# --- locate repo -----------------------------------------------------------
+
+git rev-parse --git-dir >/dev/null 2>&1 || die "not inside a git repository"
+
+# Use the main working tree's toplevel so .worktrees is always at the repo root,
+# even when invoked from within an existing worktree.
+COMMON_DIR="$(git rev-parse --path-format=absolute --git-common-dir)"
+REPO_ROOT="$(dirname "$COMMON_DIR")"
+# If common-dir is a bare-ish ".git", dirname gives the repo root. Guard anyway.
+[ -d "$REPO_ROOT" ] || REPO_ROOT="$(git rev-parse --show-toplevel)"
+
+WORKTREES_DIR="$REPO_ROOT/.worktrees"
+
+have() { command -v "$1" >/dev/null 2>&1; }
+
+# --- helpers ---------------------------------------------------------------
+
+# Turn a branch name into a filesystem-safe slug for the directory name.
+slugify() {
+	printf '%s' "$1" | tr '/' '-' | tr -c 'A-Za-z0-9._-' '-'
+}
+
+default_branch() {
+	local ref
+	ref="$(git symbolic-ref --quiet refs/remotes/origin/HEAD 2>/dev/null || true)"
+	if [ -n "$ref" ]; then
+		printf '%s' "${ref#refs/remotes/origin/}"
+		return
+	fi
+	for b in main master; do
+		if git show-ref --verify --quiet "refs/remotes/origin/$b"; then
+			printf '%s' "$b"; return
+		fi
+	done
+	printf 'main'
+}
+
+local_branch_exists() { git show-ref --verify --quiet "refs/heads/$1"; }
+remote_branch_exists() { git show-ref --verify --quiet "refs/remotes/origin/$1"; }
+
+# Find an existing worktree path for a given branch (refs/heads/<branch>).
+worktree_path_for_branch() {
+	local want="refs/heads/$1" path="" branch=""
+	while IFS= read -r line; do
+		case "$line" in
+			worktree\ *) path="${line#worktree }" ;;
+			branch\ *)   branch="${line#branch }"
+			             [ "$branch" = "$want" ] && { printf '%s' "$path"; return 0; }
+			             ;;
+			"")          path=""; branch="" ;;
+		esac
+	done < <(git worktree list --porcelain)
+	return 1
+}
+
+list_worktrees() {
+	git worktree list
+}
+
+# --- fzf picker ------------------------------------------------------------
+# Emits a single selection line prefixed with a type tag:
+#   branch:<name>   remote:<name>   pr:<number>
+
+fzf_pick() {
+	have fzf || die "fzf not found; pass an explicit branch or PR"
+
+	local query="${1:-}"
+	{
+		git for-each-ref --format='branch:%(refname:short)' refs/heads
+		git for-each-ref --format='%(refname:short)' refs/remotes/origin \
+			| grep -v '^origin/HEAD$' \
+			| sed 's|^origin/|remote:|'
+		if have gh; then
+			gh pr list --state open \
+				--json number,title,headRefName \
+				--template '{{range .}}pr:{{.number}}	#{{.number}} {{.headRefName}} — {{.title}}{{"\n"}}{{end}}' \
+				2>/dev/null || true
+		fi
+	} \
+		| awk '!seen[$0]++' \
+		| fzf --ansi --height=40% --reverse \
+		      --prompt="worktree> " \
+		      --query="$query" \
+		      --delimiter='\t' --with-nth=1.. \
+		      --preview-window=hidden \
+		| sed 's/\t.*$//'
+}
+
+# --- resolve argument to (kind, name) --------------------------------------
+# Sets globals: KIND (branch|remote|pr|new) and NAME.
+
+resolve() {
+	local arg="${1:-}"
+	local sel=""
+
+	# No arg -> straight to picker.
+	if [ -z "$arg" ]; then
+		sel="$(fzf_pick "")" || die "nothing selected"
+	else
+		# PR number?
+		local prnum=""
+		case "$arg" in
+			'#'[0-9]*) prnum="${arg#\#}" ;;
+			[0-9]*)    prnum="$arg" ;;
+		esac
+		if [ -n "$prnum" ]; then
+			[[ "$prnum" =~ ^[0-9]+$ ]] || die "invalid PR number: $arg"
+			KIND=pr; NAME="$prnum"; return
+		fi
+
+		# exact local branch
+		if local_branch_exists "$arg"; then
+			KIND=branch; NAME="$arg"; return
+		fi
+		# exact remote branch
+		if remote_branch_exists "$arg"; then
+			KIND=remote; NAME="$arg"; return
+		fi
+
+		# No exact match: offer fzf pre-seeded with the query. If the user
+		# cancels (Esc), fall through to creating a new branch off HEAD.
+		if have fzf; then
+			sel="$(fzf_pick "$arg" || true)"
+		fi
+		if [ -z "$sel" ]; then
+			KIND=new; NAME="$arg"; return
+		fi
+	fi
+
+	# Parse an fzf selection line.
+	case "$sel" in
+		branch:*) KIND=branch; NAME="${sel#branch:}" ;;
+		remote:*) KIND=remote; NAME="${sel#remote:}" ;;
+		pr:*)     KIND=pr;     NAME="${sel#pr:}" ;;
+		*)        die "unrecognized selection: $sel" ;;
+	esac
+}
+
+# --- ensure the worktree exists, echo its path -----------------------------
+
+ensure_worktree() {
+	local branch="$1"       # local branch name the worktree should be on
+	local base="$2"         # start point when the branch must be created ("" = don't create)
+	local wt
+
+	# Already have a worktree on this branch?
+	if wt="$(worktree_path_for_branch "$branch")"; then
+		info "reusing worktree: $wt"
+		printf '%s' "$wt"
+		return
+	fi
+
+	local slug dir
+	slug="$(slugify "$branch")"
+	dir="$WORKTREES_DIR/$slug"
+
+	# Directory collision for a different branch? Disambiguate.
+	if [ -e "$dir" ]; then
+		dir="$WORKTREES_DIR/${slug}-$(date +%s)"
+	fi
+
+	mkdir -p "$WORKTREES_DIR"
+
+	if local_branch_exists "$branch"; then
+		info "adding worktree for existing branch '$branch'"
+		git worktree add "$dir" "$branch" >&2
+	elif [ -n "$base" ]; then
+		info "creating branch '$branch' (from $base) + worktree"
+		git worktree add -b "$branch" "$dir" "$base" >&2
+	else
+		die "branch '$branch' does not exist and no base given"
+	fi
+
+	printf '%s' "$dir"
+}
+
+# --- main ------------------------------------------------------------------
+
+PRINT_DIR=0
+ARG=""
+
+while [ $# -gt 0 ]; do
+	case "$1" in
+		-h|--help) usage; exit 0 ;;
+		-l|--list) list_worktrees; exit 0 ;;
+		--print-dir) PRINT_DIR=1; shift ;;
+		--) shift; break ;;
+		-*) die "unknown option: $1 (see --help)" ;;
+		*) ARG="$1"; shift ;;
+	esac
+done
+[ -n "${1:-}" ] && ARG="$1"
+
+KIND=""; NAME=""
+resolve "$ARG"
+
+TARGET_DIR=""
+case "$KIND" in
+	branch)
+		TARGET_DIR="$(ensure_worktree "$NAME" "")"
+		;;
+	remote)
+		# create local tracking branch off origin/<name>
+		if local_branch_exists "$NAME"; then
+			TARGET_DIR="$(ensure_worktree "$NAME" "")"
+		else
+			TARGET_DIR="$(ensure_worktree "$NAME" "origin/$NAME")"
+		fi
+		;;
+	pr)
+		have gh || die "gh CLI required to check out PR #$NAME"
+		info "resolving PR #$NAME via gh"
+		# Ask gh for the PR's head branch name.
+		pr_branch="$(gh pr view "$NAME" --json headRefName --jq .headRefName 2>/dev/null || true)"
+		[ -n "$pr_branch" ] || die "could not resolve PR #$NAME"
+		# Fetch the PR head into a local branch if we don't have it.
+		if ! local_branch_exists "$pr_branch"; then
+			info "fetching PR #$NAME into branch '$pr_branch'"
+			git fetch origin "pull/$NAME/head:$pr_branch" >&2 \
+				|| git fetch origin "$pr_branch:$pr_branch" >&2 \
+				|| die "failed to fetch PR #$NAME"
+		fi
+		TARGET_DIR="$(ensure_worktree "$pr_branch" "")"
+		;;
+	new)
+		base="$(git rev-parse --abbrev-ref HEAD)"
+		info "no match for '$NAME'; creating new branch off '$base'"
+		TARGET_DIR="$(ensure_worktree "$NAME" "$base")"
+		;;
+	*)
+		die "internal: unresolved kind"
+		;;
+esac
+
+[ -d "$TARGET_DIR" ] || die "worktree directory not found: $TARGET_DIR"
+
+if [ "$PRINT_DIR" -eq 1 ]; then
+	# For the `wt` shell function: emit only the path on stdout.
+	printf '%s\n' "$TARGET_DIR"
+	exit 0
+fi
+
+info "entering $TARGET_DIR (exit to return)"
+cd "$TARGET_DIR"
+exec "${SHELL:-/bin/sh}"

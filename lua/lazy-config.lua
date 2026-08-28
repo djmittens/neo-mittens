@@ -36,6 +36,26 @@ require("lazy").setup({
     }
   },
   { 'neovim/nvim-lspconfig', config = function() require('neo-mittens.plugins.lsp').on_lsp_attach() end },
+  { -- auto signature help while typing a call in insert mode.
+    -- Neovim's builtin vim.lsp.buf.signature_help() is manual-only (see `gs` in
+    -- plugins/lsp.lua) and its float closes on the very next keystroke, so this
+    -- plugin owns the "keep it open and track the active parameter" behaviour.
+    'ray-x/lsp_signature.nvim',
+    event = 'InsertEnter',
+    opts = {
+      bind = true,                      -- mandatory, otherwise border config is ignored
+      handler_opts = { border = 'rounded' }, -- match the bordered cmp windows
+      -- Inlay hints are already on globally (plugins/lsp.lua), which shows
+      -- parameter names at the call site. The virtual "🐼 param" hint would
+      -- duplicate that, so float-only.
+      hint_enable = false,
+      floating_window_above_cur_line = true, -- keep clear of the cmp popup
+      doc_lines = 5,                    -- cap the docstring tail (default 10)
+      max_height = 12,
+      fix_pos = false,                  -- close once the last arg is typed
+      select_signature_key = '<M-n>',   -- cycle overloads (clangd/C++)
+    },
+  },
   { 'hrsh7th/cmp-nvim-lsp' },
   {
     'L3MON4D3/LuaSnip',
@@ -47,29 +67,29 @@ require("lazy").setup({
   {
     'mason-org/mason-lspconfig.nvim',
     dependencies = {
-      {
-        "mason-org/mason.nvim",
-        opts = {
-
-          ensure_installed = {
-            'lua_ls',
-            'clangd',
-            'ts_ls',
-            'rust_analyzer',
-            'ts_ls',
-            'neocmake',
-          },
-        }
-      },
+      -- mason.nvim manages the package registry/installer. `ensure_installed`
+      -- here would need PACKAGE names, not LSP names, so we leave it to
+      -- mason-lspconfig below (which maps LSP names -> mason packages).
+      { "mason-org/mason.nvim", opts = {} },
       "neovim/nvim-lspconfig",
     },
     config = function()
+      -- Single source of truth: the server list lives in neo-mittens.plugins.lsp.
+      -- mason-lspconfig auto-installs them; mason_setup() configures + enables.
+      require('mason-lspconfig').setup({
+        ensure_installed = require('neo-mittens.plugins.lsp').server_names(),
+      })
       require('neo-mittens.plugins.lsp').mason_setup()
     end,
   },
   { 'saadparwaiz1/cmp_luasnip', },
   { 'scalameta/nvim-metals',           dependencies = { 'nvim-lua/plenary.nvim' }, main = 'neo-mittens.plugins.metals',     config = true },
-  { "nvim-treesitter/nvim-treesitter", branch = "main", build = ":TSUpdate", config = function() require('neo-mittens.plugins.treesitter').setup() end },
+  -- Treesitter WITHOUT any external plugin. Neovim 0.12 ships the treesitter
+  -- runtime (vim.treesitter) and bundles some parsers, but has no installer.
+  -- neo-mittens.plugins.treesitter provides our own :TSInstall / :TSUpdate /
+  -- :TSUninstall commands (git clone + cc compile into the site dir) plus the
+  -- highlight autocmd. No third-party plugin, no untrusted registry.
+  -- (Loaded directly below, outside the lazy plugin list.)
   {
     dir = "~/src/valkyria/editors",
     name = "valk-editors",
@@ -470,7 +490,13 @@ require("lazy").setup({
           file_panel = {
             { 'n', '<leader>v', toggle_reviewed, { desc = 'Toggle file as reviewed' } },
             { 'n', 'p', require('diffview.actions').select_entry, { desc = 'Preview file (keep focus in panel)' } },
-            { 'n', '<CR>', require('diffview.actions').focus_entry, { desc = 'Open file and focus diff' } },
+            { 'n', '<CR>', function()
+              require('diffview.actions').select_entry()
+              -- select_entry opens the diff but keeps focus in panel; move to the right diff pane
+              vim.schedule(function()
+                vim.cmd('wincmd l')
+              end)
+            end, { desc = 'Open file and focus diff' } },
           },
         },
       })
@@ -626,6 +652,11 @@ require("lazy").setup({
     },
     opts = {
       provider = "opencode",
+      -- ACP providers (like opencode) can't power inline auto-suggestions,
+      -- which look providers up in the normal `providers` table and error out.
+      behaviour = {
+        auto_suggestions = false,
+      },
       selection = {
         enabled = true,
         hint_display = "right_align",

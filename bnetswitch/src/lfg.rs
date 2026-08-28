@@ -49,7 +49,9 @@
 //! - `POST /lfg/message` — userscript posts a new LFG embed
 //! - `POST /lfg/remove`  — userscript notifies that an embed was deleted
 //! - `GET /lfg/active`   — TUI / userscript reads current active LFGs
-//! - `GET /actions`      — userscript long-polls for actions to execute
+//! - `GET /actions`      — userscript polls for actions to execute
+//! - `GET /actions/long` — blocking variant; also returns boot_id +
+//!   session state so one request replaces three timers
 //! - `POST /actions/ack` — userscript reports completion
 //! - `POST /status`      — userscript reports voice/account state
 //! - `GET /health`       — sanity check
@@ -69,7 +71,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
 use std::convert::Infallible;
 use std::sync::{Arc, Mutex, OnceLock};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tokio::sync::broadcast;
 use tower_http::cors::{Any, CorsLayer};
 
@@ -108,6 +110,26 @@ const MAX_LFG_HISTORY: usize = 256;
 /// How long an action waits in the queue before being considered stale.
 #[allow(dead_code)] // used once TUI panel enqueues actions
 const ACTION_TTL_SECS: u64 = 60;
+
+/// How long we wait for a `POST /actions/ack` after handing an action to a
+/// userscript before declaring it lost.
+///
+/// Delivery is fire-and-forget: the moment an action is drained it is gone
+/// from the queue, so anything that eats it in transit (tab reloaded mid
+/// flight, SSE socket gone half-open across a suspend, the userscript
+/// discarding an in-flight response while switching transports) used to be
+/// indistinguishable from success. Nothing retried and nothing complained --
+/// the rename just never happened. Tracking in-flight actions and timing out
+/// the ack is what turns that silence into a status-bar message.
+///
+/// 30s is comfortably longer than the userscript's slowest legitimate path
+/// (`setServerNicknameViaApi` alone can spend 5s waiting for an auth token,
+/// then falls back to a DOM walk with its own sleeps).
+const ACK_TIMEOUT_SECS: u64 = 30;
+
+/// Cap on buffered failure reports, so a wedged userscript that fails every
+/// action can't grow this without bound before the TUI drains it.
+const MAX_ACTION_FAILURES: usize = 16;
 
 // ============================================================================
 // Wire types
@@ -241,6 +263,21 @@ pub enum LfgActionKind {
     LeaveVoice,
 }
 
+impl LfgActionKind {
+    /// Short human label for status-bar messages. An action id alone
+    /// ("act-1787121309414 was never confirmed") tells the user nothing
+    /// about what actually failed to happen.
+    pub fn describe(&self) -> String {
+        match self {
+            LfgActionKind::JoinByMessage { .. } => "join voice".to_string(),
+            LfgActionKind::SetNickname { nickname, .. } => {
+                format!("set nickname to '{}'", nickname)
+            }
+            LfgActionKind::LeaveVoice => "leave voice".to_string(),
+        }
+    }
+}
+
 /// What the userscript reports back about its / Discord's current state.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct VoiceStatus {
@@ -282,6 +319,46 @@ pub struct LfgState {
     /// Registered userscript sessions (browsers/tabs). Used to elect
     /// the "primary" tab that receives queued actions.
     pub sessions: std::collections::HashMap<String, SessionInfo>,
+    /// Failed / lost actions waiting to be shown in the TUI. Drained (not
+    /// cloned) by the UI loop so each failure is surfaced exactly once.
+    /// Without this, failures only reached stderr — which the alt-screen TUI
+    /// hides, so e.g. a broken nickname sync looked like nothing happening
+    /// at all.
+    ///
+    /// A queue rather than a single slot: a switch enqueues one action per
+    /// guild, and with an `Option` the second failure silently overwrote the
+    /// first before the TUI ever ticked.
+    pub action_failures: VecDeque<ActionFailure>,
+    /// Actions handed to a userscript that have not been acked yet, keyed
+    /// by action id. Populated at every drain site, cleared on ack, and
+    /// swept for timeouts — this is what makes a lost action observable.
+    pub in_flight: std::collections::HashMap<String, InFlightAction>,
+    /// Monotonic counter feeding `enqueue_action`'s id. Wall-clock ms alone
+    /// collided: the per-guild enqueue loop runs well inside one millisecond,
+    /// so every action in a multi-guild sync shared an id and their acks
+    /// cross-attributed.
+    next_action_seq: u64,
+}
+
+/// An action delivered to a userscript, awaiting its ack.
+#[derive(Clone, Debug)]
+pub struct InFlightAction {
+    /// What the action was, for the timeout message.
+    pub description: String,
+    /// Unix epoch seconds after which we give up waiting for the ack.
+    pub ack_deadline: u64,
+}
+
+/// An action that failed, was lost, or expired — queued for the TUI.
+///
+/// Carries only the human-readable reason: the message is self-describing
+/// ("'set nickname to X' failed: ..."), and the opaque action id it used to
+/// also carry meant nothing to the user. The id is still written to stderr
+/// by `push_failure` for log correlation.
+#[derive(Clone, Debug)]
+pub struct ActionFailure {
+    /// Human-readable reason, ready to drop into the status bar.
+    pub error: String,
 }
 
 impl LfgState {
@@ -309,7 +386,13 @@ impl LfgState {
     /// Enqueue an action for the userscript to perform.
     #[allow(dead_code)] // used once TUI panel enqueues actions
     pub fn enqueue_action(&mut self, kind: LfgActionKind) -> String {
-        let id = format!("act-{}", now_ms());
+        // Wall clock alone is not unique: the caller enqueues one action per
+        // configured guild in a tight loop, so several land in the same
+        // millisecond and used to share an id. Acks are matched by id, so
+        // collisions cross-attributed results between guilds. The sequence
+        // number makes the id unique regardless of clock resolution.
+        self.next_action_seq = self.next_action_seq.wrapping_add(1);
+        let id = format!("act-{}-{}", now_ms(), self.next_action_seq);
         let action = LfgAction {
             id: id.clone(),
             kind,
@@ -319,11 +402,85 @@ impl LfgState {
         id
     }
 
+    /// Record a failure for the TUI to surface. Bounded; oldest dropped.
+    ///
+    /// Deliberately does NOT write to stderr. bnetswitch's stderr is the same
+    /// pty ratatui is driving, so an `eprintln!` here does not go to a log --
+    /// it paints raw text over the alt-screen, duplicating the status line on
+    /// top of the rendered one. The failure queue *is* the delivery channel.
+    fn push_failure(&mut self, error: String) {
+        self.action_failures.push_back(ActionFailure { error });
+        while self.action_failures.len() > MAX_ACTION_FAILURES {
+            self.action_failures.pop_front();
+        }
+    }
+
     /// Drain expired actions. Called opportunistically before
     /// returning the queue to the userscript.
+    ///
+    /// An expiry here means the action sat the full `ACTION_TTL_SECS`
+    /// without any primary session ever collecting it — i.e. no Discord tab
+    /// was connected. That is the single most likely reason a switch does
+    /// not rename you, and it used to be a silent `retain()`.
     pub fn prune_expired_actions(&mut self) {
         let now = now_secs();
-        self.action_queue.retain(|a| a.expires_at > now);
+        if self.action_queue.iter().all(|a| a.expires_at > now) {
+            return;
+        }
+        let (expired, live): (Vec<_>, Vec<_>) = self
+            .action_queue
+            .drain(..)
+            .partition(|a| a.expires_at <= now);
+        self.action_queue = live.into();
+        for a in expired {
+            self.push_failure(format!(
+                "{} — expired after {}s, no Discord tab picked it up \
+                 (tab closed, or the bridge was disconnected)",
+                a.kind.describe(),
+                ACTION_TTL_SECS
+            ));
+        }
+    }
+
+    /// Record actions we just handed to a userscript so a missing ack can be
+    /// detected. Called at every drain site.
+    pub fn mark_delivered(&mut self, actions: &[LfgAction]) {
+        let deadline = now_secs() + ACK_TIMEOUT_SECS;
+        for a in actions {
+            self.in_flight.insert(
+                a.id.clone(),
+                InFlightAction {
+                    description: a.kind.describe(),
+                    ack_deadline: deadline,
+                },
+            );
+        }
+    }
+
+    /// Report any delivered action whose ack never arrived.
+    ///
+    /// Called from the TUI tick as well as the HTTP paths, because the
+    /// interesting case is precisely when the userscript has gone quiet and
+    /// no further requests will arrive to trigger a sweep.
+    pub fn sweep_unacked_actions(&mut self) {
+        let now = now_secs();
+        if self.in_flight.values().all(|f| f.ack_deadline > now) {
+            return;
+        }
+        let lost: Vec<(String, String)> = self
+            .in_flight
+            .iter()
+            .filter(|(_, f)| f.ack_deadline <= now)
+            .map(|(id, f)| (id.clone(), f.description.clone()))
+            .collect();
+        for (id, description) in lost {
+            self.in_flight.remove(&id);
+            self.push_failure(format!(
+                "{} — delivered but never confirmed within {}s, the Discord tab \
+                 dropped it (reloaded, suspended, or switched transports mid-flight)",
+                description, ACK_TIMEOUT_SECS
+            ));
+        }
     }
 
     /// Register a new userscript session, or refresh an existing one.
@@ -484,6 +641,7 @@ fn build_router(state: AppState) -> Router {
         .route("/lfg/remove", post(handle_lfg_remove))
         .route("/lfg/active", get(handle_lfg_active))
         .route("/actions", get(handle_actions))
+        .route("/actions/long", get(handle_actions_long))
         .route("/actions/ack", post(handle_actions_ack))
         .route("/register", post(handle_register))
         .route("/status", post(handle_status))
@@ -639,6 +797,7 @@ async fn handle_actions(
     let session_id = extract_session_id(&headers);
     let mut s = state.lfg.lock().unwrap();
     s.prune_expired_actions();
+    s.sweep_unacked_actions();
     let allow_drain = if s.sessions.is_empty() {
         true
     } else {
@@ -652,8 +811,141 @@ async fn handle_actions(
     } else {
         Vec::new()
     };
+    s.mark_delivered(&actions);
     let body = serde_json::to_string(&actions).unwrap_or_else(|_| "[]".to_string());
     json_ok(&body)
+}
+
+#[derive(Deserialize)]
+struct LongPollQuery {
+    /// Max milliseconds to hold the request open before returning an empty
+    /// action list. Clamped to 60s so a bad client can't pin a task forever.
+    #[serde(default)]
+    wait_ms: Option<u64>,
+}
+
+/// Long-polling sibling of `GET /actions`.
+///
+/// ## Why this exists
+///
+/// The userscript cannot open a native `EventSource` to `http://127.0.0.1`
+/// from `https://discord.com`. Firefox 153+ enforces Local Network Access
+/// permission, so the request is refused before it leaves the page:
+///
+/// ```text
+/// Local Network Access permission required: top-level site
+/// "https://discord.com", attempting to access target
+/// "http://127.0.0.1:7172/events" via fetch. Secure context: True
+/// ```
+///
+/// That means all traffic has to go through Tampermonkey's
+/// `GM_xmlhttpRequest`, which is exempt because it runs in the extension
+/// with `@connect 127.0.0.1`.
+///
+/// Tampermonkey keeps a per-request record in its background page and does
+/// not reliably release completed ones, so **request count** is what costs
+/// memory, not bytes transferred. The old 2s short-poll of `/actions`
+/// issued ~43k requests/day and leaked ~8 GB into the WebExtensions process
+/// over three days. Holding one request open until an action actually
+/// exists cuts that by ~12x *and* improves latency, since we return the
+/// instant `notify_tx` fires rather than on the next 2s tick.
+///
+/// The response bundles `boot_id`, `is_primary` and `session_count` so this
+/// single round-trip also replaces the separate `/health` boot-id poll and
+/// the periodic `/register` call — three timers collapse into one.
+async fn handle_actions_long(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(query): Query<LongPollQuery>,
+) -> Response {
+    if !is_authorized(&headers) {
+        return json_error(StatusCode::UNAUTHORIZED, "missing or bad bearer token");
+    }
+    maybe_register_session(&state.lfg, &headers);
+    let session_id = extract_session_id(&headers);
+
+    let wait = Duration::from_millis(query.wait_ms.unwrap_or(25_000).min(60_000));
+    let deadline = Instant::now() + wait;
+
+    // Subscribe *before* the first drain, otherwise an action queued while
+    // we build the first response would be missed and wait a full cycle.
+    let mut notify_rx = state.notify_tx.subscribe();
+
+    loop {
+        let actions = drain_actions_for(&state, session_id.as_deref());
+        if !actions.is_empty() {
+            return long_poll_response(&state, session_id.as_deref(), actions);
+        }
+
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return long_poll_response(&state, session_id.as_deref(), Vec::new());
+        }
+
+        match tokio::time::timeout(remaining, notify_rx.recv()).await {
+            // Deadline hit — loop re-checks once more, then returns empty.
+            Err(_) => continue,
+            // Woken by a queued action, or we lagged and may have missed
+            // one. Either way the answer is the same: re-drain.
+            Ok(Ok(())) | Ok(Err(broadcast::error::RecvError::Lagged(_))) => continue,
+            // Sender gone (shutting down). Returning immediately avoids
+            // spinning on a channel that will never block again.
+            Ok(Err(broadcast::error::RecvError::Closed)) => {
+                return long_poll_response(&state, session_id.as_deref(), Vec::new());
+            }
+        }
+    }
+}
+
+/// Drain queued actions if this session is the primary one.
+///
+/// Split into its own function so the `MutexGuard` is provably dropped
+/// before the caller's `.await` — `std::sync::MutexGuard` is `!Send`, so
+/// holding it across an await point would not compile inside an axum
+/// handler, and holding it across a 25s wait would deadlock the TUI.
+fn drain_actions_for(state: &AppState, session_id: Option<&str>) -> Vec<LfgAction> {
+    let mut s = match state.lfg.lock() {
+        Ok(g) => g,
+        Err(_) => return Vec::new(),
+    };
+    s.prune_expired_actions();
+    s.sweep_unacked_actions();
+    let allow_drain = if s.sessions.is_empty() {
+        true
+    } else {
+        session_id.map(|sid| s.is_primary(sid)).unwrap_or(false)
+    };
+    let actions: Vec<LfgAction> = if allow_drain {
+        s.action_queue.drain(..).collect()
+    } else {
+        Vec::new()
+    };
+    s.mark_delivered(&actions);
+    actions
+}
+
+fn long_poll_response(
+    state: &AppState,
+    session_id: Option<&str>,
+    actions: Vec<LfgAction>,
+) -> Response {
+    let (is_primary, session_count) = match state.lfg.lock() {
+        Ok(s) => (
+            session_id
+                .map(|sid| s.is_primary(sid))
+                .unwrap_or_else(|| s.sessions.is_empty()),
+            s.sessions.len(),
+        ),
+        Err(_) => (false, 0),
+    };
+    let actions_json = serde_json::to_string(&actions).unwrap_or_else(|_| "[]".to_string());
+    json_ok(&format!(
+        r#"{{"boot_id":"{}","is_primary":{},"session_count":{},"actions":{}}}"#,
+        process_boot_id(),
+        is_primary,
+        session_count,
+        actions_json
+    ))
 }
 
 async fn handle_actions_ack(
@@ -676,12 +968,21 @@ async fn handle_actions_ack(
         Ok(a) => a,
         Err(e) => return json_error(StatusCode::BAD_REQUEST, &format!("bad ack body: {}", e)),
     };
-    if !ack.success {
-        eprintln!(
-            "[lfg] action {} failed: {}",
-            ack.id,
-            ack.error.unwrap_or_default()
-        );
+    if let Ok(mut guard) = state.lfg.lock() {
+        // Either outcome resolves the action: stop waiting for its ack, or
+        // the timeout sweep would report a success as "never confirmed".
+        let pending = guard.in_flight.remove(&ack.id);
+        if !ack.success {
+            let error = ack.error.unwrap_or_default();
+            // Park it for the TUI. stderr is invisible under the alt-screen,
+            // so this is the only way the user learns that e.g. a nickname
+            // sync never landed.
+            let described = match pending {
+                Some(f) => format!("{} — {}", f.description, error),
+                None => error,
+            };
+            guard.push_failure(described);
+        }
     }
     json_ok(r#"{"ok":true}"#)
 }
@@ -864,6 +1165,7 @@ async fn handle_events(
                 };
 
                 s.prune_expired_actions();
+                s.sweep_unacked_actions();
 
                 let is_primary = if s.sessions.is_empty() {
                     true
@@ -874,11 +1176,13 @@ async fn handle_events(
                         .unwrap_or(false)
                 };
 
-                if is_primary {
+                let drained: Vec<LfgAction> = if is_primary {
                     s.action_queue.drain(..).collect()
                 } else {
                     Vec::new()
-                }
+                };
+                s.mark_delivered(&drained);
+                drained
             };
 
             // Push each action as an SSE event.
@@ -1004,6 +1308,95 @@ mod tests {
         }
     }
 
+    fn nick_action(n: &str) -> LfgActionKind {
+        LfgActionKind::SetNickname {
+            guild_id: "94882524378968064".into(),
+            nickname: n.into(),
+        }
+    }
+
+    /// The per-guild enqueue loop runs inside a single millisecond, so
+    /// wall-clock-only ids collided and acks cross-attributed.
+    #[test]
+    fn enqueue_action_ids_are_unique_within_one_millisecond() {
+        let mut s = LfgState::new();
+        let ids: Vec<String> = (0..50).map(|_| s.enqueue_action(nick_action("x"))).collect();
+        let unique: std::collections::HashSet<_> = ids.iter().collect();
+        assert_eq!(unique.len(), ids.len(), "action ids collided: {:?}", ids);
+    }
+
+    /// An action nobody ever collected must be reported, not silently
+    /// dropped — this is the "switched accounts with no Discord tab open"
+    /// case that made the rename look like it just did nothing.
+    #[test]
+    fn expired_action_is_reported_not_silently_dropped() {
+        let mut s = LfgState::new();
+        s.enqueue_action(nick_action("OliveLion#25432"));
+        s.action_queue[0].expires_at = now_secs() - 1;
+
+        s.prune_expired_actions();
+
+        assert!(s.action_queue.is_empty());
+        let f = s.action_failures.pop_front().expect("expiry must be reported");
+        assert!(f.error.contains("set nickname to 'OliveLion#25432'"), "{}", f.error);
+        assert!(f.error.contains("expired"), "{}", f.error);
+    }
+
+    /// Delivered-but-never-acked is the transport-switch / tab-reload case.
+    #[test]
+    fn delivered_action_without_ack_times_out() {
+        let mut s = LfgState::new();
+        s.enqueue_action(nick_action("Pogo#11926"));
+        let delivered: Vec<LfgAction> = s.action_queue.drain(..).collect();
+        s.mark_delivered(&delivered);
+
+        // Not yet past the deadline: silence is still legitimate.
+        s.sweep_unacked_actions();
+        assert!(s.action_failures.is_empty());
+
+        for f in s.in_flight.values_mut() {
+            f.ack_deadline = now_secs() - 1;
+        }
+        s.sweep_unacked_actions();
+
+        let f = s.action_failures.pop_front().expect("lost action must be reported");
+        assert!(f.error.contains("set nickname to 'Pogo#11926'"), "{}", f.error);
+        assert!(f.error.contains("never confirmed"), "{}", f.error);
+        assert!(s.in_flight.is_empty(), "swept actions must not report twice");
+    }
+
+    /// A successful ack must clear the in-flight entry, or the sweep would
+    /// later report a perfectly good action as lost.
+    #[test]
+    fn acked_action_does_not_time_out() {
+        let mut s = LfgState::new();
+        let id = s.enqueue_action(nick_action("Kermit#11168"));
+        let delivered: Vec<LfgAction> = s.action_queue.drain(..).collect();
+        s.mark_delivered(&delivered);
+
+        assert!(s.in_flight.remove(&id).is_some(), "ack should find the entry");
+
+        for f in s.in_flight.values_mut() {
+            f.ack_deadline = now_secs() - 1;
+        }
+        s.sweep_unacked_actions();
+        assert!(s.action_failures.is_empty(), "acked action was reported as lost");
+    }
+
+    /// One failure per guild must not clobber the previous one before the
+    /// TUI has ticked.
+    #[test]
+    fn multiple_failures_are_queued_not_overwritten() {
+        let mut s = LfgState::new();
+        s.enqueue_action(nick_action("first"));
+        s.enqueue_action(nick_action("second"));
+        for a in s.action_queue.iter_mut() {
+            a.expires_at = now_secs() - 1;
+        }
+        s.prune_expired_actions();
+        assert_eq!(s.action_failures.len(), 2);
+    }
+
     #[test]
     fn upsert_dedupes_by_message_id() {
         let mut s = LfgState::new();
@@ -1049,5 +1442,128 @@ mod tests {
         s.remove_message("a");
         assert_eq!(s.messages.len(), 1);
         assert_eq!(s.messages[0].message_id, "b");
+    }
+
+    // ------------------------------------------------------------------
+    // Long-poll (`GET /actions/long`)
+    //
+    // These guard the property the userscript's memory safety depends on:
+    // one request must cover a long window instead of many short ones. If
+    // the handler ever returns immediately when idle, the client falls back
+    // to a hot request loop and Tampermonkey's per-request retention grows
+    // the WebExtensions process by gigabytes a day.
+    // ------------------------------------------------------------------
+
+    use axum::body::Body;
+    use axum::http::Request;
+    use tower::ServiceExt;
+
+    fn test_app() -> (Router, Arc<Mutex<LfgState>>, broadcast::Sender<()>) {
+        let lfg = Arc::new(Mutex::new(LfgState::new()));
+        let (notify_tx, _) = broadcast::channel::<()>(16);
+        let state = AppState {
+            lfg: lfg.clone(),
+            notify_tx: notify_tx.clone(),
+        };
+        (build_router(state), lfg, notify_tx)
+    }
+
+    fn long_poll_req(wait_ms: u64) -> Request<Body> {
+        Request::builder()
+            .uri(format!("/actions/long?wait_ms={}", wait_ms))
+            .header("authorization", format!("Bearer {}", LFG_AUTH_TOKEN))
+            .header("x-bnet-session", "test-session")
+            .body(Body::empty())
+            .unwrap()
+    }
+
+    async fn body_json(resp: Response) -> serde_json::Value {
+        let bytes = axum::body::to_bytes(resp.into_body(), 1 << 20).await.unwrap();
+        serde_json::from_slice(&bytes).unwrap()
+    }
+
+    #[tokio::test]
+    async fn long_poll_holds_until_deadline_when_idle() {
+        let (app, _lfg, _tx) = test_app();
+        let started = Instant::now();
+        let resp = app.oneshot(long_poll_req(300)).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        // The whole point: an idle poll must block, not return instantly.
+        assert!(
+            started.elapsed() >= Duration::from_millis(250),
+            "idle long-poll returned after {:?}; it must hold ~wait_ms",
+            started.elapsed()
+        );
+        let v = body_json(resp).await;
+        assert_eq!(v["actions"].as_array().unwrap().len(), 0);
+        assert!(!v["boot_id"].as_str().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn long_poll_returns_early_when_action_queued() {
+        let (app, lfg, notify_tx) = test_app();
+
+        // Queue an action shortly after the poll starts, then notify.
+        let writer = tokio::spawn({
+            let lfg = lfg.clone();
+            async move {
+                tokio::time::sleep(Duration::from_millis(100)).await;
+                lfg.lock().unwrap().enqueue_action(LfgActionKind::LeaveVoice);
+                let _ = notify_tx.send(());
+            }
+        });
+
+        let started = Instant::now();
+        let resp = app.oneshot(long_poll_req(10_000)).await.unwrap();
+        writer.await.unwrap();
+
+        // Must wake on the notify, not sit out the full 10s window.
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "long-poll did not wake on notify (took {:?})",
+            started.elapsed()
+        );
+        let v = body_json(resp).await;
+        assert_eq!(v["actions"].as_array().unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn long_poll_reports_boot_id_and_session_state() {
+        let (app, _lfg, _tx) = test_app();
+        let v = body_json(app.oneshot(long_poll_req(0)).await.unwrap()).await;
+
+        // One round-trip has to carry what /health and /register used to,
+        // otherwise the client needs its own extra timers again.
+        assert_eq!(v["boot_id"].as_str().unwrap(), process_boot_id());
+        assert!(v["is_primary"].is_boolean());
+        assert!(v["session_count"].as_u64().unwrap() >= 1);
+    }
+
+    #[tokio::test]
+    async fn long_poll_rejects_bad_token() {
+        let (app, _lfg, _tx) = test_app();
+        let req = Request::builder()
+            .uri("/actions/long?wait_ms=0")
+            .header("authorization", "Bearer wrong")
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn long_poll_wait_is_clamped() {
+        // A client asking for an absurd hold must not pin a task for hours.
+        let (app, _lfg, _tx) = test_app();
+        let resp = tokio::time::timeout(
+            Duration::from_millis(500),
+            app.oneshot(long_poll_req(u64::MAX)),
+        )
+        .await;
+        // Still holding at 500ms is correct (clamped to 60s, not infinite);
+        // what we assert is that the clamp arithmetic didn't overflow and
+        // panic the handler.
+        assert!(resp.is_err(), "expected the poll to still be holding");
     }
 }

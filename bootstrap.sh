@@ -386,6 +386,54 @@ ${end}"
   fi
 }
 
+# Install the `wt` shell function that cd's the *current* shell into a git
+# worktree (a subprocess can't change its parent shell's cwd, so this must be
+# a function, not a standalone script). It wraps `git-worktree --print-dir`,
+# which lives in powerplant/ and is already on PATH. Informational flags like
+# --list / --help / -l / -h are passed straight through with no cd.
+install_wt_function() {
+  local zshrc_file="$ZSHRC_PATH"
+  local gwt="$SCRIPT_DIR/powerplant/git-worktree"
+
+  ensure_dir "$(dirname -- "$zshrc_file")"
+
+  local begin='# >>> neo-mittens wt >>>'
+  local end='# <<< neo-mittens wt <<<'
+  local block
+  block="${begin}
+# wt: create/switch git worktrees under .worktrees and cd into them.
+if [ -x \"${gwt}\" ]; then
+  wt() {
+    case \"\$1\" in
+      -h|--help|-l|--list)
+        command \"${gwt}\" \"\$@\"
+        return
+        ;;
+    esac
+    local __wt_dir
+    __wt_dir=\"\$(command \"${gwt}\" --print-dir \"\$@\")\" || return
+    [ -n \"\$__wt_dir\" ] && cd \"\$__wt_dir\"
+  }
+fi
+${end}"
+
+  if [ -f "$zshrc_file" ] && grep -Fq "$begin" "$zshrc_file"; then
+    tmp="$(mktemp)"
+    awk -v b="$begin" -v e="$end" '
+      BEGIN{inb=0}
+      $0==b {inb=1; next}
+      $0==e {inb=0; next}
+      inb==0 {print}
+    ' "$zshrc_file" >"$tmp"
+    printf "\n%s\n" "$block" >>"$tmp"
+    cat "$tmp" > "$zshrc_file"
+    echo "UPDATE: Managed wt function in $zshrc_file"
+  else
+    printf "\n%s\n" "$block" >>"$zshrc_file"
+    echo "ADD: Managed wt function to $zshrc_file"
+  fi
+}
+
 # 1) Ensure config directories exist
 ensure_dir "$HOME/.config"
 ensure_dir "$NVIM_LUA_DIR"
@@ -525,6 +573,9 @@ install_zsh_pane_title_block
 
 # 6b) Add ssh-themed alias for automatic terminal theming on SSH
 install_ssh_themed_alias
+
+# 6c) Add `wt` git-worktree helper function
+install_wt_function
 
 # 7) Link Hyprland and Rofi configs
 link_symlink "$SCRIPT_DIR/hypr" "$HOME/.config/hypr"
@@ -736,9 +787,11 @@ install_tree_sitter_cli() {
 
   # Try package managers (failures are non-fatal)
   if command -v brew >/dev/null 2>&1; then
-    echo "Installing tree-sitter via brew..."
-    if brew install tree-sitter 2>/dev/null; then
-      echo "OK: tree-sitter installed via brew"
+    echo "Installing tree-sitter-cli via brew..."
+    # NOTE: the `tree-sitter` formula is only the parsing *library*; the CLI
+    # binary required by nvim-treesitter (main branch) is `tree-sitter-cli`.
+    if brew install tree-sitter-cli 2>/dev/null; then
+      echo "OK: tree-sitter-cli installed via brew"
       return 0
     fi
   fi

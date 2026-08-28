@@ -31,15 +31,38 @@
 
 use anyhow::{Context, Result};
 use image::DynamicImage;
-use ratatui_image::picker::Picker;
+use ratatui_image::picker::{Picker, ProtocolType};
 use ratatui_image::protocol::Protocol;
 use ratatui_image::{Image, Resize};
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::widgets::Widget;
 
-use crate::lfg_parse::Tier;
-use crate::term_caps::TermCaps;
+use crate::lfg_parse::{Tier, TIER_COUNT};
+use crate::term_caps::{GraphicsProto, TermCaps};
+
+/// Pixels-per-cell for `Picker::from_fontsize`, obtained WITHOUT touching
+/// stdin.
+///
+/// `crossterm::terminal::window_size()` is a `TIOCGWINSZ` ioctl on the tty:
+/// it asks the kernel, not the terminal, so there is no escape sequence to
+/// write and no reply to read back. That is the whole point -- see the long
+/// note in `RankIcons::try_new` about why reading stdin here wedges the
+/// keyboard.
+///
+/// Terminals that don't report a pixel size return zeros; 8x16 is the
+/// classic VGA cell and only affects icon scaling, never input handling.
+fn detect_font_size() -> (u16, u16) {
+    const FALLBACK: (u16, u16) = (8, 16);
+    match crossterm::terminal::window_size() {
+        Ok(ws) if ws.width > 0 && ws.height > 0 && ws.columns > 0 && ws.rows > 0 => {
+            let w = ws.width / ws.columns;
+            let h = ws.height / ws.rows;
+            if w > 0 && h > 0 { (w, h) } else { FALLBACK }
+        }
+        _ => FALLBACK,
+    }
+}
 
 // ============================================================================
 // Embedded PNG bytes (compiled into the binary)
@@ -47,7 +70,8 @@ use crate::term_caps::TermCaps;
 
 /// Tier icons embedded at compile time. Source: HaruChanHeart/OW2RankPack
 /// (CC-licensed OW2 stream-overlay pack), processed to ~64x58 PNGs of
-/// just the badge area. See `assets/ranks/` for the source files.
+/// just the badge area — except Emerald, which the pack predates. See
+/// `assets/ranks/` for the source files.
 ///
 /// Embedding keeps the binary self-contained — no asset directory to
 /// ship alongside — at the cost of ~50KB of binary size (negligible).
@@ -55,23 +79,48 @@ const ICON_BRONZE:      &[u8] = include_bytes!("../assets/ranks/bronze.png");
 const ICON_SILVER:      &[u8] = include_bytes!("../assets/ranks/silver.png");
 const ICON_GOLD:        &[u8] = include_bytes!("../assets/ranks/gold.png");
 const ICON_PLATINUM:    &[u8] = include_bytes!("../assets/ranks/platinum.png");
+/// Emerald postdates the icon pack, so this one was keyed out of an
+/// in-game rank screenshot (background removed, cropped and scaled to
+/// match the pack's 80px-tall framing).
+const ICON_EMERALD:     &[u8] = include_bytes!("../assets/ranks/emerald.png");
 const ICON_DIAMOND:     &[u8] = include_bytes!("../assets/ranks/diamond.png");
 const ICON_MASTER:      &[u8] = include_bytes!("../assets/ranks/master.png");
 const ICON_GRANDMASTER: &[u8] = include_bytes!("../assets/ranks/grandmaster.png");
 const ICON_CHAMPION:    &[u8] = include_bytes!("../assets/ranks/champion.png");
 
-fn icon_bytes(tier: Tier) -> &'static [u8] {
-    match tier {
+/// PNG for a tier, or `None` when we don't have artwork for it yet.
+///
+/// `None` is a supported state, not an error: the renderer skips the
+/// overlay and the Unicode glyph the list already drew underneath (see
+/// `Tier::glyph`) shows through. That's the fallback for any future tier
+/// Blizzard adds before we have a badge for it.
+fn icon_bytes(tier: Tier) -> Option<&'static [u8]> {
+    Some(match tier {
         Tier::Bronze      => ICON_BRONZE,
         Tier::Silver      => ICON_SILVER,
         Tier::Gold        => ICON_GOLD,
         Tier::Platinum    => ICON_PLATINUM,
+        Tier::Emerald     => ICON_EMERALD,
         Tier::Diamond     => ICON_DIAMOND,
         Tier::Master      => ICON_MASTER,
         Tier::Grandmaster => ICON_GRANDMASTER,
         Tier::Champion    => ICON_CHAMPION,
-    }
+    })
 }
+
+/// Every tier, in ladder order. Index into this is the index into
+/// `RankIcons::protos`.
+const ALL_TIERS: [Tier; TIER_COUNT] = [
+    Tier::Bronze,
+    Tier::Silver,
+    Tier::Gold,
+    Tier::Platinum,
+    Tier::Emerald,
+    Tier::Diamond,
+    Tier::Master,
+    Tier::Grandmaster,
+    Tier::Champion,
+];
 
 // ============================================================================
 // RankIcons: app-state-owned icon set
@@ -85,7 +134,7 @@ pub struct RankIcons {
     /// One Protocol per tier. Pre-built so render is just a draw call.
     /// `None` element means decode failed for that tier (we still ship,
     /// other tiers will render correctly).
-    protos: [Option<Protocol>; 8],
+    protos: [Option<Protocol>; TIER_COUNT],
     /// Width/height in font cells the icon occupies. 2 cells wide, 1
     /// cell tall fits inside our two-line LFG row design without
     /// expanding row height.
@@ -102,40 +151,52 @@ impl RankIcons {
             return Ok(None);
         }
 
-        // Picker reads font cell dimensions (pixels per cell) so it can
-        // size images correctly. `from_query_stdio()` does several
-        // things in one call:
-        //   1. Detects tmux via $TERM / $TERM_PROGRAM and runs
-        //      `tmux set -p allow-passthrough on` so escapes traverse
-        //      to the outer terminal.
-        //   2. Detects outer terminal via env hints (KITTY_WINDOW_ID,
-        //      ITERM_SESSION_ID, WEZTERM_EXECUTABLE).
-        //   3. Sends a graphics capability query through tmux
-        //      passthrough (when in tmux) and parses the response.
-        //   4. Reads font cell size from the same query.
+        // NEVER use `Picker::from_query_stdio()` here.
         //
-        // We do NOT fall back to Picker::from_fontsize() on error --
-        // that constructor produces a Picker with is_tmux=false, which
-        // breaks rendering inside tmux+kitty (escapes leak as raw
-        // text). If the query fails, we report the error to the
-        // caller, which records the failure and falls back to the
-        // Unicode glyph path.
-        let picker = Picker::from_query_stdio()
-            .map_err(|e| anyhow::anyhow!("Picker::from_query_stdio failed: {:?}", e))?;
+        // It writes a capability query to the terminal and reads the reply
+        // back off STDIN, on a detached helper thread with a 1s timeout. The
+        // timeout abandons the thread but cannot cancel its blocking
+        // `read(0, ..)`. Inside tmux the reply frequently never arrives in
+        // the form it wants, so that thread survives for the life of the
+        // process sitting in `read()` on the same fd crossterm polls for key
+        // events -- and it wins races against the event loop.
+        //
+        // The symptom is brutal and looks nothing like a graphics bug: the
+        // TUI silently stops accepting keystrokes. Enter no longer switches
+        // accounts, so no nickname action is ever queued, and the whole
+        // thing looks like "the nickname sync is broken". It also corrupts
+        // the display, because the half-consumed query reply gets painted
+        // into the frame (`┌Accountsc(10rswitchable,P0Gpending...`).
+        //
+        // `from_fontsize()` gets us everything that mattered, with no stdin
+        // access at all: as of ratatui-image 8.1.1 it calls the same
+        // `detect_tmux_and_outer_protocol_from_env()`, so it sets `is_tmux`
+        // correctly AND still runs `tmux set -p allow-passthrough on`. (The
+        // note this replaced claimed from_fontsize forces is_tmux=false --
+        // that was true of an older version and is now stale.)
+        //
+        // We then override the protocol with our own `TermCaps` detection,
+        // which is env-based, deliberately side-effect free, and is already
+        // the thing gating `supports_images()` above.
+        let mut picker = Picker::from_fontsize(detect_font_size());
+        picker.set_protocol_type(match caps.graphics {
+            GraphicsProto::Kitty => ProtocolType::Kitty,
+            GraphicsProto::Sixel => ProtocolType::Sixel,
+            GraphicsProto::ITerm2 => ProtocolType::Iterm2,
+            // Unreachable: supports_images() already returned above.
+            GraphicsProto::None => ProtocolType::Halfblocks,
+        });
 
-        // Decode all 8 PNGs into protocols sized for our 2x1 cell area.
-        // Each protocol caches the encoded image bytes; render is cheap.
+        // Decode the tier PNGs into protocols sized for our 2x1 cell
+        // area. Each protocol caches the encoded image bytes; render is
+        // cheap. Tiers without artwork stay None and fall back to the
+        // Unicode glyph.
         const CELL_W: u16 = 2;
         const CELL_H: u16 = 1;
-        let mut protos: [Option<Protocol>; 8] = Default::default();
-        for (i, tier) in [
-            Tier::Bronze, Tier::Silver, Tier::Gold, Tier::Platinum,
-            Tier::Diamond, Tier::Master, Tier::Grandmaster, Tier::Champion,
-        ]
-        .iter()
-        .enumerate()
-        {
-            match decode(icon_bytes(*tier)) {
+        let mut protos: [Option<Protocol>; TIER_COUNT] = Default::default();
+        for (i, tier) in ALL_TIERS.iter().enumerate() {
+            let Some(bytes) = icon_bytes(*tier) else { continue };
+            match decode(bytes) {
                 Ok(img) => {
                     // Build a non-resizing Protocol at the target cell
                     // area. We use Resize::Fit so the icon scales to fit
@@ -192,10 +253,11 @@ fn tier_index(t: Tier) -> usize {
         Tier::Silver      => 1,
         Tier::Gold        => 2,
         Tier::Platinum    => 3,
-        Tier::Diamond     => 4,
-        Tier::Master      => 5,
-        Tier::Grandmaster => 6,
-        Tier::Champion    => 7,
+        Tier::Emerald     => 4,
+        Tier::Diamond     => 5,
+        Tier::Master      => 6,
+        Tier::Grandmaster => 7,
+        Tier::Champion    => 8,
     }
 }
 
@@ -207,17 +269,24 @@ fn decode(bytes: &[u8]) -> Result<DynamicImage> {
 mod tests {
     use super::*;
 
-    /// Sanity-check that all embedded PNGs decode. This catches build-time
-    /// asset corruption (e.g., someone overwrites the PNG with garbage).
+    /// Sanity-check that every embedded PNG decodes. This catches
+    /// build-time asset corruption (e.g., someone overwrites the PNG
+    /// with garbage). Tiers with no artwork are skipped, not failed.
     #[test]
     fn all_tier_icons_decode() {
-        for tier in [
-            Tier::Bronze, Tier::Silver, Tier::Gold, Tier::Platinum,
-            Tier::Diamond, Tier::Master, Tier::Grandmaster, Tier::Champion,
-        ] {
-            let bytes = icon_bytes(tier);
+        for tier in ALL_TIERS {
+            let Some(bytes) = icon_bytes(tier) else { continue };
             assert!(bytes.len() > 100, "{:?} icon suspiciously short", tier);
             decode(bytes).unwrap_or_else(|e| panic!("{:?} decode failed: {}", tier, e));
+        }
+    }
+
+    /// `tier_index` must agree with the position in `ALL_TIERS`, or
+    /// icons render against the wrong tier.
+    #[test]
+    fn tier_index_matches_all_tiers_order() {
+        for (i, tier) in ALL_TIERS.iter().enumerate() {
+            assert_eq!(tier_index(*tier), i, "index mismatch for {:?}", tier);
         }
     }
 }

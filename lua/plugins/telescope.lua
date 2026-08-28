@@ -16,7 +16,24 @@ function M.setup_keymaps()
   vim.keymap.set('n', '<leader>fj', function() builtin.jumplist() end, {})
   vim.keymap.set('n', '<leader>ft', function() builtin.treesitter() end, {})
   vim.keymap.set('n', '<leader>d', function() builtin.commands() end, {})
-  vim.keymap.set('n', '<leader>k', function() builtin.man_pages({ sections = { 'ALL' } }) end, {})
+  vim.keymap.set('n', '<leader>k', function()
+    -- The default man_pages entry_maker only indexes the FIRST name on an
+    -- apropos line, so family pages (e.g. RAND48 documents drand48, lrand48,
+    -- mrand48, ...) are only findable by their first listed name. Override
+    -- the ordinal with the raw apropos line so every function name and the
+    -- description become fuzzy-searchable. Display + man command are unchanged.
+    local make_entry = require('telescope.make_entry')
+    local opts = { sections = { 'ALL' } }
+    local base = make_entry.gen_from_apropos(opts)
+    opts.entry_maker = function(line)
+      local entry = base(line)
+      if entry then
+        entry.ordinal = line
+      end
+      return entry
+    end
+    builtin.man_pages(opts)
+  end, {})
   vim.keymap.set('n', '<leader>fr', function() builtin.lsp_references(symbol_search_opts) end, {})
   vim.keymap.set('n', '<leader>fo', function() builtin.lsp_outgoing_calls(symbol_search_opts) end, {})
   vim.keymap.set('n', '<leader>fd', function() builtin.lsp_definitions(symbol_search_opts) end, {})

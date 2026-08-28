@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         bnetswitch LFG bridge
 // @namespace    https://github.com/xyzyx/neo-mittens
-// @version      0.9.15
+// @version      0.12.0
 // @description  Taps Discord's WebSocket gateway directly to forward Overwatch LFG embeds + voice-state updates to bnetswitch's local HTTP server. Push-based, complete coverage, no DOM polling.
 // @match        https://discord.com/*
 // @match        https://canary.discord.com/*
@@ -69,9 +69,10 @@
 //   - Filters MESSAGE_CREATE/UPDATE for LFG Tool embeds in
 //     WATCHED_CHANNEL_IDS, parses author + description + voice channel
 //     ID + URL, POSTs to bnetswitch.
-//   - HTTP-polls /actions for join/nickname commands; executes via DOM
-//     walk for nickname-change (no gateway equivalent) and pushState for
-//     VC join.
+//   - HTTP-polls /actions for join/nickname commands. Nickname changes
+//     go through the REST API (PATCH /guilds/<id>/members/@me) using the
+//     token we capture off Discord's own requests, with the old DOM walk
+//     kept as a fallback; VC joins use gateway op 4 + pushState.
 //
 // =============================================================================
 
@@ -87,14 +88,12 @@
   const BNETSWITCH_HOST = "http://127.0.0.1:7172";
   const BNETSWITCH_TOKEN = "bnetswitch-lfg-localhost-only-do-not-expose";
   const LFG_BOT_USERNAME = "LFG Tool";
-  const ACTION_POLL_INTERVAL_MS = 2000;
-  const SESSION_REGISTER_INTERVAL_MS = 20000; // re-register every 20s
 
   // Self-reported version. Match the @version metadata at the top of
   // this file. Exposed via bnetswitchLfgDiagnose so we can confirm
   // which build is actually loaded after a TM update or loader reload
   // (the @version banner is only visible in TM's UI).
-  const USERSCRIPT_VERSION = "0.9.13";
+  const USERSCRIPT_VERSION = "0.10.1";
 
   // Per-userscript-instance ID for multi-browser leader election.
   // bnetswitch elects the most-recently-registered tab as primary
@@ -194,7 +193,15 @@
   // ============================================================================
   // HTTP helper (talks to bnetswitch on localhost)
   // ============================================================================
-  function bnetRequest(method, path, body = null) {
+  // NOTE ON REQUEST COUNT
+  //
+  // Every call here creates a record in Tampermonkey's background page, and
+  // TM does not reliably release completed ones. Memory cost therefore
+  // scales with the NUMBER of calls, not their size. A 2s poll grew the
+  // shared Firefox WebExtensions process to 8 GB in three days. Treat each
+  // bnetRequest as expensive and prefer one long-lived request over many
+  // short ones -- see the transport section near the bottom of this file.
+  function bnetRequest(method, path, body = null, timeoutMs = 5000) {
     return new Promise((resolve, reject) => {
       GM_xmlhttpRequest({
         method,
@@ -221,7 +228,7 @@
         },
         onerror: (err) => reject(new Error(`network error: ${err && err.error}`)),
         ontimeout: () => reject(new Error("timeout")),
-        timeout: 5000,
+        timeout: timeoutMs,
       });
     });
   }
@@ -1447,6 +1454,268 @@
   injectGatewayTap();
 
   // ============================================================================
+  // Monetization / ad removal
+  //
+  // Discord seeds paid surfaces through the client: a sponsored "Quest" bar
+  // (a brand ad with a "Get Reward!" button) above the account panel, Nitro
+  // and Shop tabs in the home sidebar, gift buttons in the chat box and
+  // profile popouts, and Nitro upsells wedged into the emoji picker,
+  // soundboard, and profile editor. None of that is wanted here, so we hide
+  // the lot with a stylesheet injected at document-start.
+  //
+  // WHY CSS AND NOT JS: these are React subtrees Discord re-mounts on
+  // navigation, quest rotation, and popout open/close. A JS sweep would have
+  // to re-run on every re-render (ie a MutationObserver, which v0.8 removed
+  // on purpose). A stylesheet applies to whatever exists at paint time, for
+  // free, forever. document-start injection means the ad never flashes.
+  //
+  // SELECTOR STRATEGY, most durable first:
+  //   1. `data-*` hooks     -- eg li[data-settings-sidebar-item="nitro_panel"].
+  //                            Discord uses these for its own test/telemetry
+  //                            wiring, so they survive restyles.
+  //   2. `href` values      -- eg a[href="/quest-home"]. Routes change far
+  //                            less often than markup.
+  //   3. `aria-label` text  -- eg [aria-label="Send a gift"].
+  //   4. class substrings   -- last resort. Discord ships hashed CSS-module
+  //                            names (`questRewardTile_a1b2c3`), so we match
+  //                            `*=` on the readable prefix, same convention
+  //                            as VOICE_USER_SELECTOR below. We use `*=` and
+  //                            not `^=` because these elements usually carry
+  //                            several classes and the one we want is rarely
+  //                            first.
+  //
+  // Several rules hide a WRAPPER via :has() rather than the ad itself, eg the
+  // quest bar is a `questRewardTile` inside a `mask` box inside the panels
+  // section. Hiding only the tile leaves the mask behind as an empty gap.
+  //
+  // SELECTORS DERIVED FROM: Disblock Origin ("Adblock for Discord", TheSunCat
+  // and contributors) <https://codeberg.org/AllPurposeMat/Disblock-Origin>,
+  // which tracks Discord's markup churn far more closely than we can. That
+  // project declares no license, so we reference its selectors -- which are
+  // factual observations about Discord's DOM -- rather than vendoring its
+  // file. If a group below stops working, diff against upstream first.
+  //
+  // TO TURN A GROUP BACK ON: delete its name from PROMO_BLOCK_GROUPS.
+  // TO DEBUG A GROUP: run bnetswitchQuestProbe() in the console; it reports
+  // per-group match counts, so a group reporting 0 is one Discord renamed.
+  // ============================================================================
+
+  // TOKEN-PREFIX MATCHING (why `[class*="quest"]` is a bug):
+  //
+  // `class` is a space-separated list, and `*=` matches anywhere in the raw
+  // attribute string -- including *inside* a token. So `[class*="quest" i]`
+  // also matches `re|quest|`, and Discord ships plenty of real classes built
+  // on "request" (friend requests, request buttons, join-request rows). Those
+  // are live UI, and we were hiding them.
+  //
+  // The readable half of a hashed CSS-module name is always a token PREFIX
+  // (`questRewardTile_a1b2c3`), never a free-floating substring, so match it
+  // as one: the token either starts the attribute, or follows a space.
+  function classPrefix(name) {
+    return `:is([class^="${name}" i], [class*=" ${name}" i])`;
+  }
+
+  // Same idea for `data-*` values, which delimit words with - or _ rather
+  // than spaces (`data-list-item-id="quests___123"`, `friends-request-...`).
+  function dataPrefix(attr, name) {
+    return (
+      `:is([${attr}^="${name}" i],` +
+      ` [${attr}*="-${name}" i],` +
+      ` [${attr}*="_${name}" i])`
+    );
+  }
+
+  // Groups enabled by default. Remove a name to stop hiding that surface.
+  const PROMO_BLOCK_GROUPS = [
+    "questPanel",
+    "questsMisc",
+    "homeTabs",
+    "gifts",
+    "settingsTabs",
+    "upsells",
+  ];
+
+  const PROMO_RULES = {
+    // The bar from the bottom-left user area -- the one this started with.
+    questPanel: [
+      // Wrapper first: the tile sits in a `mask` box that would otherwise
+      // remain as an empty strip above the account panel.
+      `section[class*="panels"] > [class*="mask"]:has(${classPrefix("questRewardTile")})`,
+      `section[class*="panels"] ${classPrefix("questRewardTile")}`,
+      // Scoped catch-all, in case the tile is renamed. Safe because it is
+      // confined to the user-area panel and the channel sidebar; the real
+      // Quests page renders in the main content area and is untouched.
+      `section[aria-label="User area"] ${classPrefix("quest")}`,
+      `section[class*="panels_" i] ${classPrefix("quest")}`,
+      `[class*="sidebar_" i] ${classPrefix("quest")}`,
+    ],
+
+    // Quest surfaces sprinkled elsewhere in the client.
+    questsMisc: [
+      classPrefix("questBar"),
+      classPrefix("questPromo"),
+      dataPrefix("data-list-item-id", "quest"),
+      dataPrefix("data-test-id", "quest"),
+      // Quest icon on members-list rows.
+      `div[class*="member__"] svg${classPrefix("questsIcon")}`,
+      // Members-list quest popout (identified by its CDN image).
+      'div[id*="popout_"]:has(div[class*="imgWrapper__"] img[src^="https://cdn.discordapp.com/quests"])',
+      // Promoted quest cards in the "Active Now" friends sidebar.
+      `div[class*="itemCard_"] > div div:has(div${classPrefix("questRewardTile")})`,
+      // Completed-quest badge on profiles.
+      'div[class*="tags"] div[role="group"] > a[href="https://discord.com/discovery/quests"]',
+      // Quests block inside the gift inventory.
+      'div[class*="container_"][style*="discovery/quest-mountain"]',
+    ],
+
+    // "Nitro" / "Shop" / "Quests" rows in the home (DM list) sidebar.
+    // Hide the whole <li>, not the <a>, or an empty row is left behind.
+    homeTabs: [
+      'li[role="listitem"]:has(> div > a[href="/store"])',
+      'li[role="listitem"]:has(> div > a[href="/shop"])',
+      'li[role="listitem"]:has(> div > a[href="/quest-home"])',
+      'li[role="listitem"]:has(a[href="/store"], a[href="/shop"], a[href="/quest-home"])',
+    ],
+
+    // Gift buttons: chat box, user header, DM profile sidebar, profile popout.
+    gifts: [
+      '[aria-label="Send a gift"]',
+      '[class*="giftButton" i]',
+      '[class*="profileButtons"] [aria-label*="gift" i]',
+    ],
+
+    // User Settings sidebar. NOTE: `billing_panel` is deliberately NOT hidden.
+    // Hiding the page where you cancel a subscription is how you end up
+    // paying for one you forgot about.
+    settingsTabs: [
+      'li[data-settings-sidebar-item="nitro_panel"]',
+      'li[data-settings-sidebar-item="premium_guild_subscriptions_panel"]',
+      'li[data-settings-sidebar-item="subscriptions_panel"]',
+      'li[data-settings-sidebar-item="gift_panel"]',
+    ],
+
+    // Nitro upsells embedded in otherwise-useful UI. These hide only the
+    // upsell chrome; the feature around it (emoji picker, soundboard,
+    // profile editor) keeps working.
+    upsells: [
+      'aside[class*="upsellContainer"]',
+      'div[class*="floatingNitroUpsell"]',
+      'div[class*="premiumUpsell"]',
+      'button[class*="premiumUpsell"]',
+      'div[class*="upsellOverlayContainer"]',
+      'div[class*="upsellBanner_"]',
+      'div[class*="premiumFeatureBorder"]',
+      'div[class*="premiumIconWrapper"]',
+      // "your message is too long, get Nitro" nag under the character count.
+      '[class*="characterCount"] > div[class*="upsell_"]',
+      // "sneak peek" banner.
+      'div[class*="notice"][class*="colorPremium"]',
+      // Emoji picker: "Powered by Nitro" text, upsell rows, dividers.
+      'div[class*="nitroTextAndBadge"]',
+      'div[class*="tooltipPremiumContent"]',
+      'div[class*="emojiPickerListWrapper"] div[class*="upsellContainer"]',
+      'div[class*="nitroTopDividerContainer"]',
+      'div[class*="nitroBottomDivider"]',
+      'button[class*="shinyButton"]:has(div[class*="premiumSubscribeButton"])',
+      // Profile editor "try it out" / guild profile upsells.
+      'div[class*="tryItOutSection_"]',
+      'div[class*="guildProfileUpsell_"]',
+    ],
+  };
+
+  const PROMO_STYLE_ID = "bnet-no-promo-style";
+
+  // Each group is emitted as its own rule block. CSS discards an ENTIRE rule
+  // if any one selector in its comma list fails to parse, so grouping keeps a
+  // future broken selector from taking every other rule down with it.
+  function buildPromoCss() {
+    const blocks = [];
+    for (const group of PROMO_BLOCK_GROUPS) {
+      const rules = PROMO_RULES[group];
+      if (!rules) {
+        warn("unknown promo block group:", group);
+        continue;
+      }
+      blocks.push(`/* ${group} */\n${rules.join(",\n")} {\n  display: none !important;\n}\n`);
+    }
+    return blocks.join("\n");
+  }
+
+  function injectPromoBlockCss() {
+    try {
+      if (document.getElementById(PROMO_STYLE_ID)) return;
+      const css = buildPromoCss();
+
+      // GM_addElement bypasses Discord's strict CSP (see injectGatewayTap).
+      // Pass an explicit parent: at document-start <head> may not exist yet,
+      // and the default parent lookup would throw.
+      if (typeof GM_addElement === "function") {
+        try {
+          GM_addElement(document.head || document.documentElement, "style", {
+            id: PROMO_STYLE_ID,
+            textContent: css,
+          });
+          return;
+        } catch (e) {
+          warn("GM_addElement(style) failed, falling back:", e && e.message);
+        }
+      }
+
+      const style = document.createElement("style");
+      style.id = PROMO_STYLE_ID;
+      style.textContent = css;
+      (document.head || document.documentElement).appendChild(style);
+    } catch (err) {
+      warn("promo css injection failed:", err && err.message);
+    }
+  }
+
+  injectPromoBlockCss();
+  // Re-assert once <head> exists, in case we ran before it was parsed and
+  // Discord's bundle replaced documentElement's children.
+  if (document.readyState === "loading") {
+    document.addEventListener("DOMContentLoaded", injectPromoBlockCss, { once: true });
+  }
+
+  // Console diagnostic: bnetswitchQuestProbe()
+  //
+  // Reports how many elements each group currently matches. A group at 0 is
+  // either not on screen right now (settings tabs only exist while User
+  // Settings is open) or renamed by Discord. `invalid` lists selectors this
+  // browser refuses to parse, which is the other way a group silently dies.
+  function questProbe() {
+    const out = {
+      styleInjected: !!document.getElementById(PROMO_STYLE_ID),
+      enabled: PROMO_BLOCK_GROUPS.slice(),
+      groups: {},
+      invalid: [],
+    };
+    for (const [group, rules] of Object.entries(PROMO_RULES)) {
+      let count = 0;
+      const hits = [];
+      for (const sel of rules) {
+        let found;
+        try {
+          found = document.querySelectorAll(sel);
+        } catch (err) {
+          out.invalid.push({ group, selector: sel, error: err && err.message });
+          continue;
+        }
+        if (found.length) {
+          count += found.length;
+          hits.push({ selector: sel, n: found.length });
+        }
+      }
+      out.groups[group] = { matched: count, hits };
+    }
+    console.log("[bnetswitch-lfg] promo probe:", out);
+    return out;
+  }
+  try {
+    (typeof unsafeWindow !== "undefined" ? unsafeWindow : window).bnetswitchQuestProbe = questProbe;
+  } catch (_) {}
+
+  // ============================================================================
   // Cross-world event bridge (userscript world side)
   //
   // The page-world script forwards gateway events two ways:
@@ -1699,15 +1968,36 @@
           break;
         }
         case "set_nickname": {
-          const urlMatch = window.location.pathname.match(/^\/channels\/(\d+)/);
-          const currentGuild = urlMatch ? urlMatch[1] : null;
-          if (currentGuild !== action.guild_id) {
-            throw new Error(
-              `wrong guild in view (current=${currentGuild || "none"}, ` +
-                `wanted=${action.guild_id}); switch tabs and try again`
+          // PRIMARY: REST. Guild-agnostic and immune to client redesigns.
+          try {
+            await setServerNicknameViaApi(action.guild_id, action.nickname);
+            break;
+          } catch (apiErr) {
+            warn(
+              "nickname REST path failed, trying DOM fallback:",
+              apiErr.message
             );
+            // FALLBACK: drive the UI like a human. Only possible when the
+            // tab is already viewing the target guild -- the popout we
+            // click lives in that guild's header.
+            const urlMatch = window.location.pathname.match(/^\/channels\/(\d+)/);
+            const currentGuild = urlMatch ? urlMatch[1] : null;
+            if (currentGuild !== action.guild_id) {
+              throw new Error(
+                `REST failed (${apiErr.message}) and DOM fallback needs the ` +
+                  `guild in view (current=${currentGuild || "none"}, ` +
+                  `wanted=${action.guild_id})`
+              );
+            }
+            try {
+              await setServerNickname(action.nickname);
+            } catch (domErr) {
+              throw new Error(
+                `REST failed (${apiErr.message}); DOM fallback failed ` +
+                  `(${domErr.message})`
+              );
+            }
           }
-          await setServerNickname(action.nickname);
           break;
         }
         case "leave_voice": {
@@ -1772,41 +2062,49 @@
     );
   }
 
-  async function pollActions() {
-    try {
-      const actions = await bnetRequest("GET", "/actions");
-      if (Array.isArray(actions)) {
-        for (const a of actions) await executeAction(a);
-      }
-    } catch (e) {
-      if (!e.message.includes("network error")) debug("poll error:", e.message);
-    }
+  // Track bnetswitch's process boot id. A change means it restarted and its
+  // in-memory state is wiped, so we must re-backfill the LFG channel
+  // history. This used to be its own 30s poll of /health; the boot id now
+  // rides along on the SSE "boot" event and on every long-poll response, so
+  // it costs zero extra requests.
+  let __bnet_last_boot_id = null;
+  function noteBootId(boot) {
+    if (!boot) return;
+    const isFirstConnect = __bnet_last_boot_id === null;
+    const isRestart = !isFirstConnect && boot !== __bnet_last_boot_id;
+    __bnet_last_boot_id = boot;
+    if (!isFirstConnect && !isRestart) return;
+    log(
+      isFirstConnect
+        ? "connected to bnetswitch (boot_id=" + boot + "); scheduling backfill"
+        : "bnetswitch restarted (boot_id changed); re-backfilling LFG history"
+    );
+    __bnet_backfilled_channels.clear();
+    __bnet_backfill_in_progress = false;
+    scheduleBackfill();
   }
 
-  // Poll bnetswitch's /health periodically. If the boot_id changes,
-  // bnetswitch was restarted -- its in-memory state is wiped, so we
-  // need to re-backfill the LFG channel history. Uses bnetRequest
-  // (GM_xmlhttpRequest) so localhost CORS isn't a problem.
-  let __bnet_last_boot_id = null;
-  async function pollBootId() {
-    try {
-      const body = await bnetRequest("GET", "/health");
-      const boot = body && body.boot_id;
-      if (!boot) return;
-      if (__bnet_last_boot_id === null) {
-        __bnet_last_boot_id = boot;
-        return;
-      }
-      if (boot !== __bnet_last_boot_id) {
-        log("bnetswitch restarted (boot_id changed); re-backfilling LFG history");
-        __bnet_last_boot_id = boot;
-        __bnet_backfilled_channels.clear();
-        __bnet_backfill_in_progress = false;
-        scheduleBackfill();
-      }
-    } catch (e) {
-      // Ignore network errors -- bnetswitch may be temporarily down.
-    }
+  function noteSessionRole(res) {
+    if (!res || typeof res.is_primary !== "boolean") return;
+    const wasPrimary = window.__bnet_is_primary;
+    window.__bnet_is_primary = res.is_primary;
+    if (wasPrimary === window.__bnet_is_primary) return;
+    log(
+      "session " + SESSION_ID.slice(0, 8) +
+        " is " + (res.is_primary ? "PRIMARY" : "secondary") +
+        " (" + (res.session_count || 0) + " active)"
+    );
+  }
+
+  /** Apply a `/actions/long` response: boot id, leader-election state and
+   *  any queued actions. One round-trip carries what used to take three
+   *  separate periodic requests (/actions, /health, /register). */
+  async function applyServerSnapshot(res) {
+    if (!res || typeof res !== "object") return;
+    noteSessionRole(res);
+    noteBootId(res.boot_id);
+    if (!Array.isArray(res.actions)) return;
+    for (const a of res.actions) await executeAction(a);
   }
 
   // ============================================================================
@@ -1919,17 +2217,34 @@
   // ============================================================================
   // Voice status reporting (read from gateway state, no DOM needed)
   // ============================================================================
-  async function reportVoiceStatus() {
+  // Voice state changes a handful of times an hour at most, but this used to
+  // POST an identical payload every 30s -- ~2.9k GM_xmlhttpRequests/day, all
+  // retained by Tampermonkey. Send only on actual change, plus a slow
+  // heartbeat so a freshly restarted bnetswitch still learns our state.
+  const STATUS_HEARTBEAT_MS = 5 * 60 * 1000;
+  let __bnet_last_status_json = null;
+  let __bnet_last_status_at = 0;
+
+  async function reportVoiceStatus(force = false) {
     if (!GW.meId) return;
     const myVC = GW.userVoiceChannel.get(GW.meId);
     const ch = myVC ? GW.channels.get(myVC) : null;
+    const payload = {
+      in_voice: !!myVC,
+      voice_channel_id: myVC || null,
+      voice_channel_name: ch?.name || null,
+    };
+    const json = JSON.stringify(payload);
+    const stale = Date.now() - __bnet_last_status_at > STATUS_HEARTBEAT_MS;
+    if (!force && json === __bnet_last_status_json && !stale) return;
+    __bnet_last_status_json = json;
+    __bnet_last_status_at = Date.now();
     try {
-      await bnetRequest("POST", "/status", {
-        in_voice: !!myVC,
-        voice_channel_id: myVC || null,
-        voice_channel_name: ch?.name || null,
-      });
-    } catch (e) {}
+      await bnetRequest("POST", "/status", payload);
+    } catch (e) {
+      // Let the next tick retry; don't cache a payload we failed to send.
+      __bnet_last_status_json = null;
+    }
   }
 
   // ============================================================================
@@ -2121,8 +2436,7 @@
    *  guild-member endpoint). For people actually in the voice channel the
    *  gateway cache almost always hits, so this is a rare path. */
   async function fetchDisplayName(userId) {
-    const token = __bnet_auth_token ||
-      (typeof usw !== "undefined" && usw.__bnet_auth_token) || null;
+    const token = getAuthToken();
     if (!token) {
       debug("name-copy: no auth token for REST profile fallback");
       return null;
@@ -2325,11 +2639,27 @@
       (el.className || "").toString().includes("hiddenVisually") ||
       (el.className || "").toString().includes("comboBoxInput");
 
+    // Fast path: Discord labels the field for screen readers. This
+    // survives class-name churn, which the label walk below does not.
+    const byLabel = document.querySelector(
+      'input[aria-label*="Nickname" i], input[placeholder*="Nickname" i]'
+    );
+    if (byLabel && !isWrongInput(byLabel)) return byLabel;
+
+    // Slow path: find the "Server Nickname" heading and walk forward to
+    // the first plausible text input under it. The heading text has been
+    // "Server Nickname" and "Nickname" at different times, so match
+    // loosely instead of on an exact string.
     const allEls = document.querySelectorAll(
-      'h1, h2, h3, h4, [class*="title_"], [class*="formText"]'
+      'h1, h2, h3, h4, label, legend, [class*="title_"], [class*="formText"]'
     );
     for (const h of allEls) {
-      if ((h.textContent || "").trim() !== "Server Nickname") continue;
+      const text = (h.textContent || "").trim();
+      if (!/^(server\s+)?nickname$/i.test(text)) continue;
+      // The input is sometimes a descendant of the label rather than a
+      // sibling of the heading.
+      const inner = h.querySelector?.('input[type="text"], input:not([type])');
+      if (inner && !isWrongInput(inner)) return inner;
       let el = h.nextElementSibling;
       for (let depth = 0; depth < 6 && el; depth++) {
         const candidate = el.querySelector?.('input[type="text"], input:not([type])');
@@ -2361,8 +2691,127 @@
     );
   }
 
+  /** The captured Discord auth token, from whichever world saw it first.
+   *  Populated by the XHR/fetch header hooks installed in the page world
+   *  (see "Auth token capture" above). */
+  function getAuthToken() {
+    return (
+      __bnet_auth_token ||
+      (typeof usw !== "undefined" && usw.__bnet_auth_token) ||
+      null
+    );
+  }
+
+  /** Set our per-server nickname through Discord's REST API.
+   *
+   *  This is the exact request Discord's own client fires when you hit
+   *  Save in the per-server profile modal:
+   *
+   *      PATCH /api/v9/guilds/<guild_id>/members/@me   {"nick": "..."}
+   *
+   *  Preferred over the DOM walk in setServerNickname() because it:
+   *    - doesn't care what Discord's markup looks like this week
+   *      (the DOM path broke silently whenever they reshuffled the
+   *      guild-header popout or the profile modal), and
+   *    - works no matter which guild/channel the tab is viewing --
+   *      the DOM path can only rename you in the guild on screen.
+   *
+   *  Requires the auth token, which we only have after Discord has made
+   *  at least one authenticated request in this tab. Callers should fall
+   *  back to the DOM path when this throws.
+   */
+  async function setServerNicknameViaApi(guildId, nickname) {
+    if (!guildId) throw new Error("no guild_id in action");
+    // An action can land before Discord has made its first authenticated
+    // request in a freshly-loaded tab. Give the header hooks a moment to
+    // catch one rather than burning the action -- actions aren't retried.
+    let token = getAuthToken();
+    for (let i = 0; i < 20 && !token; i++) {
+      await sleep(250);
+      token = getAuthToken();
+    }
+    if (!token) throw new Error("no Discord auth token captured yet");
+
+    const desired = (nickname || "").trim();
+    log(
+      "setServerNicknameViaApi: guild=" + guildId,
+      JSON.stringify(desired)
+    );
+
+    const headers = {
+      authorization: token,
+      "content-type": "application/json",
+      accept: "*/*",
+    };
+    // Discord fingerprints its own client with x-super-properties (and
+    // sends the user's locale alongside). Some write endpoints get
+    // stricter treatment without them, so replay whatever the page world
+    // captured off a real request rather than fabricating values.
+    const superProps = typeof usw !== "undefined" ? usw.__bnet_super_props : null;
+    if (superProps) headers["x-super-properties"] = superProps;
+    const locale = typeof usw !== "undefined" ? usw.__bnet_locale : null;
+    if (locale) headers["x-discord-locale"] = locale;
+
+    const res = await fetch("/api/v9/guilds/" + guildId + "/members/@me", {
+      method: "PATCH",
+      credentials: "include",
+      headers,
+      // "" clears the nickname (falls back to display name) -- same as
+      // what the modal's Reset button sends.
+      body: JSON.stringify({ nick: desired }),
+    });
+
+    if (!res.ok) {
+      const detail = await res.text().catch(() => "");
+      throw new Error(
+        "PATCH members/@me -> " + res.status + " " + detail.slice(0, 200)
+      );
+    }
+
+    // 200 carries the updated member object. VERIFY the value actually
+    // landed -- do not infer success from the status code.
+    //
+    // Discord will happily 200 a nickname change it then does not apply:
+    // AutoMod name filters accept the write and revert it, and a quarantined
+    // member (flags bit 7) has every name change silently dropped. This code
+    // used to only *log* the returned nick while still acking success, so a
+    // rejected rename was indistinguishable from a successful one -- the
+    // action reported OK to bnetswitch and the name never moved. That is the
+    // entire reason this failed invisibly, so the comparison below is the
+    // load-bearing part of this function.
+    const member = await res.json().catch(() => null);
+    if (!member || typeof member.nick === "undefined") {
+      throw new Error(
+        "PATCH members/@me -> " + res.status +
+          " but the response carried no `nick` field"
+      );
+    }
+
+    // Discord trims surrounding whitespace, so compare on the same footing.
+    const applied = (member.nick || "").trim();
+    if (applied !== desired) {
+      // Surface the known silent-revert cause explicitly; "AutoMod ate it"
+      // is not something you would ever guess from a 200.
+      const AUTOMOD_QUARANTINED_USERNAME = 1 << 7;
+      const quarantined =
+        typeof member.flags === "number" &&
+        (member.flags & AUTOMOD_QUARANTINED_USERNAME) !== 0;
+      throw new Error(
+        "Discord accepted the request (" + res.status + ") but kept nick=" +
+          JSON.stringify(member.nick) + " instead of " + JSON.stringify(desired) +
+          (quarantined
+            ? " -- member is AUTOMOD_QUARANTINED_USERNAME, so this guild's " +
+              "AutoMod is blocking the name"
+            : " -- rejected by a guild name filter, or you lack Change Nickname here")
+      );
+    }
+
+    log("nickname set via API; Discord confirms nick=" + JSON.stringify(applied));
+    return applied;
+  }
+
   async function setServerNickname(nickname) {
-    log("setServerNickname:", JSON.stringify(nickname));
+    log("setServerNickname (DOM fallback):", JSON.stringify(nickname));
 
     const dropdown = document.querySelector('[aria-label*="server actions"]');
     if (!dropdown) throw new Error("server-actions dropdown not found");
@@ -2371,12 +2820,29 @@
       dropdown.click();
       await sleep(150);
 
-      const editProfile = document.getElementById(
-        "guild-header-popout-change-nickname"
-      );
+      // The menu item's id has changed over time
+      // ("...change-nickname" -> "...edit-server-profile"), so fall back
+      // to matching the visible label of any menu item.
+      let editProfile =
+        document.getElementById("guild-header-popout-change-nickname") ||
+        document.getElementById("guild-header-popout-edit-server-profile");
       if (!editProfile) {
+        editProfile = Array.from(
+          document.querySelectorAll('[role="menuitem"]')
+        ).find((el) =>
+          /nickname|server profile/i.test((el.textContent || "").trim())
+        );
+      }
+      if (!editProfile) {
+        const items = Array.from(document.querySelectorAll('[role="menuitem"]'))
+          .map((el) => (el.textContent || "").trim())
+          .filter(Boolean);
         document.body.click();
-        throw new Error('"Edit Per-server Profile" menu item not found');
+        throw new Error(
+          '"Edit Server Profile" menu item not found (menu items seen: ' +
+            (items.length ? items.join(" / ") : "none") +
+            ")"
+        );
       }
       editProfile.click();
 
@@ -2459,12 +2925,38 @@
   // after a system suspend, which often never fires `onerror`) and we force
   // a reconnect.
   const SSE_HEARTBEAT_TIMEOUT_MS = 45000;
+  // How often to re-probe native EventSource while a fallback is healthy.
+  // Only a user granting Local Network Access can change the answer, so
+  // this is deliberately slow -- each probe costs nothing but noise.
+  const NATIVE_REPROBE_MS = 10 * 60 * 1000;
   let sseSource = null;
   let sseReconnectTimer = null;
   let lastSseActivityAt = 0;
 
   function noteSseActivity() {
     lastSseActivityAt = Date.now();
+  }
+
+  /** Single handler for server events, shared by the native EventSource and
+   *  the GM streaming transport so both paths behave identically. */
+  function handleServerEvent(type, data) {
+    noteSseActivity();
+    if (type === "ping") return;
+    if (type === "action") {
+      try {
+        executeAction(JSON.parse(data));
+      } catch (e) {
+        warn("action parse/execute error:", e.message);
+      }
+      return;
+    }
+    if (type === "boot") {
+      try {
+        noteBootId(JSON.parse(data).boot_id);
+      } catch (e) {
+        warn("boot event error:", e.message);
+      }
+    }
   }
 
   function clearSseReconnectTimer() {
@@ -2486,9 +2978,22 @@
   // (in onopen) -- we never permanently downgrade to polling anymore.
   function scheduleSseReconnect() {
     clearSseReconnectTimer();
-    const base = SSE_BASE_RETRY_DELAY_MS * Math.pow(2, Math.min(sseRetryCount, 5));
-    const delay = Math.min(SSE_MAX_RETRY_DELAY_MS, base) * (0.5 + Math.random() * 0.5);
-    enablePollingFallback();
+    // Bring up (or keep) a fallback so actions keep flowing regardless of
+    // what the native connection does.
+    enableFallbackTransport();
+
+    // If a fallback is carrying traffic there's nothing to gain from
+    // retrying EventSource on a fast timer: Local Network Access permission
+    // only changes through an explicit user grant, never spontaneously. So
+    // re-probe the native path slowly, and only hammer it when we have no
+    // working transport at all.
+    const base = fallbackHealthy()
+      ? NATIVE_REPROBE_MS
+      : Math.min(
+          SSE_MAX_RETRY_DELAY_MS,
+          SSE_BASE_RETRY_DELAY_MS * Math.pow(2, Math.min(sseRetryCount, 5))
+        );
+    const delay = base * (0.5 + Math.random() * 0.5);
     sseReconnectTimer = setTimeout(connectSSE, delay);
   }
 
@@ -2512,57 +3017,16 @@
 
     noteSseActivity();
 
-    sseSource.addEventListener("action", (event) => {
-      noteSseActivity();
-      try {
-        const action = JSON.parse(event.data);
-        executeAction(action);
-      } catch (e) {
-        warn("SSE action parse/execute error:", e.message);
-      }
-    });
-
-    // Heartbeat: just proof-of-life, updates the activity timestamp.
-    sseSource.addEventListener("ping", () => {
-      noteSseActivity();
-    });
-
-    sseSource.addEventListener("boot", (event) => {
-      noteSseActivity();
-      try {
-        const data = JSON.parse(event.data);
-        const boot = data.boot_id;
-        if (!boot) return;
-        const isFirstConnect = __bnet_last_boot_id === null;
-        const isRestart = !isFirstConnect && boot !== __bnet_last_boot_id;
-        __bnet_last_boot_id = boot;
-        if (isFirstConnect) {
-          // First SSE connect: bnetswitch's state is empty (it just
-          // started or we just connected). Trigger backfill so the
-          // LFG view is populated with recent history immediately.
-          log("SSE: first connect (boot_id=" + boot + "); scheduling backfill");
-          __bnet_backfilled_channels.clear();
-          __bnet_backfill_in_progress = false;
-          scheduleBackfill();
-          return;
-        }
-        if (isRestart) {
-          log("SSE: bnetswitch restarted (boot_id changed); re-backfilling");
-          __bnet_backfilled_channels.clear();
-          __bnet_backfill_in_progress = false;
-          scheduleBackfill();
-        }
-      } catch (e) {
-        warn("SSE boot event error:", e.message);
-      }
-    });
+    sseSource.addEventListener("action", (e) => handleServerEvent("action", e.data));
+    sseSource.addEventListener("ping", () => handleServerEvent("ping", ""));
+    sseSource.addEventListener("boot", (e) => handleServerEvent("boot", e.data));
 
     sseSource.onopen = () => {
-      log("SSE connected to bnetswitch");
+      log("SSE connected to bnetswitch (native EventSource)");
       sseRetryCount = 0;
       noteSseActivity();
-      // SSE is handling actions; tear down the temporary polling bridge.
-      disablePollingFallback();
+      // Native SSE is carrying actions; tear down the fallback bridge.
+      disableFallbackTransport();
       // Re-assert leadership/liveness immediately on (re)connect.
       registerSession();
     };
@@ -2580,11 +3044,26 @@
   // heartbeat timeout, the socket is almost certainly half-open (typical
   // after a suspend/resume). Force a fresh connection.
   function sseHeartbeatWatchdog() {
-    if (!sseSource) return; // a reconnect is already scheduled / in flight
-    if (Date.now() - lastSseActivityAt > SSE_HEARTBEAT_TIMEOUT_MS) {
+    if (Date.now() - lastSseActivityAt <= SSE_HEARTBEAT_TIMEOUT_MS) return;
+    if (sseSource) {
       warn("SSE silent >" + SSE_HEARTBEAT_TIMEOUT_MS + "ms; forcing reconnect");
       sseRetryCount = 0; // resume case -- reconnect promptly
       connectSSE();
+      return;
+    }
+    // The stream transport can go silent the same way a native SSE socket
+    // can -- half-open after a suspend, never firing an error -- so it needs
+    // an external nudge.
+    //
+    // The long-poll deliberately does NOT get one: every one of its requests
+    // has a hard timeout, so it cannot wedge, and it already backs off on
+    // its own. Rebuilding it here would reset that backoff every 15s and
+    // turn "bnetswitch is down" into thousands of requests a day, which is
+    // the exact failure mode this whole transport rewrite exists to avoid.
+    if (streamActive()) {
+      warn("stream transport silent >" + SSE_HEARTBEAT_TIMEOUT_MS + "ms; rebuilding");
+      disableFallbackTransport();
+      enableFallbackTransport();
     }
   }
 
@@ -2601,31 +3080,282 @@
     }
   }
 
-  let sseFallbackActionInterval = null;
-  let sseFallbackRegisterInterval = null;
+  // ==========================================================================
+  // Fallback transports (used when native EventSource can't connect)
+  //
+  // Firefox 153+ enforces Local Network Access permission, so an EventSource
+  // from https://discord.com to http://127.0.0.1 is refused before it is
+  // even attempted:
+  //
+  //   Local Network Access permission required: top-level site
+  //   "https://discord.com" ... target "http://127.0.0.1:7172/events"
+  //   via fetch. Secure context: True
+  //
+  // Only GM_xmlhttpRequest is exempt, because it runs in the Tampermonkey
+  // background page under `@connect 127.0.0.1`. That brings a hard
+  // constraint: Tampermonkey keeps a record per GM_xmlhttpRequest and does
+  // not reliably free completed ones, so cost scales with REQUEST COUNT.
+  // The old 2s poll of /actions issued ~43k requests/day and grew the shared
+  // Firefox WebExtensions process to 8 GB in three days.
+  //
+  // Both tiers below exist to minimise request count:
+  //
+  //   1. stream   -- ONE request held open for the whole session, reading
+  //                  the same SSE stream native EventSource would have.
+  //   2. longpoll -- one request per 25s (or per action), ~12x fewer than
+  //                  the old poll. Used only if tier 1 is unavailable.
+  //
+  // There is deliberately no short-poll tier any more.
+  // ==========================================================================
 
-  function enablePollingFallback() {
-    if (sseFallbackActionInterval) return; // already active
-    log("enabling HTTP polling fallback (SSE unavailable)");
-    sseFallbackActionInterval = setInterval(pollActions, ACTION_POLL_INTERVAL_MS);
-    sseFallbackRegisterInterval = setInterval(registerSession, SESSION_REGISTER_INTERVAL_MS);
-    // Also do an immediate register so we don't wait 20s for leader election.
-    registerSession();
+  // How long to wait for tier 1 to produce a readable stream before deciding
+  // this Tampermonkey build doesn't support `responseType: "stream"`.
+  const STREAM_PROBE_MS = 5000;
+  let streamSupported = null; // null = untested, false = known unsupported
+  let streamHandle = null;
+  let streamProbeTimer = null;
+  let streamReading = false;
+
+  function streamActive() {
+    return !!streamHandle;
   }
 
-  function disablePollingFallback() {
-    if (sseFallbackActionInterval) {
-      clearInterval(sseFallbackActionInterval);
-      sseFallbackActionInterval = null;
+  /** Tier 1: consume /events through a single streaming GM_xmlhttpRequest.
+   *  `responseType: "stream"` yields a ReadableStream on the response. The
+   *  request never "completes" (the SSE stream stays open), so the body is
+   *  delivered at onloadstart rather than onload. Returns false if we can
+   *  tell up front that this won't work. */
+  function startStreamTransport() {
+    if (streamHandle) return true;
+    if (typeof GM_xmlhttpRequest !== "function") return false;
+
+    const url =
+      BNETSWITCH_HOST +
+      "/events?token=" + encodeURIComponent(BNETSWITCH_TOKEN) +
+      "&session=" + encodeURIComponent(SESSION_ID);
+
+    const consume = (resp) => {
+      const body = resp && resp.response;
+      if (streamReading || !body || typeof body.getReader !== "function") return;
+      streamReading = true;
+      streamSupported = true;
+      if (streamProbeTimer) {
+        clearTimeout(streamProbeTimer);
+        streamProbeTimer = null;
+      }
+      log("connected to bnetswitch (GM stream transport)");
+      noteSseActivity();
+      readSseStream(body)
+        .catch((e) => debug("stream ended:", e && e.message))
+        .then(() => {
+          // Stream closed (server restart, suspend, abort). Rebuild.
+          if (!streamHandle) return;
+          stopStreamTransport();
+          scheduleSseReconnect();
+        });
+    };
+
+    const fail = () => {
+      if (!streamHandle) return;
+      stopStreamTransport();
+      scheduleSseReconnect();
+    };
+
+    try {
+      streamHandle = GM_xmlhttpRequest({
+        method: "GET",
+        url,
+        responseType: "stream",
+        headers: { Accept: "text/event-stream" },
+        onloadstart: consume,
+        onprogress: consume, // some builds surface the body here first
+        onload: fail,
+        onerror: fail,
+        ontimeout: fail,
+      });
+    } catch (e) {
+      warn("GM stream transport unavailable:", e && e.message);
+      streamSupported = false;
+      streamHandle = null;
+      return false;
     }
-    if (sseFallbackRegisterInterval) {
-      clearInterval(sseFallbackRegisterInterval);
-      sseFallbackRegisterInterval = null;
+
+    // If no ReadableStream shows up in time, this TM build doesn't support
+    // streaming. Downgrade permanently to tier 2.
+    streamProbeTimer = setTimeout(() => {
+      streamProbeTimer = null;
+      if (streamReading) return;
+      streamSupported = false;
+      log("GM stream transport unsupported here; using long-poll");
+      stopStreamTransport();
+      startLongPollTransport();
+    }, STREAM_PROBE_MS);
+
+    return true;
+  }
+
+  function stopStreamTransport() {
+    if (streamProbeTimer) {
+      clearTimeout(streamProbeTimer);
+      streamProbeTimer = null;
     }
+    if (streamHandle) {
+      try { streamHandle.abort(); } catch (_) { /* ignore */ }
+      streamHandle = null;
+    }
+    streamReading = false;
+  }
+
+  /** Minimal SSE frame reader over a ReadableStream, matching what
+   *  EventSource does: accumulate until a blank line, then dispatch. */
+  async function readSseStream(stream) {
+    const reader = stream.getReader();
+    const decoder = new TextDecoder();
+    let buf = "";
+    // A CR at the very end of a chunk is ambiguous: it may be a bare-CR line
+    // terminator, or the first half of a CRLF whose LF lands in the next
+    // chunk. Hold it back until we can tell, otherwise CRLF would normalise
+    // to two line breaks and split a frame in the wrong place.
+    let pendingCR = false;
+    for (;;) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      noteSseActivity();
+      let chunk =
+        typeof value === "string"
+          ? value
+          : decoder.decode(value, { stream: true });
+      if (pendingCR) {
+        chunk = "\r" + chunk;
+        pendingCR = false;
+      }
+      if (chunk.endsWith("\r")) {
+        pendingCR = true;
+        chunk = chunk.slice(0, -1);
+      }
+      // SSE permits LF, CRLF or bare CR as terminators. Normalise to LF so a
+      // single "\n\n" scan finds every frame boundary.
+      buf += chunk.replace(/\r\n?/g, "\n");
+      drain();
+    }
+
+    // At EOF a held-back CR can no longer be the front half of a CRLF, so
+    // it was a bare-CR terminator: resolve it and flush any final frame.
+    if (pendingCR) {
+      buf += "\n";
+      drain();
+    }
+
+    function drain() {
+      let idx;
+      while ((idx = buf.indexOf("\n\n")) !== -1) {
+        dispatchSseFrame(buf.slice(0, idx));
+        buf = buf.slice(idx + 2);
+      }
+      // Safety valve: never let a server that emits no frame boundary grow
+      // this buffer without bound (that would just move the leak in-page).
+      if (buf.length > 1 << 20) buf = "";
+    }
+  }
+
+  function dispatchSseFrame(frame) {
+    let event = "message";
+    const data = [];
+    for (const raw of frame.split("\n")) {
+      const line = raw.endsWith("\r") ? raw.slice(0, -1) : raw;
+      if (!line || line.startsWith(":")) continue; // blank or comment
+      const colon = line.indexOf(":");
+      const field = colon === -1 ? line : line.slice(0, colon);
+      let val = colon === -1 ? "" : line.slice(colon + 1);
+      if (val.startsWith(" ")) val = val.slice(1);
+      if (field === "event") event = val;
+      else if (field === "data") data.push(val);
+    }
+    if (data.length) handleServerEvent(event, data.join("\n"));
+  }
+
+  // -------------------------------------------------------------------------
+  // Tier 2: long-poll
+  // -------------------------------------------------------------------------
+  const LONG_POLL_WAIT_MS = 25000;
+  const LONG_POLL_MIN_BACKOFF_MS = 2000;
+  const LONG_POLL_MAX_BACKOFF_MS = 30000;
+  let longPollActive = false;
+  // Incremented on every stop so an in-flight loop that is mid-await knows
+  // it has been superseded and exits instead of racing a newer loop.
+  let longPollGen = 0;
+
+  function startLongPollTransport() {
+    if (longPollActive) return;
+    longPollActive = true;
+    log("using long-poll transport (" + LONG_POLL_WAIT_MS + "ms holds)");
+    longPollLoop(++longPollGen);
+  }
+
+  function stopLongPollTransport() {
+    if (!longPollActive) return;
+    longPollActive = false;
+    longPollGen++;
+  }
+
+  async function longPollLoop(gen) {
+    let backoff = LONG_POLL_MIN_BACKOFF_MS;
+    while (longPollActive && gen === longPollGen) {
+      try {
+        const res = await bnetRequest(
+          "GET",
+          "/actions/long?wait_ms=" + LONG_POLL_WAIT_MS,
+          null,
+          // Must outlast the server-side hold, or every poll would abort as
+          // a timeout and we'd be back to a fast retry loop.
+          LONG_POLL_WAIT_MS + 10000
+        );
+        // Being superseded means STOP LOOPING -- it does not mean throw this
+        // response away. The server drains the action queue to build it, so
+        // whatever arrived here exists nowhere else; discarding it lost the
+        // action outright (bnetswitch now reports these as "delivered but
+        // never confirmed"). Apply first, exit after.
+        const superseded = !longPollActive || gen !== longPollGen;
+        if (!superseded) {
+          noteSseActivity();
+          backoff = LONG_POLL_MIN_BACKOFF_MS;
+        }
+        await applyServerSnapshot(res);
+        if (superseded) return;
+      } catch (e) {
+        if (!longPollActive || gen !== longPollGen) return;
+        // bnetswitch is down or restarting. Back off exponentially: a dead
+        // server must not turn the long-poll into a fast retry loop, which
+        // is exactly the request-count problem this design avoids.
+        await sleep(backoff);
+        backoff = Math.min(backoff * 2, LONG_POLL_MAX_BACKOFF_MS);
+      }
+    }
+  }
+
+  // -------------------------------------------------------------------------
+  // Transport selection
+  // -------------------------------------------------------------------------
+  function enableFallbackTransport() {
+    if (streamActive() || longPollActive) return; // one is enough
+    if (streamSupported === false) {
+      startLongPollTransport();
+      return;
+    }
+    if (!startStreamTransport()) startLongPollTransport();
+  }
+
+  function disableFallbackTransport() {
+    stopStreamTransport();
+    stopLongPollTransport();
+  }
+
+  function fallbackHealthy() {
+    return streamReading || longPollActive;
   }
 
   function start() {
-    log("bnetswitch LFG bridge starting (v0.9.15, SSE push + gateway tap)");
+    log("bnetswitch LFG bridge starting (v0.10.0, SSE push + gateway tap)");
     log("server:", BNETSWITCH_HOST);
     log("watched channels:", WATCHED_CHANNEL_IDS.join(", ") || "all");
 
@@ -2655,19 +3385,18 @@
     // Network came back (Wi-Fi reconnect, VPN flap, etc.).
     window.addEventListener("online", () => ensureConnected("online"));
 
-    // Voice status: still push-based (us -> server), reduced to 30s.
-    // The SSE connection's keepalive implicitly tells the server we're
-    // alive; voice status is just supplemental metadata.
+    // Voice status: push-based (us -> server). The 30s tick only decides
+    // whether anything is worth sending; reportVoiceStatus itself skips
+    // unchanged payloads, so a quiet session issues no requests at all.
     setInterval(reportVoiceStatus, 30000);
 
-    // Boot-id detection is handled by the SSE "boot" event now.
-    // Keep a slow fallback poll in case SSE never connects.
-    pollBootId();
-    setInterval(pollBootId, 30000);
+    // Boot-id detection rides on the SSE "boot" event and on every
+    // long-poll response -- no dedicated /health poll any more.
 
-    // Session registration: the SSE connection URL includes session=<id>
-    // and the server registers/refreshes on every keepalive read. Still
-    // do an explicit register at boot for immediate leader election.
+    // Session registration: every transport registers the session for us
+    // (/events via its query params, /actions/long via the X-Bnet-Session
+    // header). One explicit register at boot gives immediate leader
+    // election before the first transport is up.
     registerSession();
     // On tab focus: promote this session AND make sure the bridge is live
     // (the tab may have been hidden through a suspend that killed the socket).
@@ -2691,17 +3420,7 @@
         session_id: SESSION_ID,
         user_agent: navigator.userAgent || "",
       });
-      if (res && typeof res === "object") {
-        const wasPrimary = window.__bnet_is_primary;
-        window.__bnet_is_primary = !!res.is_primary;
-        if (wasPrimary !== window.__bnet_is_primary) {
-          log(
-            "session " + SESSION_ID.slice(0, 8) +
-              " is " + (res.is_primary ? "PRIMARY" : "secondary") +
-              " (" + (res.session_count || 0) + " active)"
-          );
-        }
-      }
+      noteSessionRole(res);
     } catch (e) {
       debug("register failed:", e.message);
     }

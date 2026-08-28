@@ -50,6 +50,10 @@ pub enum Division {
     Silver,
     Gold,
     Platinum,
+    /// Added between Platinum and Diamond. Note the ladder position:
+    /// anything that maps divisions to an ordinal must slot Emerald in
+    /// here, not append it.
+    Emerald,
     Diamond,
     Master,
     Grandmaster,
@@ -67,6 +71,7 @@ impl Division {
             Division::Silver => "Silver",
             Division::Gold => "Gold",
             Division::Platinum => "Plat",
+            Division::Emerald => "Emer",
             Division::Diamond => "Diam",
             Division::Master => "Mast",
             Division::Grandmaster => "GM",
@@ -329,12 +334,24 @@ fn parse_role_snapshot(
         "silver" => Division::Silver,
         "gold" => Division::Gold,
         "platinum" => Division::Platinum,
+        "emerald" => Division::Emerald,
         "diamond" => Division::Diamond,
         "master" => Division::Master,
         "grandmaster" => Division::Grandmaster,
         "champion" => Division::Champion,
         "top500" | "top_500" => Division::Top500,
-        _ => return None,
+        other => {
+            // An unrecognized division silently erases the role's rank,
+            // which looks identical to "never placed". Blizzard adding a
+            // division (Emerald) is exactly how that happens, so make it
+            // audible on stderr instead of vanishing.
+            eprintln!(
+                "[bnetswitch] unknown competitive division from OverFast: {:?} \
+                 (rank dropped; ranks.rs needs a new Division variant)",
+                other
+            );
+            return None;
+        }
     };
     Some(RankSnapshot {
         division,

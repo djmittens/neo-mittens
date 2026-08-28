@@ -6,7 +6,8 @@ local tooling.
 Currently:
 
 - **`bnetswitch-lfg.user.js`** — bridges Overwatch Discord's LFG channel
-  to the bnetswitch TUI.
+  to the bnetswitch TUI. Also hides Discord's sponsored Quest bar (see
+  "No ads in the voice client" below).
 - **`yarr-apple-news.user.js`** — restyles the stock yarr RSS reader
   (`server/rss/`) to look like Apple News: San Francisco typography,
   near-black iOS surfaces, big bold headlines, rounded cards, and nicer
@@ -34,6 +35,50 @@ itself upgrades exactly as before.
 - **Tweak:** colors live in the `:root { --an-* }` block near the top of the
   script (e.g. change `--an-accent` from iOS blue to Apple News red `#f0285a`).
 
+## No ads in the voice client
+
+Discord seeds paid surfaces throughout the client: a sponsored Quest bar
+(a brand ad with a *Get Reward!* button) above the account panel, Nitro
+and Shop tabs in the home sidebar, gift buttons in the chat box, and
+Nitro upsells wedged into the emoji picker and profile editor. The LFG
+bridge injects a stylesheet at `document-start` that hides all of it, so
+none of it even flashes.
+
+Groups are listed in `PROMO_BLOCK_GROUPS` near the top of the promo
+section; delete a name to stop hiding that surface.
+
+| Group | Hides |
+| --- | --- |
+| `questPanel` | The Quest ad bar above the account panel (bottom-left) |
+| `questsMisc` | Quest icons on member rows, quest badges on profiles, promoted quests in *Active Now*, quests in the gift inventory |
+| `homeTabs` | **Nitro**, **Shop**, and **Quests** rows in the home sidebar |
+| `gifts` | *Send a gift* in the chat box, *Gift Nitro* in profiles/DMs |
+| `settingsTabs` | User Settings → Nitro, Server Boost, Subscriptions, Gift Inventory |
+| `upsells` | Nitro nags in the emoji picker, soundboard, character counter, profile editor, "sneak peek" banners |
+
+Notes:
+
+- **Billing is deliberately still visible.** Hiding the page where you
+  cancel a subscription is how you end up paying for one you forgot about.
+  Add `billing_panel` to the `settingsTabs` group if you disagree.
+- **Only upsell chrome is removed**, not the feature around it — the emoji
+  picker, soundboard and profile editor all still work.
+- **Why CSS, not a DOM sweep:** Discord re-mounts these subtrees on
+  navigation, quest rotation and popout open/close. A stylesheet applies to
+  whatever exists at paint time; a JS sweep would need a `MutationObserver`
+  running forever (which v0.8 deliberately removed).
+- **Selector durability**, most robust first: `data-*` hooks
+  (`li[data-settings-sidebar-item="nitro_panel"]`), route hrefs
+  (`a[href="/quest-home"]`), `aria-label` text, and finally class
+  substrings — Discord ships hashed CSS-module names like
+  `questRewardTile_a1b2c3`, so those match on the readable prefix and are
+  the ones that rot.
+- **If an ad comes back,** run `bnetswitchQuestProbe()` in the console. It
+  reports per-group match counts plus any selector the browser refused to
+  parse, so you can tell a renamed class from a broken rule. Selectors are
+  cross-checked against [Disblock Origin](https://codeberg.org/AllPurposeMat/Disblock-Origin),
+  which tracks Discord's markup churn closely — diff against it first.
+
 ## Why userscripts
 
 Some integrations (Discord LFG) need to act inside an authenticated
@@ -45,6 +90,13 @@ Userscripts let us drive DOM clicks the same way a human would, so:
 - Auth stays in the browser, never copied to disk.
 - Voice routing happens through your real Discord client's audio path.
 - Detection signal looks identical to manual clicks.
+
+One exception: **nickname sync** issues
+`PATCH /api/v9/guilds/<id>/members/@me` directly, reusing the session
+token the bridge already captures for history backfill. The DOM path for
+this broke silently whenever Discord reshuffled the guild-header popout,
+and it could only rename you in the guild the tab happened to be viewing.
+The DOM walk is still there as a fallback if the request is rejected.
 
 Still TOS-questionable; see the bnetswitch LFG module's docstring for
 the longer discussion.
@@ -116,15 +168,43 @@ The bridge keeps itself connected across system suspends and network drops:
   silence as a dead (half-open) connection and force-reconnects — half-open
   sockets after a suspend often never fire `onerror`, so this is the signal
   that recovers them.
-- SSE reconnects with capped exponential backoff and **never permanently
-  downgrades** to HTTP polling; polling only bridges the gap until SSE is
-  back.
+- Action delivery falls back through three tiers, in order:
+  1. native `EventSource`,
+  2. one long-lived streaming `GM_xmlhttpRequest` reading the same
+     `/events` stream,
+  3. long-polling `/actions/long` (one request per 25s).
+
+  Firefox 153+ enforces Local Network Access permission, so tier 1 is
+  normally refused for `http://127.0.0.1` from `https://discord.com` and
+  tier 2 carries traffic. Tier 1 is re-probed every 10 minutes in case the
+  permission is granted.
+
 - A wall-clock-gap detector notices when timers were frozen (suspend) and
   rebuilds the connection plus re-backfills the LFG list on resume.
 - `visibilitychange` (tab focus) and the `online` event also trigger a
   reconnect + session re-register.
 
 No manual Discord-tab reload should be needed after a suspend or Wi-Fi blip.
+
+## Why the transport avoids short polling
+
+Tampermonkey keeps a record per `GM_xmlhttpRequest` in its background page
+and does not reliably release completed ones, so memory cost scales with
+the **number of requests**, not their size. All extensions share one
+Firefox WebExtensions process, so this shows up as a single enormous
+process rather than as "Tampermonkey using memory".
+
+An earlier version short-polled `/actions` every 2s. That was ~43k
+requests/day and grew the shared extension process to 8 GB in three days.
+Anything added to this bridge should keep total request volume low — prefer
+one long-lived request over many short ones, and never add a fast retry
+loop for the "bnetswitch is down" case.
+
+Run the SSE frame-parser tests with:
+
+```sh
+node userscripts/sse-parser.test.mjs
+```
 
 ## Privacy
 

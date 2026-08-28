@@ -94,10 +94,25 @@ pub struct AppConfig {
     /// are never injected into the login list.
     #[serde(default)]
     pub remembered_emails: Vec<String>,
+
+    /// How often (in seconds) to poll competitive career stats per
+    /// account for the longitudinal history in `stats.rs`. Set to 0 to
+    /// disable stats tracking entirely.
+    ///
+    /// Default: 15 minutes. There is little point polling faster --
+    /// OverFast caches these responses for 10 minutes and Blizzard's
+    /// career pages themselves update with a lag, so most extra polls
+    /// would just write tombstones.
+    #[serde(default = "default_stats_poll_interval")]
+    pub stats_poll_interval_secs: u64,
 }
 
 fn default_lfg_stale_secs() -> u64 {
     10 * 60 // 10 minutes
+}
+
+fn default_stats_poll_interval() -> u64 {
+    15 * 60 // 15 minutes
 }
 
 fn default_warm_launch_ttl() -> u64 {
@@ -125,6 +140,7 @@ impl Default for AppConfig {
             lfg_dedupe_by_author: true,
             lfg_dedupe_by_voice_channel: true,
             remembered_emails: Vec::new(),
+            stats_poll_interval_secs: default_stats_poll_interval(),
         }
     }
 }
@@ -177,6 +193,45 @@ impl AppConfig {
             }
         }
         email.to_string()
+    }
+
+    /// The email already attributed to `battletag`, if any.
+    ///
+    /// BattleTags are unique per Battle.net account, so at most one email
+    /// should ever own one. Callers use this to avoid reassigning a tag that
+    /// another account already claims — two accounts sharing a tag makes them
+    /// render identically in the list (see `display_name`) and silently
+    /// collide in any BattleTag-keyed map or cache.
+    pub fn email_for_battletag(&self, battletag: &str) -> Option<&str> {
+        self.accounts
+            .iter()
+            .find(|(_, meta)| meta.battletag.as_deref() == Some(battletag))
+            .map(|(email, _)| email.as_str())
+    }
+
+    /// Attribute `battletag` to `email` unless another account already claims
+    /// it. Returns true if the config changed (caller is responsible for
+    /// persisting).
+    ///
+    /// Battle.net's `login_cache` exposes no email->BattleTag mapping (its
+    /// `name` column is an opaque hash), so we infer one from recency: the
+    /// newest row is assumed to belong to `SavedAccountNames[0]`. That holds
+    /// only right after a real login. Switching accounts reorders
+    /// SavedAccountNames *without* authenticating, so the newest tag can
+    /// outlive its own session and would then be misattributed to whoever
+    /// just became active. An existing claim was learned the same way but at
+    /// a moment when it was correct, so it wins over a fresh guess.
+    pub fn learn_battletag(&mut self, email: &str, battletag: String) -> bool {
+        if matches!(self.email_for_battletag(&battletag), Some(owner) if owner != email) {
+            return false;
+        }
+        if self.accounts.get(email).and_then(|m| m.battletag.as_deref())
+            == Some(battletag.as_str())
+        {
+            return false;
+        }
+        self.set_battletag(email, battletag);
+        true
     }
 
     /// Set a nickname for an account.
@@ -237,6 +292,39 @@ impl AppConfig {
 mod tests {
     use super::*;
 
+    /// A config written before `stats_poll_interval_secs` existed must
+    /// still load, picking up the default rather than failing the parse
+    /// and silently resetting every account's metadata.
+    #[test]
+    fn config_without_stats_interval_still_loads() {
+        let toml_src = r#"
+use_lutris = true
+auto_launch = true
+remembered_emails = ["a@example.com"]
+
+[accounts."a@example.com"]
+battletag = "Player#1234"
+banned = false
+"#;
+        let cfg: AppConfig = toml::from_str(toml_src).expect("legacy config parses");
+        assert_eq!(cfg.stats_poll_interval_secs, default_stats_poll_interval());
+        assert_eq!(
+            cfg.accounts.get("a@example.com").unwrap().battletag.as_deref(),
+            Some("Player#1234")
+        );
+    }
+
+    /// 0 is the documented "disable stats tracking" value and must
+    /// survive a round trip rather than being coerced to the default.
+    #[test]
+    fn stats_interval_zero_round_trips() {
+        let mut cfg = AppConfig::default();
+        cfg.stats_poll_interval_secs = 0;
+        let s = toml::to_string_pretty(&cfg).unwrap();
+        let back: AppConfig = toml::from_str(&s).unwrap();
+        assert_eq!(back.stats_poll_interval_secs, 0);
+    }
+
     #[test]
     fn ban_toggle_round_trips() {
         let mut cfg = AppConfig::default();
@@ -249,6 +337,79 @@ mod tests {
         // Second toggle unbans.
         assert!(!cfg.toggle_banned(email));
         assert!(!cfg.is_banned(email));
+    }
+
+    /// Regression: a BattleTag lingering as the newest `login_cache` row was
+    /// being re-stamped onto whichever email sat at SavedAccountNames[0] after
+    /// a switch, leaving two accounts sharing one tag. Both then rendered with
+    /// the same `display_name`, so one looked like it had vanished from the
+    /// list. `email_for_battletag` is the lookup that lets the caller refuse.
+    #[test]
+    fn battletag_owner_lookup_identifies_existing_claim() {
+        let mut cfg = AppConfig::default();
+        cfg.set_battletag("onyx@example.com", "OnyxYeti#21315".to_string());
+        cfg.set_battletag("smurf@example.com", "Pogo#11926".to_string());
+
+        assert_eq!(
+            cfg.email_for_battletag("Pogo#11926"),
+            Some("smurf@example.com")
+        );
+        // A tag nobody owns is free to assign.
+        assert_eq!(cfg.email_for_battletag("Stranger#0001"), None);
+        // Distinct accounts keep distinct display names.
+        assert_ne!(
+            cfg.display_name("onyx@example.com"),
+            cfg.display_name("smurf@example.com")
+        );
+    }
+
+    /// The exact corruption seen in the wild: switching to `onyx` put it at
+    /// SavedAccountNames[0] while `login_cache`'s newest row was still the
+    /// previous session's `Pogo#11926`. Startup then attributed Pogo to onyx,
+    /// so both rows rendered as "Pogo#11926" and onyx looked like it had
+    /// vanished from the list.
+    #[test]
+    fn learn_battletag_refuses_to_steal_another_accounts_tag() {
+        let mut cfg = AppConfig::default();
+        cfg.set_battletag("onyx@example.com", "OnyxYeti#21315".to_string());
+        cfg.set_battletag("smurf@example.com", "Pogo#11926".to_string());
+
+        // Stale-but-owned tag must not be reattributed to the active account.
+        assert!(!cfg.learn_battletag("onyx@example.com", "Pogo#11926".to_string()));
+        assert_eq!(
+            cfg.accounts["onyx@example.com"].battletag.as_deref(),
+            Some("OnyxYeti#21315")
+        );
+        assert_eq!(
+            cfg.accounts["smurf@example.com"].battletag.as_deref(),
+            Some("Pogo#11926")
+        );
+    }
+
+    #[test]
+    fn learn_battletag_populates_unclaimed_tag() {
+        let mut cfg = AppConfig::default();
+        // A genuinely new account still gets its tag captured.
+        assert!(cfg.learn_battletag("fresh@example.com", "Newbie#1111".to_string()));
+        assert_eq!(
+            cfg.accounts["fresh@example.com"].battletag.as_deref(),
+            Some("Newbie#1111")
+        );
+        // Re-learning the same tag for the same owner is a no-op (no rewrite,
+        // so callers don't churn the config file on every refresh).
+        assert!(!cfg.learn_battletag("fresh@example.com", "Newbie#1111".to_string()));
+    }
+
+    #[test]
+    fn learn_battletag_updates_owners_changed_tag() {
+        let mut cfg = AppConfig::default();
+        cfg.set_battletag("main@example.com", "OldName#1234".to_string());
+        // A rename is still the same account, so it may update its own tag.
+        assert!(cfg.learn_battletag("main@example.com", "NewName#5678".to_string()));
+        assert_eq!(
+            cfg.accounts["main@example.com"].battletag.as_deref(),
+            Some("NewName#5678")
+        );
     }
 
     #[test]

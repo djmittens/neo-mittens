@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         bnetswitch LFG bridge
 // @namespace    https://github.com/xyzyx/neo-mittens
-// @version      1.0.1
+// @version      1.1.0
 // @description  [loader] Auto-fetches the live bnetswitch userscript from http://127.0.0.1:7172 and caches it via GM_setValue. Reloads only when not in voice. Install once via http://127.0.0.1:7172/bnetswitch-lfg-loader.user.js -- never touch again.
 // @match        https://discord.com/*
 // @match        https://canary.discord.com/*
@@ -58,7 +58,14 @@
   const REMOTE_URL = "http://127.0.0.1:7172/bnetswitch-lfg.user.js";
   const CACHE_KEY = "bnetswitch_lfg_code_v1";
   const HASH_KEY = "bnetswitch_lfg_code_hash_v1";
-  const POLL_INTERVAL_MS = 60_000;
+  // Every fetch here is a GM_xmlhttpRequest, and Tampermonkey retains a
+  // record per request in its background page without reliably freeing
+  // completed ones. At the old 60s cadence this loader alone accounted for
+  // ~1.4k retained records/day -- which would dominate once the main
+  // userscript stopped short-polling. The script it fetches "rarely
+  // changes" (see the header above) and updates are deferred until you
+  // leave voice anyway, so a 10 minute cadence costs nothing in practice.
+  const POLL_INTERVAL_MS = 600_000;
   const RELOAD_GRACE_MS = 3000;
   const VOICE_RECHECK_MS = 5000;
 
@@ -313,6 +320,6 @@
   } catch (_) {}
 
   console.log(
-    "[bnetswitch-loader] v1.0.1 active, will fetch from " + REMOTE_URL
+    "[bnetswitch-loader] v1.1.0 active, will fetch from " + REMOTE_URL
   );
 })();
