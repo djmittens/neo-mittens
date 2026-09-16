@@ -134,19 +134,19 @@ function M.mason_setup()
   end
 end
 
--- Valkyria LSP: prefer the AOT binary (make lsp), fall back to running
--- lsp/main.valk under the interpreter.
-local valk_binary = vim.fn.expand('~/src/valkyria/build/valk')
-local valk_lsp_binary = vim.fn.expand('~/src/valkyria/build/valk-lsp')
-if vim.loop.fs_stat(valk_lsp_binary) or vim.loop.fs_stat(valk_binary) then
-  local cmd
-  if vim.loop.fs_stat(valk_lsp_binary) then
-    cmd = { valk_lsp_binary }
-  else
-    cmd = { valk_binary, vim.fn.expand('~/src/valkyria/lsp/main.valk') }
-  end
+-- Valkyria LSP — prefer the AOT binary at build/valk-lsp; fall back to the
+-- tree-walker only if the AOT binary is absent.
+local valk_aot = vim.fn.expand('~/src/valkyria/build/valk-lsp')
+local valk_tw = vim.fn.expand('~/src/valkyria/build/valk')
+local valk_cmd
+if vim.loop.fs_stat(valk_aot) then
+  valk_cmd = { valk_aot }
+elseif vim.loop.fs_stat(valk_tw) then
+  valk_cmd = { valk_tw, vim.fn.expand('~/src/valkyria/scripts/lsp/main.valk') }
+end
+if valk_cmd then
   vim.lsp.config('valk', {
-    cmd = cmd,
+    cmd = valk_cmd,
     cmd_cwd = vim.fn.expand('~/src/valkyria'),
     cmd_env = { VALK_HEAP_HARD_LIMIT = '4294967296' },
     filetypes = { 'valk' },
