@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         bnetswitch LFG bridge
 // @namespace    https://github.com/xyzyx/neo-mittens
-// @version      0.12.0
-// @description  Taps Discord's WebSocket gateway directly to forward Overwatch LFG embeds + voice-state updates to bnetswitch's local HTTP server. Push-based, complete coverage, no DOM polling.
+// @version      0.13.3
+// @description  Overwatch LFG bridge and voice companion: avatars, speaker highlights, moderation shortcuts, and persistent voice history in bnetswitch.
 // @match        https://discord.com/*
 // @match        https://canary.discord.com/*
 // @match        https://ptb.discord.com/*
@@ -93,7 +93,7 @@
   // this file. Exposed via bnetswitchLfgDiagnose so we can confirm
   // which build is actually loaded after a TM update or loader reload
   // (the @version banner is only visible in TM's UI).
-  const USERSCRIPT_VERSION = "0.10.1";
+  const USERSCRIPT_VERSION = "0.13.3";
 
   // Per-userscript-instance ID for multi-browser leader election.
   // bnetswitch elects the most-recently-registered tab as primary
@@ -155,9 +155,12 @@
     // that carries a user object. Consumed by resolveMentions() and the
     // ctrl+click-to-copy feature.
     users: new Map(),
+    // Server-specific identities must not be overwritten by another guild.
+    members: new Map(),
     // Our own user id (from READY)
     meId: null,
     ready: false,
+    discordSessionId: null,
   };
 
   // -------------------------------------------------------------------------
@@ -316,6 +319,7 @@
 
     switch (t) {
       case "READY":
+        GW.discordSessionId = d.session_id || GW.discordSessionId;
         GW.meId = d.user?.id || null;
         if (d.user) ingestUser(d.user);
         for (const guild of d.guilds || []) {
@@ -375,14 +379,14 @@
         break;
 
       case "RESUMED":
+        recoverCurrentUser();
         // Discord just finished replaying events since our last
-        // sequence number. If a self VSU was going to arrive, it
-        // came in the replay. If __bnet_self_in_voice is still
-        // undefined here, no replayed event referenced our user,
-        // which (combined with the gateway being live) means we're
-        // not in voice.
+        // sequence number. Only an observed READY gives us a complete
+        // initial voice snapshot. A resume-only tap cannot infer that an
+        // absent self VSU means we're disconnected; keep the loader's
+        // conservative unknown state until we recover identity/membership.
         try {
-          if (unsafeWindow.__bnet_self_in_voice === undefined) {
+          if (GW.ready && unsafeWindow.__bnet_self_in_voice === undefined) {
             unsafeWindow.__bnet_self_in_voice = false;
             log("RESUMED with no self VSU -> in-voice = false");
           }
@@ -391,6 +395,24 @@
 
       case "GUILD_CREATE":
         ingestGuild(d);
+        break;
+
+      case "GUILD_MEMBER_UPDATE":
+        ingestMember(d, d.guild_id);
+        scheduleRoster();
+        break;
+
+      case "GUILD_MEMBERS_CHUNK":
+        for (const member of d.members || []) ingestMember(member, d.guild_id);
+        scheduleRoster();
+        break;
+
+      case "INTERACTION_SUCCESS":
+        noteComponentOutcome(d, true);
+        break;
+
+      case "INTERACTION_FAILURE":
+        noteComponentOutcome(d, false);
         break;
 
       case "CHANNEL_CREATE":
@@ -411,6 +433,11 @@
             .catch((e) => debug("voice-deleted push failed:", e.message));
         }
         GW.channels.delete(d.id);
+        GW.voiceStates.delete(d.id);
+        for (const [userId, channelId] of GW.userVoiceChannel) {
+          if (channelId === d.id) GW.userVoiceChannel.delete(userId);
+        }
+        scheduleRoster();
         break;
 
       case "VOICE_STATE_UPDATE":
@@ -436,7 +463,7 @@
         {
           const batch = Array.isArray(d) ? d : (d.voice_states || []);
           for (const vs of batch) {
-            if (vs && vs.user_id) handleVoiceStateUpdate(vs);
+            if (vs && vs.user_id) handleVoiceStateUpdate({ ...vs, guild_id: vs.guild_id || d.guild_id });
           }
         }
         break;
@@ -456,7 +483,7 @@
           for (const op of d.ops) {
             const items = op.items || (op.item ? [op.item] : []);
             for (const it of items) {
-              if (it && it.member && it.member.user) ingestUser(it.member.user, it.member.nick);
+              if (it && it.member && it.member.user) ingestMember(it.member, d.guild_id);
               if (it && it.member && it.member.voice_state) {
                 const vs = it.member.voice_state;
                 handleVoiceStateUpdate({
@@ -472,6 +499,8 @@
 
       case "MESSAGE_CREATE":
       case "MESSAGE_UPDATE":
+        noteInterfaceMessage(d);
+        observeModerationMessage(d);
         // Authors and mentioned users carry user objects (+ nick via the
         // attached member, when present).
         if (d.author) ingestUser(d.author, d.member && d.member.nick);
@@ -488,12 +517,14 @@
         break;
 
       case "MESSAGE_DELETE":
+        interfaceMessages.delete(d.id);
         if (isWatchedChannel(d.channel_id)) {
           postLfgRemove(d.id);
         }
         break;
 
       case "MESSAGE_DELETE_BULK":
+        for (const id of d.ids || []) interfaceMessages.delete(id);
         if (isWatchedChannel(d.channel_id)) {
           for (const id of d.ids || []) postLfgRemove(id);
         }
@@ -527,7 +558,7 @@
 
     // Members shipped inline (small guilds) carry user objects + nicks.
     for (const member of guild.members || []) {
-      if (member && member.user) ingestUser(member.user, member.nick);
+      if (member && member.user) ingestMember(member, guild.id);
     }
 
     // Voice states: each user currently in a VC of this guild.
@@ -538,13 +569,16 @@
 
   function ingestChannel(channel) {
     if (!channel.id) return;
+    observeConnectDenials(channel);
+    const previous = GW.channels.get(channel.id) || {};
     GW.channels.set(channel.id, {
-      name: channel.name || "",
-      type: channel.type,
-      user_limit: channel.user_limit || 0,
-      guild_id: channel.guild_id,
-      parent_id: channel.parent_id || null,
+      name: channel.name ?? previous.name ?? "",
+      type: channel.type ?? previous.type,
+      user_limit: channel.user_limit ?? previous.user_limit ?? 0,
+      guild_id: channel.guild_id ?? previous.guild_id,
+      parent_id: channel.parent_id !== undefined ? channel.parent_id : previous.parent_id || null,
     });
+    scheduleRoster();
   }
 
   /** Cache a user's identity, notably their "server tag".
@@ -579,6 +613,19 @@
       nick: nick != null ? nick : prev.nick != null ? prev.nick : null,
       tag,
       tag_enabled: tagEnabled,
+      avatar: user.avatar !== undefined ? user.avatar : prev.avatar,
+    });
+  }
+
+  function ingestMember(member, guildId) {
+    if (!member?.user?.id) return;
+    ingestUser(member.user, member.nick);
+    if (!guildId) return;
+    const key = `${guildId}:${member.user.id}`;
+    const previous = GW.members.get(key) || {};
+    GW.members.set(key, {
+      nick: member.nick !== undefined ? member.nick : previous.nick,
+      avatar: member.avatar !== undefined ? member.avatar : previous.avatar,
     });
   }
 
@@ -595,10 +642,16 @@
     if (!vs.user_id) return;
     stats.voice_state_updates++;
 
+    // A resumed gateway may never replay CHANNEL_CREATE/GUILD_CREATE.
+    // The voice event itself still tells us which guild owns this channel.
+    if (vs.channel_id && vs.guild_id && !GW.channels.get(vs.channel_id)?.guild_id) {
+      ingestChannel({ id: vs.channel_id, guild_id: vs.guild_id });
+    }
+
     // Voice states embed the member (user + per-server nick) for the
     // person entering/leaving a VC. This is the richest source of names
     // for "people in voice channels" -- exactly the ctrl+click set.
-    if (vs.member && vs.member.user) ingestUser(vs.member.user, vs.member.nick);
+    if (vs.member && vs.member.user) ingestMember(vs.member, vs.guild_id || GW.channels.get(vs.channel_id)?.guild_id);
 
     // Remove the user from their previous VC (if any)
     const prevChannelId = GW.userVoiceChannel.get(vs.user_id);
@@ -649,6 +702,7 @@
     if (GW.meId && vs.user_id === GW.meId) {
       const inVoice = !!vs.channel_id;
       try { unsafeWindow.__bnet_self_in_voice = inVoice; } catch (_) {}
+      if (inVoice) subscribeToGuildVoice(vs.guild_id || GW.channels.get(vs.channel_id)?.guild_id, vs.channel_id);
       if (!inVoice) {
         // We just left voice. If the loader has a pending update, this
         // is the moment to apply it.
@@ -659,6 +713,7 @@
         } catch (_) {}
       }
     }
+    scheduleRoster();
   }
 
   // Channels we've seen referenced in an LFG embed. Only push voice
@@ -712,7 +767,12 @@
     // works for our purposes -- we just need Discord to flag the
     // channel as "actively viewed" so voice events flow.
     const channels = {};
-    if (vcChannelId) channels[vcChannelId] = [[0, 99]];
+    // An op 14 updates the guild's channel ranges. Sending only the newest
+    // LFG channel can drop the subscription to the VC we just joined.
+    for (const key of subscribedChannels) {
+      const [guild, channel] = key.split(":");
+      if (guild === guildId) channels[channel] = [[0, 99]];
+    }
     try {
       document.dispatchEvent(
         new CustomEvent("__bnetswitch_subscribe_guild__", {
@@ -1185,6 +1245,16 @@
         // ====================================================================
         if (window.WebSocket) {
           const WSProto = WebSocket.prototype;
+          const origWSSend = WSProto.send;
+          WSProto.send = function(data) {
+            try {
+              if (GATEWAY_URL_RE.test(this.url || '') && typeof data === 'string') {
+                const payload = JSON.parse(data);
+                if (payload.op === 6 && payload.d?.session_id) window.__bnet_gateway_session_id = payload.d.session_id;
+              }
+            } catch (_) {}
+            return origWSSend.call(this, data);
+          };
           const origWSAdd = WSProto.addEventListener;
           const origWSOnMsgDesc = Object.getOwnPropertyDescriptor(WSProto, 'onmessage');
 
@@ -1401,6 +1471,10 @@
         const origFetch = window.fetch;
         window.fetch = function(input, init) {
           try {
+            if (String(input).includes('/interactions') && typeof init?.body === 'string') {
+              const body = JSON.parse(init.body);
+              if (body.session_id) window.__bnet_gateway_session_id = body.session_id;
+            }
             if (init && init.headers) {
               const h = init.headers instanceof Headers
                 ? init.headers
@@ -1420,6 +1494,97 @@
           } catch (e) {}
           return origFetch.call(this, input, init);
         };
+
+        // Hydrate from Discord's already-loaded client state. Gateway resume
+        // replays changes, not every person who was in a VC before we tapped it.
+        // Read cached exports only; never execute Discord module factories.
+        let voiceStores = null;
+        let storeDiscoveryAt = 0;
+        function findVoiceStores(required = 'voice') {
+          if (voiceStores?.[required]) return voiceStores;
+          if (Date.now() - storeDiscoveryAt < 5000) return voiceStores;
+          storeDiscoveryAt = Date.now();
+          const chunks = window.webpackChunkdiscord_app;
+          if (!chunks || typeof chunks.push !== 'function') return null;
+          let req = null;
+          const entry = [['bnetswitch-voice-' + Date.now()], {}, (r) => { req = r; }];
+          chunks.push(entry);
+          if (chunks[chunks.length - 1] === entry) chunks.pop();
+          if (!req || !req.c) return null;
+          const stores = voiceStores || {};
+          for (const module of Object.values(req.c)) {
+            let exports;
+            try { exports = [module.exports, ...Object.values(module.exports || {})]; }
+            catch (_) { continue; }
+            for (const value of exports) {
+              if (!value || typeof value !== 'object') continue;
+              if (typeof value.getVoiceStatesForChannel === 'function') stores.voice = value;
+              if (typeof value.getUser === 'function' && typeof value.getCurrentUser === 'function') stores.users = value;
+              if (typeof value.getMember === 'function' && typeof value.getMembers === 'function') stores.members = value;
+              if (typeof value.getChannel === 'function' && typeof value.getDMFromUserId === 'function') stores.channels = value;
+              if (typeof value.getMessages === 'function' && typeof value.getMessage === 'function') stores.messages = value;
+              if (typeof value.getSessionId === 'function') stores.session = value;
+            }
+          }
+          if (stores.voice || stores.messages || stores.session) voiceStores = stores;
+          return voiceStores;
+        }
+        document.addEventListener('__bnetswitch_voice_roster_request__', (event) => {
+          const request = event.detail || {};
+          try {
+            const stores = findVoiceStores();
+            if (!stores?.voice) throw new Error('Discord voice store unavailable; using rendered participant rows');
+            const raw = stores.voice.getVoiceStatesForChannel(request.channel_id);
+            if (!raw || typeof raw !== 'object') throw new Error('Discord voice store has no channel snapshot yet');
+            const entries = raw instanceof Map ? [...raw.entries()] : Object.entries(raw);
+            const states = [];
+            for (const [key, state] of entries) {
+              if (!state || typeof state !== 'object') continue;
+              const id = state.userId || state.user_id || (Array.isArray(raw) ? null : key);
+              const channelId = state.channelId || state.channel_id || request.channel_id;
+              if (!id || channelId !== request.channel_id) continue;
+              const user = stores.users?.getUser(id);
+              const member = stores.members?.getMember(request.guild_id, id);
+              states.push({ user_id: id, channel_id: channelId, guild_id: request.guild_id,
+                member: { user: user ? { id, username: user.username, global_name: user.globalName || user.global_name, avatar: user.avatar } : { id },
+                  ...(member && member.nick !== undefined ? { nick: member.nick } : {}),
+                  ...(member && member.avatar !== undefined ? { avatar: member.avatar } : {}) } });
+            }
+            // Confirm the requested channel still contains self before using
+            // its snapshot to remove stale members from the userscript cache.
+            if (!states.some((s) => s.user_id === request.me_id)) throw new Error('Discord voice snapshot does not contain self yet');
+            const channel = stores.channels?.getChannel(request.channel_id);
+            document.dispatchEvent(new CustomEvent('__bnetswitch_voice_roster_snapshot__', {
+              detail: JSON.stringify({ channel_id: request.channel_id, guild_id: request.guild_id,
+                states, channel_name: channel?.name || null, source: 'discord_store' }),
+            }));
+          } catch (e) {
+            document.dispatchEvent(new CustomEvent('__bnetswitch_voice_roster_snapshot__', {
+              detail: JSON.stringify({ channel_id: request.channel_id, error: e.message }),
+            }));
+          }
+        });
+
+        document.addEventListener('__bnetswitch_interface_snapshot_request__', (event) => {
+          try {
+            const stores = findVoiceStores('messages');
+            const collection = stores?.messages?.getMessages(event.detail?.channel_id);
+            const messages = collection?.toArray?.() || collection?._array || (Array.isArray(collection) ? collection : []);
+            const normalizeComponent = (c) => ({ type: c.type, custom_id: c.custom_id || c.customId, label: c.label,
+              disabled: c.disabled, options: c.options, channel_types: c.channel_types || c.channelTypes,
+              components: c.components?.map(normalizeComponent) });
+            const result = messages.slice(-100).map((m) => ({ id: m.id, channel_id: m.channel_id || m.channelId || event.detail.channel_id,
+              guild_id: m.guild_id || m.guildId || event.detail.guild_id, application_id: m.application_id || m.applicationId,
+              author: m.author ? { id: m.author.id, bot: m.author.bot } : null,
+              content: m.content, embeds: m.embeds, flags: m.flags,
+              interaction: m.interaction, interaction_metadata: m.interaction_metadata || m.interactionMetadata,
+              components: m.components?.map(normalizeComponent) }));
+            const sessionId = window.__bnet_gateway_session_id || stores?.session?.getSessionId?.() || null;
+            document.dispatchEvent(new CustomEvent('__bnetswitch_interface_snapshot__', {
+              detail: JSON.stringify({ messages: result, session_id: sessionId }),
+            }));
+          } catch (_) {}
+        });
 
         window.__bnetswitch_patched_at = Date.now();
         console.log(
@@ -1945,6 +2110,7 @@
       if (data.event === "open") {
         log("gateway WS open (compressed):", data.wsId, data.url);
         inflaters.delete(data.wsId);
+        replay_buffers.delete(data.wsId);
         usDebug.inflater_count = inflaters.size;
       } else if (data.event === "binary" && data.buffer) {
         try { feedBinaryFrame(data.wsId, data.buffer); }
@@ -2004,6 +2170,10 @@
           const btn = document.querySelector('[aria-label="Disconnect"]');
           if (!btn) throw new Error("disconnect button not found (not in a VC?)");
           btn.click();
+          break;
+        }
+        case "moderate_voice": {
+          await moderateVoiceViaInterface(action);
           break;
         }
         default:
@@ -2125,6 +2295,7 @@
     if (fresh) {
       log("captured Discord auth token (source=" + (event.detail.source || "?") + "); scheduling backfill");
       scheduleBackfill();
+      recoverCurrentUser();
     }
   });
 
@@ -2225,7 +2396,630 @@
   let __bnet_last_status_json = null;
   let __bnet_last_status_at = 0;
 
+  // Voice companion. Only the Overwatch guild is tracked, and only the
+  // elected browser supplies the persisted roster. IDs remain strings.
+  const VOICE_GUILD = "94882524378968064";
+  const INTERFACE_CHANNEL = "1192075868609183754";
+  const voiceOwners = new Map();
+  const connectDenials = new Map();
+  let rosterTimer = null;
+  let voiceSelectedId = null;
+  let voiceFlags = {};
+  let lastVoiceChannel = null;
+  let lastRosterJSON = "";
+  let lastRosterSent = 0;
+  let rosterInFlight = false;
+  let rosterDirty = false;
+  let voiceSidebar = null;
+  let voicePadding = null;
+  let voiceAppStyle = null;
+  let sidebarChannelId = null;
+  let voiceHistoryOpen = false;
+  let voiceSocket = null;
+  let voiceSocketRetryAt = 0;
+  let lastRosterAttemptAt = 0;
+  let voiceSocketLastAckAt = 0;
+  let voiceHistoryEvents = null;
+  let identityRecovery = null;
+  let identityRetryAt = 0;
+  let identityError = null;
+  let lastHydrationAt = 0;
+  let rosterHydration = { source: "gateway", count: 0, error: null };
+  let hydrationChannel = null;
+  const interfaceMessages = new Map();
+  let interactionNonce = 0n;
+  let moderationNotice = "";
+  const componentOutcomes = new Map();
+
+  function noteComponentOutcome(payload, success) {
+    const outcome = componentOutcomes.get(String(payload.nonce));
+    if (!outcome || outcome.success === false) return;
+    outcome.success = success;
+    if (!success) {
+      outcome.error = `bot interaction failed${payload.reason_code != null ? ` (reason ${payload.reason_code})` : ""}`;
+      showVoiceNotice(outcome.error);
+      if (outcome.action) postVoiceEvidence({ event_id: `interaction_failure:${payload.nonce}`, kind: "moderation_failed",
+        channel_id: outcome.action.channel_id, user_id: outcome.action.user_id || GW.meId, actor_id: GW.meId,
+        evidence: `${outcome.action.operation} ${outcome.stage}: ${outcome.error}` });
+    }
+  }
+
+  function noteInterfaceMessage(message) {
+    const previous = interfaceMessages.get(message.id);
+    if (!message.id || (message.channel_id || previous?.message.channel_id) !== INTERFACE_CHANNEL) return false;
+    const merged = { ...previous?.message, ...message };
+    const fingerprint = JSON.stringify(merged);
+    if (fingerprint === previous?.fingerprint) return false;
+    interfaceMessages.delete(message.id);
+    interfaceMessages.set(message.id, { message: merged, fingerprint, observed_at: Date.now() });
+    while (interfaceMessages.size > 200) interfaceMessages.delete(interfaceMessages.keys().next().value);
+    return true;
+  }
+
+  function refreshInterfaceSnapshot() {
+    document.dispatchEvent(new CustomEvent("__bnetswitch_interface_snapshot_request__", { detail: { channel_id: INTERFACE_CHANNEL, guild_id: VOICE_GUILD } }));
+  }
+  document.addEventListener("__bnetswitch_interface_snapshot__", (event) => {
+    try {
+      const snapshot = JSON.parse(event.detail);
+      if (snapshot.session_id) GW.discordSessionId = snapshot.session_id;
+      for (const message of snapshot.messages || []) {
+        if (noteInterfaceMessage(message)) observeModerationMessage(message);
+      }
+    } catch (e) { debug("interface snapshot:", e.message); }
+  });
+
+  function applyVoiceRoster(snapshot) {
+    const currentChannel = GW.userVoiceChannel.get(GW.meId);
+    if (!snapshot.channel_id || snapshot.channel_id !== currentChannel) return;
+    if (snapshot.error) { rosterHydration.error = snapshot.error; return; }
+    if (!Array.isArray(snapshot.states) || !snapshot.states.some((s) => s.user_id === GW.meId)) return;
+    const ids = new Set(snapshot.states.map((s) => s.user_id));
+    for (const id of [...(GW.voiceStates.get(currentChannel) || [])]) {
+      if (!ids.has(id)) handleVoiceStateUpdate({ user_id: id, channel_id: null });
+    }
+    if (snapshot.channel_name) ingestChannel({ id: currentChannel, name: snapshot.channel_name, guild_id: VOICE_GUILD });
+    for (const state of snapshot.states) handleVoiceStateUpdate(state);
+    rosterHydration = { source: snapshot.source, count: ids.size, error: null };
+    scheduleRoster();
+  }
+
+  document.addEventListener("__bnetswitch_voice_roster_snapshot__", (event) => {
+    try { applyVoiceRoster(typeof event.detail === "string" ? JSON.parse(event.detail) : event.detail); }
+    catch (e) { debug("voice roster hydration:", e.message); }
+  });
+
+  function hydrateRenderedVoice(channelId) {
+    // Rendered rows are a partial snapshot: merge them, but don't interpret
+    // scrolling/collapsing a row as someone leaving voice.
+    let count = 0;
+    for (const row of document.querySelectorAll(`[data-list-item-id^="voiceuser-${channelId}-"], [data-list-item-id^="voiceuser_${channelId}_"]`)) {
+      if (row.closest("#bnetswitch-voice")) continue;
+      const id = extractUserIdFromRow(row);
+      if (!id) continue;
+      count++;
+      const name = row.querySelector('[class*="username"], [class*="name"]')?.textContent?.trim();
+      const avatar = row.querySelector('img[src*="/avatars/"], image[href*="/avatars/"]');
+      const avatarUrl = (avatar?.getAttribute("src") || avatar?.getAttribute("href"))?.replace(/\.(?:webp|gif)(?=\?|$)/, ".png");
+      if (name) ingestMember({ user: { id }, nick: name }, VOICE_GUILD);
+      if (avatarUrl) {
+        const key = `${VOICE_GUILD}:${id}`;
+        GW.members.set(key, { ...(GW.members.get(key) || {}), rendered_avatar_url: avatarUrl });
+      }
+      if (GW.userVoiceChannel.get(id) !== channelId) handleVoiceStateUpdate({ user_id: id, channel_id: channelId, guild_id: VOICE_GUILD });
+    }
+    if (count && rosterHydration.source !== "discord_store") rosterHydration = { ...rosterHydration, source: "rendered_rows", count };
+  }
+
+  function hydrateVoiceRoster() {
+    const channelId = GW.userVoiceChannel.get(GW.meId);
+    if (!channelId || GW.channels.get(channelId)?.guild_id !== VOICE_GUILD) return;
+    if (hydrationChannel !== channelId) {
+      hydrationChannel = channelId; lastHydrationAt = 0;
+      rosterHydration = { source: "gateway", count: 0, error: null };
+    }
+    hydrateRenderedVoice(channelId);
+    if (Date.now() - lastHydrationAt < 5000) return;
+    lastHydrationAt = Date.now();
+    document.dispatchEvent(new CustomEvent("__bnetswitch_voice_roster_request__", {
+      detail: { channel_id: channelId, guild_id: VOICE_GUILD, me_id: GW.meId },
+    }));
+  }
+
+  async function recoverCurrentUser() {
+    if (GW.meId) return GW.meId;
+    if (identityRecovery) return identityRecovery;
+    if (Date.now() < identityRetryAt) return null;
+    const token = getAuthToken();
+    if (!token) { identityError = "Waiting for Discord identity/auth capture"; return null; }
+    identityRetryAt = Date.now() + 15000;
+    identityRecovery = (async () => {
+      try {
+        const response = await fetch("/api/v9/users/@me", {
+          headers: { authorization: token, accept: "*/*" }, credentials: "include",
+        });
+        if (!response.ok) throw new Error(`current-user lookup returned HTTP ${response.status}`);
+        const user = await response.json();
+        if (!user?.id) throw new Error("current-user lookup returned no Discord ID");
+        GW.meId = user.id;
+        ingestUser(user);
+        identityError = null;
+        const myChannel = GW.userVoiceChannel.get(user.id);
+        if (myChannel) {
+          try { unsafeWindow.__bnet_self_in_voice = true; } catch (_) {}
+          subscribeToGuildVoice(GW.channels.get(myChannel)?.guild_id, myChannel);
+        }
+        recoverRenderedSelfVoice();
+        scheduleRoster();
+        log("recovered Discord identity after missed READY");
+        return user.id;
+      } catch (e) {
+        identityError = e.message;
+        warn("voice identity recovery:", e.message);
+        return null;
+      } finally { identityRecovery = null; }
+    })();
+    return identityRecovery;
+  }
+
+  function recoverRenderedSelfVoice() {
+    if (!GW.meId || GW.userVoiceChannel.has(GW.meId) || !document.querySelector('[aria-label="Disconnect"]')) return;
+    // A rendered self row plus the live Disconnect control proves membership.
+    // Do not guess a channel from its name or the currently viewed chat URL.
+    for (const row of document.querySelectorAll('[data-list-item-id^="voiceuser-"]')) {
+      const match = row.getAttribute("data-list-item-id")?.match(/^voiceuser[-_](\d+)[-_](\d+)$/);
+      if (!match || match[2] !== GW.meId) continue;
+      const channel = GW.channels.get(match[1]);
+      const link = row.closest('li, [class*="containerDefault"]')?.querySelector('a[href^="/channels/"]');
+      const guildId = channel?.guild_id || link?.getAttribute("href")?.match(/^\/channels\/(\d+)\//)?.[1];
+      if (guildId !== VOICE_GUILD) continue;
+      handleVoiceStateUpdate({ user_id: GW.meId, channel_id: match[1], guild_id: guildId });
+      subscribeToGuildVoice(guildId, match[1]);
+      break;
+    }
+  }
+  let moderationBusy = false;
+
+  function scheduleRoster() {
+    if (rosterTimer) return;
+    rosterTimer = setTimeout(() => { rosterTimer = null; pushRoster(); }, 180);
+  }
+
+  function voiceSnapshot() {
+    let channelId = GW.userVoiceChannel.get(GW.meId) || null;
+    const ch = GW.channels.get(channelId);
+    if (ch?.guild_id !== VOICE_GUILD) channelId = null;
+    if (channelId) lastVoiceChannel = channelId;
+    const speaking = new Set();
+    for (const row of document.querySelectorAll(VOICE_USER_SELECTOR)) {
+      if (row.closest("#bnetswitch-voice")) continue;
+      if (row.matches('[class*="speaking"]') || row.querySelector('[class*="speaking"]')) {
+        const id = extractUserIdFromRow(row);
+        if (id) speaking.add(id);
+      }
+    }
+    const owner = voiceOwners.get(channelId);
+    const members = [...(GW.voiceStates.get(channelId) || [])].sort().map((id) => {
+      const user = GW.users.get(id);
+      const member = GW.members.get(`${VOICE_GUILD}:${id}`);
+      const avatar = member?.rendered_avatar_url || (member?.avatar
+        ? `https://cdn.discordapp.com/guilds/${VOICE_GUILD}/users/${id}/avatars/${member.avatar}.png?size=64`
+        : user?.avatar
+        ? `https://cdn.discordapp.com/avatars/${id}/${user.avatar}.png?size=64`
+        : `https://cdn.discordapp.com/embed/avatars/${Number((BigInt(id) >> 22n) % 6n)}.png`);
+      return { user_id: id, nickname: member ? (member.nick || user?.global_name || user?.username || "Unknown user") : displayNameFor(id) || "Unknown user", avatar_url: avatar, speaking: speaking.has(id) };
+    });
+    return { channel_id: channelId, channel_name: channelId ? ch?.name : null,
+      guild_id: channelId ? VOICE_GUILD : null, me_id: GW.meId,
+      owner_id: owner?.id || null, owner_evidence: owner?.evidence || null, members };
+  }
+
+  async function pushRoster() {
+    if (!GW.meId) await recoverCurrentUser();
+    if (!GW.meId) return;
+    recoverRenderedSelfVoice();
+    hydrateVoiceRoster();
+    if (rosterInFlight) { rosterDirty = true; return; }
+    const snapshot = voiceSnapshot();
+    const json = JSON.stringify(snapshot);
+    if (json === lastRosterJSON && Date.now() - lastRosterSent < 20000) return;
+    // Speaker changes can happen several times a second. Keep them on one
+    // native socket instead of leaking a GM request record per transition.
+    if (!voiceSocket && typeof WebSocket !== "undefined" && Date.now() >= voiceSocketRetryAt) {
+      try {
+        voiceSocket = new WebSocket(`ws://127.0.0.1:7172/voice/live?token=${encodeURIComponent(BNETSWITCH_TOKEN)}&session=${encodeURIComponent(SESSION_ID)}`);
+        voiceSocket.onopen = () => { voiceSocketLastAckAt = Date.now(); lastRosterJSON = ""; scheduleRoster(); };
+        voiceSocket.onmessage = (event) => {
+          try {
+            const response = JSON.parse(event.data);
+            voiceSocketLastAckAt = Date.now();
+            if (response.ignored) { voiceHistoryOpen = false; renderVoiceSidebar({ channel_id: null }); }
+            else { voiceFlags = response.flags || {}; renderVoiceSidebar(response.current, response.storage_error); }
+          } catch (e) { debug("voice socket response:", e.message); }
+        };
+        voiceSocket.onerror = () => voiceSocket?.close();
+        voiceSocket.onclose = () => { voiceSocket = null; voiceSocketRetryAt = Date.now() + 60000; lastRosterJSON = ""; scheduleRoster(); };
+      } catch (_) { voiceSocket = null; voiceSocketRetryAt = Date.now() + 60000; }
+    }
+    if (voiceSocket?.readyState === 1 && Date.now() - voiceSocketLastAckAt > 60000) voiceSocket.close();
+    if (voiceSocket?.readyState === 1) {
+      voiceSocket.send(json); lastRosterJSON = json; lastRosterSent = Date.now();
+      return;
+    }
+    // Browsers which block loopback WebSockets retain the GM fallback.
+    // Throttle transitions to at most one request/sec and always send the
+    // latest state, avoiding an unbounded backlog.
+    if (Date.now() - lastRosterAttemptAt < 1000) { scheduleRoster(); return; }
+    lastRosterAttemptAt = Date.now();
+    rosterInFlight = true;
+    try {
+      const response = await bnetRequest("POST", "/voice/roster", snapshot);
+      if (!response?.ignored) {
+        lastRosterJSON = json; lastRosterSent = Date.now();
+        voiceFlags = response?.flags || voiceFlags;
+        renderVoiceSidebar(response?.current || snapshot, response?.storage_error);
+      } else { voiceHistoryOpen = false; renderVoiceSidebar({ channel_id: null }); }
+    } catch (e) {
+      renderVoiceSidebar(snapshot, "History offline: " + e.message);
+    } finally {
+      rosterInFlight = false;
+      if (rosterDirty) { rosterDirty = false; scheduleRoster(); }
+    }
+  }
+
+  function postVoiceEvidence(event) {
+    const member = GW.users.get(event.user_id);
+    if (member && !event.member) event.member = { user_id: event.user_id, nickname: displayNameFor(event.user_id) || "Unknown user",
+      avatar_url: member.avatar ? `https://cdn.discordapp.com/avatars/${event.user_id}/${member.avatar}.png?size=64` : null };
+    return bnetRequest("POST", "/voice/evidence", {
+      me_id: GW.meId || "", timestamp_ms: Date.now(), owner_id: voiceOwners.get(event.channel_id)?.id || null,
+      ...event,
+    }).then(() => { lastRosterJSON = ""; scheduleRoster(); }).catch((e) => { warn("voice evidence not saved:", e.message); showVoiceNotice("History write failed: " + e.message); });
+  }
+
+  function observeConnectDenials(channel) {
+    if (!Array.isArray(channel.permission_overwrites)) return;
+    const denied = new Set(channel.permission_overwrites.filter((o) => String(o.type) === "1" && (BigInt(o.deny || "0") & 1048576n) !== 0n).map((o) => o.id));
+    const old = connectDenials.get(channel.id);
+    connectDenials.set(channel.id, denied);
+    // Initial permissions aren't evidence of a newly performed ban.
+    if (!old || (channel.id !== lastVoiceChannel && channel.id !== GW.userVoiceChannel.get(GW.meId))) return;
+    for (const id of denied) {
+      if (old.has(id)) continue;
+      postVoiceEvidence({ event_id: `deny:${channel.id}:${id}:${Date.now()}`, kind: "connect_denied", channel_id: channel.id,
+        user_id: id, actor_id: null, evidence: "CHANNEL_UPDATE added a member CONNECT deny; actor unknown (not inferred from owner)" });
+    }
+  }
+
+  function observeModerationMessage(msg) {
+    if (!msg.author?.bot || !msg.id) return;
+    const channel = GW.channels.get(msg.channel_id);
+    if (channel?.guild_id !== VOICE_GUILD && msg.guild_id !== VOICE_GUILD) return;
+    // Accept explicit bot evidence only, never infer ownership from join order.
+    for (const embed of msg.embeds || []) {
+      const fields = embed.fields || [];
+      const vc = fields.find((f) => /^(voice channel|channel)$/i.test(f.name))?.value?.match(/<#(\d+)>/)?.[1];
+      const owner = fields.find((f) => /^(owner|channel owner)$/i.test(f.name))?.value?.match(/<@!?(\d+)>/)?.[1];
+      if (vc && owner) {
+        const evidence = `bot message ${msg.id}: explicit Owner field`;
+        voiceOwners.set(vc, { id: owner, evidence });
+        postVoiceEvidence({ event_id: `owner:${msg.id}:${owner}`, kind: "owner", channel_id: vc, user_id: owner, evidence });
+        scheduleRoster();
+      }
+      const actor = fields.find((f) => /^(banned by|moderator|actor)$/i.test(f.name))?.value?.match(/<@!?(\d+)>/)?.[1];
+      const target = fields.find((f) => /^(banned user|banned member)$/i.test(f.name))?.value?.match(/<@!?(\d+)>/)?.[1];
+      if (vc && actor && target) postVoiceEvidence({ event_id: `ban:${msg.id}:${target}`, kind: "ban", channel_id: vc,
+        actor_id: actor, user_id: target, evidence: `bot message ${msg.id}: explicit Banned User and Banned By fields` });
+    }
+    const text = [msg.content || "", ...(msg.embeds || []).map((e) => e.description || "")].join("\n");
+    const ban = text.match(/<@!?(\d+)>\s+(?:has\s+)?banned\s+<@!?(\d+)>\s+from\s+<#(\d+)>/i);
+    if (ban) postVoiceEvidence({ event_id: `ban:${msg.id}:${ban[2]}`, kind: "ban", channel_id: ban[3],
+      actor_id: ban[1], user_id: ban[2], evidence: `bot message ${msg.id}: ${ban[0]}` });
+  }
+
+  function showVoiceNotice(text) {
+    moderationNotice = text;
+    const status = voiceSidebar?.querySelector('[data-voice-status]');
+    if (status) status.textContent = text;
+  }
+
+  function renderVoiceSidebar(snapshot, error) {
+    if (!document.body) return;
+    if (snapshot.channel_id) voiceHistoryOpen = true;
+    if (!snapshot.channel_id && !voiceHistoryOpen) {
+      voiceSidebar?.remove(); voiceSidebar = null;
+      if (voicePadding !== null) { document.body.style.paddingRight = voicePadding; voicePadding = null; }
+      if (voiceAppStyle) {
+        for (const [key, value, priority] of voiceAppStyle.values) voiceAppStyle.element.style.setProperty(key, value, priority);
+        voiceAppStyle = null;
+      }
+      sidebarChannelId = null;
+      return;
+    }
+    if (snapshot.channel_id !== sidebarChannelId) { sidebarChannelId = snapshot.channel_id; voiceSelectedId = null; moderationNotice = ""; }
+    if (!voiceSidebar) {
+      voicePadding = document.body.style.paddingRight;
+      document.body.style.paddingRight = "320px";
+      const app = document.getElementById("app-mount");
+      if (app) {
+        document.body.style.paddingRight = voicePadding;
+        voiceAppStyle = { element: app, values: ["width", "right"].map((key) => [key, app.style.getPropertyValue(key), app.style.getPropertyPriority(key)]) };
+        app.style.setProperty("width", "calc(100% - 320px)", "important");
+        app.style.setProperty("right", "320px", "important");
+      }
+      voiceSidebar = document.createElement("aside");
+      voiceSidebar.id = "bnetswitch-voice";
+      voiceSidebar.setAttribute("aria-label", "bnetswitch voice members");
+      voiceSidebar.style.cssText = "position:fixed;right:0;top:0;bottom:0;width:304px;padding:8px;background:#17191e;color:#eee;z-index:10000;overflow:auto;font:14px sans-serif";
+      document.body.appendChild(voiceSidebar);
+    }
+    voiceSidebar.replaceChildren();
+    const heading = document.createElement("h3");
+    heading.textContent = snapshot.channel_name || "Voice disconnected — history";
+    voiceSidebar.appendChild(heading);
+    const owner = document.createElement("div");
+    owner.textContent = snapshot.owner_id ? `Owner: ${displayNameFor(snapshot.owner_id) || "Unknown"} (${snapshot.owner_id})` : "Owner: unknown — awaiting bot evidence";
+    voiceSidebar.appendChild(owner);
+    // Keep a departed selection pinned; a quick shortcut must not silently
+    // retarget the next person when the selected user leaves.
+    if (voiceSelectedId === null) voiceSelectedId = snapshot.members.find((m) => m.user_id !== GW.meId)?.user_id || null;
+    for (const member of snapshot.members) {
+      const flags = voiceFlags[member.user_id] || {};
+      const row = document.createElement("button");
+      row.type = "button";
+      row.style.cssText = `display:flex;align-items:center;gap:8px;width:100%;padding:8px;margin:6px 0;color:inherit;text-align:left;background:${member.speaking ? "#185338" : "#292b32"};border:2px solid ${member.user_id === voiceSelectedId ? "#79baff" : "transparent"}`;
+      row.setAttribute("aria-pressed", String(member.user_id === voiceSelectedId));
+      const avatar = document.createElement("img"); avatar.src = member.avatar_url; avatar.width = 40; avatar.height = 40; avatar.alt = ""; avatar.style.borderRadius = "50%";
+      const name = document.createElement("span");
+      name.textContent = `${member.speaking ? "● " : ""}${member.nickname} (${member.user_id})${member.user_id === snapshot.owner_id ? " 👑" : ""}`;
+      if (member.joined_at_ms) { const elapsed = Math.max(0, Math.floor((Date.now() - member.joined_at_ms) / 1000)); name.textContent += ` · ${Math.floor(elapsed / 60)}m ${elapsed % 60}s`; }
+      name.style.overflowWrap = "anywhere";
+      const tags = [flags.banned_by_me && "BANNED BY ME", flags.ban_requested && !flags.banned_by_me && "BAN REQUESTED (unconfirmed)", flags.banned_me && "BANNED ME", flags.troll && "TROLL"].filter(Boolean);
+      if (tags.length) { name.appendChild(document.createElement("br")); const badge = document.createElement("strong"); badge.textContent = tags.join(" · "); badge.style.color = "#ffac83"; name.appendChild(badge); }
+      row.append(avatar, name);
+      row.onclick = () => { voiceSelectedId = member.user_id; renderVoiceSidebar(snapshot, error); };
+      voiceSidebar.appendChild(row);
+    }
+    for (const [label, operation] of [["Ban selected (Alt+B)", "ban"], ["Claim VC (Alt+C)", "claim"], ["Flag troll (Alt+T)", "troll"]]) {
+      const button = document.createElement("button"); button.textContent = label; button.style.margin = "4px";
+      button.disabled = !snapshot.channel_id || (operation !== "claim" && (!snapshot.members.some((m) => m.user_id === voiceSelectedId) || voiceSelectedId === GW.meId));
+      button.onclick = () => requestVoiceModeration(operation);
+      voiceSidebar.appendChild(button);
+    }
+    const history = document.createElement("button"); history.textContent = voiceHistoryEvents ? "Hide voice history" : "Recent voice history";
+    history.onclick = async () => {
+      try {
+        voiceHistoryEvents = voiceHistoryEvents ? null : await bnetRequest("GET", "/voice/history");
+        renderVoiceSidebar(snapshot, error);
+      } catch (e) { showVoiceNotice(e.message); }
+    };
+    voiceSidebar.appendChild(history);
+    if (voiceHistoryEvents) {
+      const pre = document.createElement("pre"); pre.style.cssText = "white-space:pre-wrap;font-size:11px";
+      pre.textContent = voiceHistoryEvents.slice(-30).reverse().map((e) => `${new Date(e.timestamp_ms).toLocaleString()} ${e.kind}\n${e.user_id || ""} actor=${e.actor_id || "unknown"} owner=${e.owner_id || "unknown"}${e.duration_ms != null ? ` ${Math.round(e.duration_ms / 1000)}s` : ""}\n${e.evidence}`).join("\n\n");
+      voiceSidebar.appendChild(pre);
+    }
+    if (!snapshot.channel_id) {
+      const close = document.createElement("button"); close.textContent = "Close voice history";
+      close.onclick = () => { voiceHistoryOpen = false; renderVoiceSidebar(snapshot); };
+      voiceSidebar.appendChild(close);
+    }
+    const status = document.createElement("p"); status.dataset.voiceStatus = "";
+    status.textContent = error || moderationNotice || "Speaking highlights use Discord's visible voice indicators. Ban attribution requires explicit bot evidence.";
+    voiceSidebar.appendChild(status);
+  }
+
+  async function requestVoiceModeration(operation) {
+    try {
+      const snapshot = voiceSnapshot();
+      await bnetRequest("POST", "/voice/moderate", { channel_id: snapshot.channel_id, user_id: voiceSelectedId, operation });
+      showVoiceNotice(operation === "troll" ? "Flag updated" : "Queued " + operation);
+      lastRosterJSON = ""; scheduleRoster();
+    } catch (e) { showVoiceNotice(e.message); }
+  }
+
+  function discordOptionId(element) {
+    // Discord doesn't always expose select values as DOM attributes. Read
+    // the option component's own React props, stopping before the menu or
+    // combobox (whose value belongs to the selection, not this option).
+    const key = Object.keys(element).find((key) => key.startsWith("__reactFiber$"));
+    let fiber = key ? element[key] : null;
+    for (let depth = 0; fiber && depth < 5; depth++, fiber = fiber.return) {
+      const props = fiber.memoizedProps || {};
+      if (props.role === "listbox" || props.role === "combobox" || Array.isArray(props.options)) break;
+      const candidates = [props.option?.value, props.user?.id, props.channel?.id, props.data?.user?.id, props.data?.channel?.id];
+      if (props.role === "option" || props.onSelect || props.isSelected !== undefined) candidates.push(props.value);
+      const id = candidates.find((value) => typeof value === "string" && /^\d{15,25}$/.test(value));
+      if (id) return id;
+    }
+    return null;
+  }
+
+  function messageComponents(message) {
+    const result = [];
+    const visit = (components) => {
+      for (const component of components || []) {
+        if (component.custom_id) result.push(component);
+        visit(component.components);
+      }
+    };
+    visit(message.components);
+    return result;
+  }
+
+  async function discordInteractionRequest(path, body = null) {
+    const token = getAuthToken();
+    if (!token) throw new Error("Discord authorization not captured yet; reload Discord before retrying");
+    const headers = { authorization: token, accept: "*/*" };
+    if (body) headers["content-type"] = "application/json";
+    if (usw.__bnet_super_props) headers["x-super-properties"] = usw.__bnet_super_props;
+    if (usw.__bnet_locale) headers["x-discord-locale"] = usw.__bnet_locale;
+    const response = await fetch("/api/v9" + path, {
+      method: body ? "POST" : "GET", headers, credentials: "include",
+      ...(body ? { body: JSON.stringify(body) } : {}),
+    });
+    if (!response.ok) {
+      const error = await response.json().catch(() => ({}));
+      throw new Error(`Discord interaction HTTP ${response.status}: ${error.message || "request rejected"}`);
+    }
+    if (response.status === 204) return null;
+    return response.json().catch(() => null);
+  }
+
+  async function submitMessageComponent(message, component, values = null, action = null) {
+    const sessionId = usw.__bnet_gateway_session_id || GW.discordSessionId;
+    if (!sessionId) throw new Error("Discord session ID unavailable; reload Discord before retrying");
+    const applicationId = message.application_id || (message.author?.bot && message.author.id);
+    if (!applicationId || !message.id || !component.custom_id) throw new Error("bot interaction metadata is incomplete");
+    const clockNonce = BigInt(Date.now() - 1420070400000) << 22n;
+    interactionNonce = clockNonce > interactionNonce ? clockNonce : interactionNonce + 1n;
+    const nonce = String(interactionNonce);
+    componentOutcomes.set(nonce, { success: null, error: null, action, stage: Number(component.type) === 2 ? "button" : "dropdown" });
+    while (componentOutcomes.size > 64) componentOutcomes.delete(componentOutcomes.keys().next().value);
+    const data = { component_type: Number(component.type), custom_id: component.custom_id };
+    if (values) data.values = values;
+    const response = await discordInteractionRequest("/interactions", {
+      type: 3, nonce, guild_id: VOICE_GUILD, channel_id: INTERFACE_CHANNEL,
+      message_id: message.id, application_id: applicationId, session_id: sessionId,
+      message_flags: Number(message.flags) || 0, data,
+    });
+    if (componentOutcomes.get(nonce)?.error) throw new Error(componentOutcomes.get(nonce).error);
+    if (response?.message?.components) noteInterfaceMessage({ channel_id: INTERFACE_CHANNEL, ...response.message });
+    return nonce;
+  }
+
+  function dropdownValues(component, action) {
+    const type = Number(component.type);
+    const target = action.operation === "ban" ? action.user_id : action.channel_id;
+    if (type === 3) {
+      const matches = (component.options || []).filter((option) => typeof option.value === "string" &&
+        (option.value === target || new RegExp(`(?:^|\\D)${target}(?:\\D|$)`).test(option.value)));
+      return matches.length === 1 ? [matches[0].value] : null;
+    }
+    if (action.operation === "ban" && (type === 5 || type === 7)) return [target];
+    if (action.operation === "claim" && type === 8) {
+      const channelType = GW.channels.get(target)?.type;
+      if (component.channel_types?.length && channelType != null && !component.channel_types.includes(channelType)) return null;
+      return [target];
+    }
+    return null;
+  }
+
+  async function findBackgroundDropdown(source, action, baseline, submittedAt, assertTarget, buttonNonce) {
+    const applicationId = source.application_id || source.author.id;
+    for (let attempt = 0; attempt < 80; attempt++) {
+      assertTarget();
+      if (componentOutcomes.get(buttonNonce)?.error) throw new Error(componentOutcomes.get(buttonNonce).error);
+      if (attempt % 10 === 0) refreshInterfaceSnapshot();
+      const candidates = [];
+      for (const cached of interfaceMessages.values()) {
+        const message = cached.message;
+        if (cached.observed_at < submittedAt || baseline.get(message.id) === cached.fingerprint) continue;
+        if ((message.application_id || message.author?.id) !== applicationId) continue;
+        const metadata = message.interaction_metadata || message.interaction;
+        const actor = metadata?.user?.id || metadata?.user_id;
+        if (actor && actor !== GW.meId) continue;
+        const origin = metadata?.interacted_message_id || metadata?.interactedMessageId || metadata?.message_id;
+        if (origin && origin !== source.id) continue;
+        // Never reuse a dropdown left over from an earlier moderation action.
+        let freshlyCreated = false;
+        try { freshlyCreated = Number((BigInt(message.id) >> 22n) + 1420070400000n) >= submittedAt - 1000; } catch (_) {}
+        if (message.id !== source.id && origin !== source.id && !(actor === GW.meId && freshlyCreated) && !((Number(message.flags) & 64) && freshlyCreated)) continue;
+        for (const component of messageComponents(message)) {
+          if (component.disabled || ![3, 5, 7, 8].includes(Number(component.type))) continue;
+          const values = dropdownValues(component, action);
+          if (values) candidates.push({ message, component, values });
+        }
+      }
+      if (candidates.length > 1) throw new Error("ambiguous bot dropdown responses; no selection submitted");
+      if (candidates.length === 1) return candidates[0];
+      await sleep(100);
+    }
+    throw new Error("bot dropdown response or selected Discord ID was not available; no dropdown selection submitted");
+  }
+
+  async function moderateVoiceViaInterface(action) {
+    if (moderationBusy) throw new Error("another voice moderation action is in progress");
+    moderationBusy = true;
+    const assertTarget = () => {
+      if (GW.userVoiceChannel.get(GW.meId) !== action.channel_id) throw new Error("voice channel changed");
+      if (action.operation === "ban" && (!GW.voiceStates.get(action.channel_id)?.has(action.user_id) || action.user_id === GW.meId)) throw new Error("target left voice or is yourself");
+    };
+    try {
+      assertTarget();
+      if (!matchesVoiceOperation(action.operation)) throw new Error("unsupported voice moderation operation");
+      refreshInterfaceSnapshot();
+      const messages = await discordInteractionRequest(`/channels/${INTERFACE_CHANNEL}/messages?limit=50`);
+      if (!Array.isArray(messages)) throw new Error("interface messages could not be read");
+      let control = null;
+      for (const message of messages) {
+        noteInterfaceMessage(message);
+        if (!message.author?.bot) continue;
+        const buttons = messageComponents(message).filter((c) => Number(c.type) === 2 && !c.disabled &&
+          new RegExp(`^(?:${action.operation}|${action.operation} (?:user|member|channel|voice channel))$`, "i").test((c.label || "").replace(/[^a-z\s]/gi, "").trim()));
+        if (buttons.length > 1) throw new Error("ambiguous interface buttons; no interaction submitted");
+        if (buttons.length === 1 && !control) control = { message, component: buttons[0] };
+      }
+      if (!control) throw new Error(`${action.operation} button metadata was not found in the interface channel`);
+      const baseline = new Map([...interfaceMessages].map(([id, entry]) => [id, entry.fingerprint]));
+      const submittedAt = Date.now();
+      assertTarget();
+      const buttonNonce = await submitMessageComponent(control.message, control.component, null, action);
+      const dropdown = await findBackgroundDropdown(control.message, action, baseline, submittedAt, assertTarget, buttonNonce);
+      assertTarget();
+      await submitMessageComponent(dropdown.message, dropdown.component, dropdown.values, action);
+      await postVoiceEvidence({ event_id: `request:${action.id}`, kind: `${action.operation}_requested`, channel_id: action.channel_id,
+        user_id: action.operation === "claim" ? GW.meId : action.user_id, actor_id: GW.meId, evidence: "background interface button and dropdown interactions submitted; awaiting bot confirmation (not a confirmed ban/claim)" });
+      showVoiceNotice("Background request sent; awaiting bot confirmation");
+      // Also pick up delayed ephemeral confirmations from the client cache
+      // when they aren't delivered through the tapped gateway connection.
+      for (const delay of [500, 1500, 4000]) setTimeout(refreshInterfaceSnapshot, delay);
+    } catch (e) {
+      await postVoiceEvidence({ event_id: `failed:${action.id}`, kind: "moderation_failed", channel_id: action.channel_id, user_id: action.user_id,
+        actor_id: GW.meId, evidence: e.message });
+      showVoiceNotice(`${action.operation} failed: ${e.message}`);
+      throw e;
+    } finally { moderationBusy = false; }
+  }
+
+  function matchesVoiceOperation(operation) { return operation === "ban" || operation === "claim"; }
+
+  document.addEventListener("keydown", (event) => {
+    if (!event.altKey || event.ctrlKey || event.metaKey || event.repeat || !voiceSidebar || event.target.closest('input, textarea, [contenteditable="true"]')) return;
+    const operation = { b: "ban", c: "claim", t: "troll" }[event.key.toLowerCase()];
+    if (operation) { event.preventDefault(); requestVoiceModeration(operation); }
+  });
+  const voiceObserver = new MutationObserver((records) => {
+    const triggered = records.some((r) => {
+      if (r.target.closest?.("#bnetswitch-voice")) return false;
+      if (r.type === "attributes") return r.target.matches?.(VOICE_USER_SELECTOR) ?? false;
+      return r.target.closest?.(VOICE_USER_SELECTOR) != null ||
+        [...r.addedNodes].some((n) => n.nodeType === 1 && (n.matches?.(VOICE_USER_SELECTOR) || n.querySelector?.(VOICE_USER_SELECTOR)));
+    });
+    if (triggered) scheduleRoster();
+  });
+  const observeVoiceDOM = () => {
+    if (!document.documentElement) return;
+    voiceObserver.observe(document.documentElement, { subtree: true, childList: true, attributes: true, attributeFilter: ["class", "src", "href"] });
+    scheduleRoster();
+  };
+  if (document.documentElement) observeVoiceDOM();
+  else document.addEventListener("DOMContentLoaded", observeVoiceDOM, { once: true });
+
+  (typeof unsafeWindow !== "undefined" ? unsafeWindow : window).bnetswitchVoiceDiagnose = () => ({
+    version: USERSCRIPT_VERSION,
+    roster: voiceSnapshot(),
+    gateway_ready_observed: GW.ready,
+    identity_error: identityError,
+    hydration: rosterHydration,
+    interface_channel: INTERFACE_CHANNEL,
+    background_interactions: { session_available: !!(GW.discordSessionId || usw.__bnet_gateway_session_id), cached_messages: interfaceMessages.size, last_status: moderationNotice },
+    interface_buttons: [...document.querySelectorAll(`main [id^="chat-messages-${INTERFACE_CHANNEL}-"] button, [data-list-item-id^="chat-messages-${INTERFACE_CHANNEL}-"] button`)].map((el) => el.textContent.trim()),
+    dropdown_options: [...document.querySelectorAll('[role="option"], option')].map((el) => ({ label: el.textContent, id: el.getAttribute("data-value") || el.getAttribute("value") || discordOptionId(el) || extractUserIdFromRow(el) })),
+  });
+
   async function reportVoiceStatus(force = false) {
+    scheduleRoster();
     if (!GW.meId) return;
     const myVC = GW.userVoiceChannel.get(GW.meId);
     const ch = myVC ? GW.channels.get(myVC) : null;
@@ -3355,9 +4149,11 @@
   }
 
   function start() {
-    log("bnetswitch LFG bridge starting (v0.10.0, SSE push + gateway tap)");
+    log(`bnetswitch LFG bridge starting (v${USERSCRIPT_VERSION}, SSE push + gateway tap)`);
     log("server:", BNETSWITCH_HOST);
     log("watched channels:", WATCHED_CHANNEL_IDS.join(", ") || "all");
+    recoverCurrentUser();
+    scheduleRoster();
 
     // Primary action delivery via SSE (push, ~0 latency).
     connectSSE();
