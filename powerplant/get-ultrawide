@@ -1,5 +1,26 @@
 #!/bin/bash
-# Detect the ultrawide monitor (Samsung Odyssey G95NC) by resolution
-# Returns the monitor name (e.g., DP-1, DP-2, DP-3)
+# Detect the ultrawide monitor (Samsung Odyssey G95NC) and print its connector
+# name (e.g. DP-1, DP-2, DP-5).
+#
+# Matches on the EDID description rather than the current resolution: the
+# connector index moves around after driver reloads/replugs, and keying off
+# resolution failed exactly when it was needed most, because a monitor that has
+# lost its mode reports 0x0 and so matched nothing.
+#
+# `hyprctl monitors all` includes disabled monitors, so this still resolves when
+# the panel is asleep or unconfigured.
 
-hyprctl monitors -j | jq -r '.[] | select(.width == 7680 and .height == 2160) | .name' | head -1
+set -euo pipefail
+
+MODEL="${ULTRAWIDE_MODEL:-Odyssey G95NC}"
+
+name=$(hyprctl monitors all -j \
+    | jq -r --arg m "$MODEL" '.[] | select(.description | contains($m)) | .name' \
+    | head -1)
+
+if [[ -z "$name" ]]; then
+    echo "get-ultrawide: no monitor matching '$MODEL' found" >&2
+    exit 1
+fi
+
+echo "$name"

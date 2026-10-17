@@ -1,0 +1,80 @@
+#!/usr/bin/env bash
+# hypr-wake-verify — confirm the ultrawide actually came back after a DPMS wake.
+#
+# WHY THIS EXISTS
+# ---------------
+# The DP link to the G95NC intermittently fails to retrain when the panel comes
+# out of a DPMS blank. Observed three times on 2026-09-18. When it fails:
+#
+#   - Hyprland's IPC stalls for ~5s, so `hyprctl dispatch dpms on` returns
+#     "Hyprland IPC didn't respond in time / Couldn't read (6)" and does nothing
+#   - the connector is then dropped from the compositor entirely: `hyprctl
+#     monitors` stops listing DP-3 at all, sometimes falling back to a virtual
+#     FALLBACK output
+#   - the panel sees no signal for long enough to drop into standby
+#
+# Nothing else notices, because DRM still reports the connector `connected`
+# with a full EDID. The failure is only visible by asking the compositor.
+#
+# DESIGN RULE: NO MODESETS ON THE HAPPY PATH
+# ------------------------------------------
+# Every modeset is another chance for link training to fail, and it stresses
+# the panel. So this script only READS state when things are fine — it performs
+# zero display operations in the normal case.
+#
+# `hyprctl reload` is the single recovery action, used only when the monitor is
+# actually missing or at the wrong mode. It is chosen because it is the one
+# thing observed to reliably bring the connector back (twice on 2026-09-18),
+# and because it re-asserts config rather than issuing an ad-hoc mode.
+#
+# Deliberately NOT checked: dpmsStatus. `hyprctl dispatch dpms on` runs
+# immediately before this and owns that; treating a momentary false as a fault
+# would trigger a reload — i.e. a modeset — for no reason.
+
+set -uo pipefail
+
+MON="${WAKE_MON:-DP-3}"
+MIN_HZ="${WAKE_MIN_HZ:-238}"   # 240.000 nominal; tolerate rounding
+TRIES="${WAKE_TRIES:-4}"
+
+# TIMING IS THE WHOLE GAME. The G95NC is slow to acquire — it takes a long time
+# to come up even from a cold power-on, and longer at 240 where it has to train
+# a DSC link. Judging it too early is actively harmful: issuing a reload while
+# the panel is still syncing ABORTS the acquisition and restarts it, which
+# looks exactly like a link failure and turns one slow wake into a loop.
+#
+# These were originally 4s/5s, which is inside the panel's normal acquisition
+# window and caused precisely that failure mode. Be patient instead.
+SETTLE="${WAKE_SETTLE:-25}"    # wait this long before judging the link at all
+GAP="${WAKE_GAP:-20}"          # and this long between recovery attempts
+
+log() { printf '%s hypr-wake-verify: %s\n' "$(date -Is)" "$*" >&2; }
+
+# Read-only. 0 if MON is present, not disabled, and running at the right rate.
+healthy() {
+    local j
+    j=$(timeout 8 hyprctl monitors -j 2>/dev/null) || return 1
+    [ -n "$j" ] || return 1
+    printf '%s' "$j" | jq -e --arg m "$MON" --argjson hz "$MIN_HZ" \
+        'any(.[]; .name == $m and (.disabled | not) and .refreshRate >= $hz)' \
+        >/dev/null 2>&1
+}
+
+sleep "$SETTLE"
+
+for i in $(seq 1 "$TRIES"); do
+    if healthy; then
+        if [ "$i" -eq 1 ]; then
+            log "$MON healthy — no display operations performed"
+        else
+            log "$MON recovered after $((i - 1)) reload(s)"
+        fi
+        exit 0
+    fi
+    log "$MON missing or wrong mode (attempt $i/$TRIES) — issuing hyprctl reload"
+    timeout 15 hyprctl reload >/dev/null 2>&1 || true
+    sleep "$GAP"
+done
+
+log "WARNING: $MON still unhealthy after $TRIES attempts — manual recovery needed"
+exit 1

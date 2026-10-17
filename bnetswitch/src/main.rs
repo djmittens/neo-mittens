@@ -3,6 +3,8 @@ mod agent;
 mod config;
 mod cpu_topology;
 mod lfg;
+mod voice;
+mod voice_ui;
 mod lfg_parse;
 mod lutris;
 mod rank_icons;
@@ -369,6 +371,7 @@ enum PendingAction {
 
 /// Application state.
 struct App {
+    voice_panel: voice_ui::VoicePanel,
     /// Detected Battle.net installation.
     install: BnetInstall,
     /// Accounts currently in Battle.net.config's `SavedAccountNames`.
@@ -528,6 +531,7 @@ impl App {
         };
 
         Self {
+            voice_panel: voice_ui::VoicePanel::default(),
             install,
             accounts,
             app_config,
@@ -1688,6 +1692,7 @@ fn print_usage() {
     eprintln!("USAGE:");
     eprintln!("    bnetswitch                       Run interactive TUI");
     eprintln!("    bnetswitch import-tcno <PATH>    Import BattleTags from TCNO");
+    eprintln!("    bnetswitch term-info             Show terminal/image detection");
     eprintln!("    bnetswitch --help                Show this help");
     eprintln!();
     eprintln!("IMPORT-TCNO:");
@@ -2025,6 +2030,15 @@ fn main() -> Result<()> {
                 anyhow::anyhow!("import-tcno requires a path argument. See --help.")
             })?;
             return run_import_tcno(path);
+        }
+        Some("term-info") | Some("--term-info") => {
+            let caps = term_caps::TermCaps::detect();
+            println!("Terminal: {}", caps.summary());
+            println!("Inline images: {}", if caps.supports_images() { "enabled" } else { "disabled" });
+            for name in ["TERM", "TERM_PROGRAM", "GHOSTTY_RESOURCES_DIR", "GHOSTTY_BIN_DIR", "BNETSWITCH_NO_GRAPHICS"] {
+                println!("{}={}", name, std::env::var(name).unwrap_or_else(|_| "(unset)".to_string()));
+            }
+            return Ok(());
         }
         Some("lfg-server") => {
             // Headless mode: just run the HTTP bridge for the userscript,
@@ -2458,6 +2472,32 @@ fn run_tui(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut App)
                 continue;
             }
 
+            if key.code == KeyCode::Tab && app.lfg_state.is_some() {
+                app.voice_panel.focused = !app.voice_panel.focused;
+                continue;
+            }
+            if app.voice_panel.focused {
+                let shared = app.lfg_state.clone();
+                if let Some(shared) = shared {
+                    let mut guard = shared.lock().unwrap();
+                    match key.code {
+                        KeyCode::Up | KeyCode::Char('k') => { app.voice_panel.navigate(&guard.voice.current, -1); continue; }
+                        KeyCode::Down | KeyCode::Char('j') => { app.voice_panel.navigate(&guard.voice.current, 1); continue; }
+                        KeyCode::Char('h') => { app.voice_panel.history = !app.voice_panel.history; continue; }
+                        KeyCode::Esc => { app.voice_panel.focused = false; app.voice_panel.history = false; continue; }
+                        KeyCode::Char('b') | KeyCode::Char('c') | KeyCode::Char('t') => {
+                            let operation = match key.code { KeyCode::Char('b') => "ban", KeyCode::Char('c') => "claim", _ => "troll" };
+                            let channel = guard.voice.current.channel_id.clone().unwrap_or_default();
+                            let result = lfg::moderate_voice(&mut guard, &channel, app.voice_panel.selected.clone(), operation);
+                            app.status = match result { Ok(()) => format!("Voice {} requested", operation), Err(e) => e.to_string() };
+                            drop(guard);
+                            if let Some(tx) = &app.lfg_notifier { let _ = tx.send(()); }
+                            continue;
+                        }
+                        _ => {},
+                    }
+                }
+            }
             match key.code {
                 KeyCode::Char('q') | KeyCode::Esc => {
                     // Esc closes the detail overlay first rather than quitting.
@@ -3210,11 +3250,23 @@ fn ui(f: &mut ratatui::Frame, app: &mut App) {
     .block(Block::default().borders(Borders::ALL).title("Battle.net Account Switcher"));
     f.render_widget(title, chunks[0]);
 
+    let mut body_area = chunks[1];
+    if let Some(shared) = app.lfg_state.clone() {
+        let guard = shared.lock().unwrap();
+        if guard.voice.current.channel_id.is_some() || app.voice_panel.history || app.voice_panel.focused {
+            let split = Layout::default().direction(if body_area.width >= 90 { Direction::Horizontal } else { Direction::Vertical })
+                .constraints(if body_area.width >= 90 { vec![Constraint::Min(35), Constraint::Length(42)] } else { vec![Constraint::Min(5), Constraint::Percentage(55)] }).split(body_area);
+            body_area = split[0];
+            let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis() as u64;
+            app.voice_panel.render(f, split[1], &guard.voice.current, &guard.voice.flags, &guard.voice.recent.iter().cloned().collect::<Vec<_>>(), guard.voice.storage_error.as_deref(), &app.term_caps, now);
+        }
+    }
+
     // Branch: render either the accounts list (default) or the LFG
     // bridge panel. Both use chunks[1] for the body; status bar and help
     // bar below adapt to whichever is active.
     if app.view == View::Lfg {
-        render_lfg_view(f, chunks[1], app);
+        render_lfg_view(f, body_area, app);
         // Status + help bars still rendered below.
         let status_style = Style::default().fg(Color::Yellow);
         let status = Paragraph::new(Span::styled(&app.status, status_style))
@@ -3229,7 +3281,7 @@ fn ui(f: &mut ratatui::Frame, app: &mut App) {
             Span::styled("j/k", Style::default().fg(Color::Cyan)),
             Span::raw(" Navigate  "),
             Span::styled("q", Style::default().fg(Color::Cyan)),
-            Span::raw(" Quit"),
+            Span::raw(" Quit · Tab voice sidebar"),
         ]));
         f.render_widget(help, chunks[3]);
         // Draw before returning: this early return is exactly what hid the
@@ -3385,7 +3437,7 @@ fn ui(f: &mut ratatui::Frame, app: &mut App) {
         .highlight_style(Style::default().add_modifier(Modifier::REVERSED))
         .highlight_symbol(">> ");
 
-    f.render_stateful_widget(list, chunks[1], &mut app.list_state);
+    f.render_stateful_widget(list, body_area, &mut app.list_state);
 
     // -------------------------------------------------------------------------
     // PNG icon overlay for accounts view
@@ -3399,7 +3451,7 @@ fn ui(f: &mut ratatui::Frame, app: &mut App) {
         const HIGHLIGHT_PREFIX_W: u16 = 3;
         const ROW_HEIGHT: u16 = 1;
 
-        let area = chunks[1];
+        let area = body_area;
         let inner_y = area.y + 1;
         let inner_x = area.x + 1;
         let inner_h = area.height.saturating_sub(2);

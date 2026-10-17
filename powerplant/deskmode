@@ -1,0 +1,100 @@
+#!/bin/bash
+# deskmode — free the AI tenants' VRAM before the compositor does a modeset.
+#
+# WHY THIS EXISTS
+# ---------------
+# On 2026-09-16 the ultrawide stopped getting a signal after the machine was
+# left running agents overnight. The machine never suspends; what "woke up" was
+# the monitors, from hypridle's 600s DPMS blank.
+#
+# dpms-on is the single moment the desktop makes a large, SUDDEN VRAM demand:
+# it reallocates framebuffers for a 7680x2160@240 panel and retrains the DP
+# link, all at once. With a 20-28GB model resident there was nothing to give,
+# the compositor's channel missed the driver's 7s Robust Channel deadline, and
+# the driver declared the GPU locked:
+#
+#   krcWatchdog_IMPL: RC watchdog: GPU is probably locked! Notify Timeout Seconds: 7
+#   Xid (PCI:0000:01:00): 8, pid=1785, name=Hyprland, channel 0x00000002
+#
+# The Xid names Hyprland as the VICTIM, not the cause. The driver's remedy is an
+# engine reset, which leaves a phantom head behind: a connector that reads
+# `disconnected` with zero modes and zero EDID bytes, yet is still `enabled`,
+# holding the head so no mode will train on the real connector. Verified
+# unrecoverable from userspace — neither Hyprland nor a root
+# `echo detect > /sys/class/drm/card0-DP-N/status` clears it. It costs a reboot.
+#
+# WHY THIS IS THE WHOLE FIX
+# -------------------------
+# The fault needs a modeset AND an exhausted card at the same instant. Days of
+# using Qwen alongside the desktop were fine, because during normal use the
+# framebuffers are already allocated and nothing large is suddenly requested.
+# So the card only has to be clear for the ~2 seconds before the modeset, not
+# all night — which costs no context on any model and loses no windows.
+#
+# Run from hypridle's on-resume, BEFORE `hyprctl dispatch dpms on`, wrapped in
+# `timeout 5 ... || true` so it can never keep dpms-on from running.
+#
+# NOT FIXABLE OTHER WAYS, for the record:
+#   - No hardware VRAM reservation exists. GeForce has no per-process quota and
+#     no MIG on consumer Blackwell, so allocation is first-come-first-served and
+#     the tenant that asks LAST loses. That is always the desktop: llama.cpp
+#     allocates once up front and holds, a compositor allocates continuously.
+#   - The iGPU cannot take over the displays. The G95NC's EDID reports a
+#     4233600 kHz maximum pixel clock — ~102 Gbps at 24bpp — and the 9900X's
+#     display engine is DP 1.4a (HBR3, 25.92 Gbps effective). Not close, even
+#     with DSC. Native G95NC needs the 5090's DP 2.1 UHBR20.
+
+set -uo pipefail
+
+LLAMA_URL="${DESKMODE_LLAMA_URL:-http://127.0.0.1:8090}"
+COMFY_URL="${DESKMODE_COMFY_URL:-http://127.0.0.1:8188}"
+WANT_FREE_MB="${DESKMODE_WANT_FREE_MB:-4096}"
+
+log() { printf '%s deskmode: %s\n' "$(date -Is)" "$*" >&2; }
+
+free_mb() {
+    nvidia-smi --query-gpu=memory.free --format=csv,noheader,nounits 2>/dev/null \
+        | head -1 | tr -d ' '
+}
+
+# Every call is bounded. This runs on the critical path to getting your screens
+# back, so a hung llama-swap must cost a couple of seconds, not the session.
+release() {
+    local before
+    before=$(free_mb)
+
+    # Fast path: if the card is already clear there is nothing to do, and the
+    # common case should cost one nvidia-smi call.
+    if [[ "${before:-0}" -ge "$WANT_FREE_MB" ]]; then
+        log "${before}MiB free — nothing to release"
+        return 0
+    fi
+
+    log "${before}MiB free, want ${WANT_FREE_MB}MiB — releasing before modeset"
+
+    local running
+    running=$(curl -sf --max-time 1 "$LLAMA_URL/running" 2>/dev/null)
+    if [[ -n "$running" && "$running" != '{"running":[]}' ]]; then
+        curl -sf --max-time 3 "$LLAMA_URL/unload" >/dev/null 2>&1 \
+            && log "evicted llama-swap tenant" \
+            || log "WARNING: llama-swap eviction failed"
+    fi
+
+    # ComfyUI is a separate container llama-swap knows nothing about — the
+    # contention llama-swap.yaml:355 calls out as unmanaged.
+    curl -sf --max-time 3 -X POST -H 'Content-Type: application/json' \
+        -d '{"unload_models":true,"free_memory":true}' \
+        "$COMFY_URL/free" >/dev/null 2>&1 && log "asked ComfyUI to free models"
+
+    local after
+    after=$(free_mb)
+    log "${after}MiB free after release"
+    [[ "${after:-0}" -lt "$WANT_FREE_MB" ]] \
+        && log "WARNING: still under ${WANT_FREE_MB}MiB — the modeset may stall"
+    return 0
+}
+
+case "${1:-release}" in
+    release) release ;;
+    *) echo "usage: deskmode [release]" >&2; exit 2 ;;
+esac

@@ -261,6 +261,7 @@ pub enum LfgActionKind {
     /// Disconnect from current voice channel. Userscript clicks the
     /// disconnect button.
     LeaveVoice,
+    ModerateVoice { channel_id: String, user_id: Option<String>, operation: String },
 }
 
 impl LfgActionKind {
@@ -274,6 +275,7 @@ impl LfgActionKind {
                 format!("set nickname to '{}'", nickname)
             }
             LfgActionKind::LeaveVoice => "leave voice".to_string(),
+            LfgActionKind::ModerateVoice { operation, user_id, .. } => format!("{} voice {}", operation, user_id.as_deref().unwrap_or("")),
         }
     }
 }
@@ -310,6 +312,7 @@ const SESSION_STALE_MS: u64 = 60_000;
 /// (a few requests per minute at most) so a coarse mutex is fine.
 #[derive(Default)]
 pub struct LfgState {
+    pub voice: crate::voice::VoiceLog,
     /// Recent LFG messages, newest first. Capped at MAX_LFG_HISTORY.
     pub messages: VecDeque<LfgMessage>,
     /// Pending actions for the userscript to execute. FIFO.
@@ -363,7 +366,13 @@ pub struct ActionFailure {
 
 impl LfgState {
     pub fn new() -> Self {
-        Self::default()
+        if cfg!(test) { return Self::default(); }
+        let mut state = Self::default();
+        match crate::voice::directory().and_then(|d| crate::voice::VoiceLog::open(d.join("history.jsonl"))) {
+            Ok(log) => state.voice = log,
+            Err(e) => state.voice = crate::voice::VoiceLog::unavailable(e.to_string()),
+        }
+        state
     }
 
     /// Insert a new LFG message. Deduplicates by message_id (replaces
@@ -580,7 +589,7 @@ impl LfgServer {
     /// returns an error and LFG features stay disabled — TUI continues
     /// to work.
     pub fn start() -> Result<Self> {
-        let state = Arc::new(Mutex::new(LfgState::new()));
+        let state = Arc::new(Mutex::new(LfgState::default()));
         let (notify_tx, _) = broadcast::channel::<()>(16);
 
         let runtime = tokio::runtime::Builder::new_multi_thread()
@@ -600,6 +609,10 @@ impl LfgServer {
             tokio::net::TcpListener::bind(format!("127.0.0.1:{}", LFG_PORT)).await
         })
         .map_err(|e| anyhow::anyhow!("LFG server bind failed on 127.0.0.1:{}: {}", LFG_PORT, e))?;
+
+        // Only the process which owns the bridge port may recover/write
+        // voice history. A second TUI must not close the live owner's sessions.
+        *state.lock().unwrap() = LfgState::new();
 
         let router = build_router(app_state);
 
@@ -647,6 +660,11 @@ fn build_router(state: AppState) -> Router {
         .route("/status", post(handle_status))
         .route("/voice/deleted", post(handle_voice_deleted))
         .route("/voice/state", post(handle_voice_state))
+        .route("/voice/roster", post(handle_voice_roster).get(handle_voice_roster_get))
+        .route("/voice/live", get(handle_voice_live))
+        .route("/voice/history", get(handle_voice_history))
+        .route("/voice/evidence", post(handle_voice_evidence))
+        .route("/voice/moderate", post(handle_voice_moderate))
         .route("/events", get(handle_events))
         .layer(cors)
         .with_state(state)
@@ -1058,6 +1076,117 @@ async fn handle_voice_deleted(
         .retain(|m| m.voice_channel_id.as_deref() != Some(&upd.channel_id));
     let removed = before - s.messages.len();
     json_ok(&format!(r#"{{"ok":true,"removed":{}}}"#, removed))
+}
+
+#[derive(Deserialize)]
+struct VoiceLiveQuery { token: String, session: String }
+
+async fn handle_voice_live(State(state): State<AppState>, Query(query): Query<VoiceLiveQuery>,
+    ws: axum::extract::ws::WebSocketUpgrade, headers: HeaderMap) -> Response {
+    if query.token != LFG_AUTH_TOKEN { return json_error(StatusCode::UNAUTHORIZED, "bad token"); }
+    state.lfg.lock().unwrap().register_session(query.session.clone(), extract_user_agent(&headers));
+    ws.max_message_size(64 * 1024).on_upgrade(move |mut socket| async move {
+        while let Some(Ok(message)) = socket.recv().await {
+            let axum::extract::ws::Message::Text(text) = message else { continue; };
+            let Ok(snapshot) = serde_json::from_str::<crate::voice::Snapshot>(&text) else { continue; };
+            let reply = {
+                let mut s = state.lfg.lock().unwrap();
+                s.register_session(query.session.clone(), String::new());
+                if !s.is_primary(&query.session) { serde_json::json!({"ignored":true}) }
+                else {
+                    for member in &snapshot.members {
+                        if let Some(url) = &member.avatar_url { crate::voice::cache_avatar(url.clone()); }
+                    }
+                    match s.voice.update(snapshot, now_ms()) {
+                        Ok(()) => { s.voice.storage_error = None; },
+                        Err(e) => { s.voice.storage_error = Some(e.to_string()); },
+                    }
+                    serde_json::json!({"current":s.voice.current, "flags":s.voice.flags, "storage_error":s.voice.storage_error})
+                }
+            };
+            if socket.send(axum::extract::ws::Message::Text(reply.to_string())).await.is_err() { break; }
+        }
+    }).into_response()
+}
+
+async fn handle_voice_roster(State(state): State<AppState>, headers: HeaderMap, body: String) -> Response {
+    if !is_authorized(&headers) { return json_error(StatusCode::UNAUTHORIZED, "bad token"); }
+    maybe_register_session(&state.lfg, &headers);
+    let snapshot: crate::voice::Snapshot = match serde_json::from_str(&body) {
+        Ok(s) => s, Err(_) => return json_error(StatusCode::BAD_REQUEST, "bad roster"),
+    };
+    let mut s = state.lfg.lock().unwrap();
+    if extract_session_id(&headers).is_some_and(|id| !s.is_primary(&id)) { return json_ok(r#"{"ignored":true}"#); }
+    for member in &snapshot.members {
+        if let Some(url) = &member.avatar_url { crate::voice::cache_avatar(url.clone()); }
+    }
+    match s.voice.update(snapshot, now_ms()) {
+        Ok(()) => { s.voice.storage_error = None; json_ok(&serde_json::json!({"ok":true, "flags": s.voice.flags, "current": s.voice.current}).to_string()) },
+        Err(e) => { s.voice.storage_error = Some(e.to_string()); json_error(StatusCode::INTERNAL_SERVER_ERROR, "voice history write failed") },
+    }
+}
+
+async fn handle_voice_roster_get(State(state): State<AppState>, headers: HeaderMap) -> Response {
+    if !is_authorized(&headers) { return json_error(StatusCode::UNAUTHORIZED, "bad token"); }
+    let s = state.lfg.lock().unwrap();
+    json_ok(&serde_json::json!({"current": s.voice.current, "flags": s.voice.flags, "storage_error": s.voice.storage_error,
+        "stale": now_ms().saturating_sub(s.voice.current.observed_at_ms) > 60_000}).to_string())
+}
+
+async fn handle_voice_history(State(state): State<AppState>, headers: HeaderMap) -> Response {
+    if !is_authorized(&headers) { return json_error(StatusCode::UNAUTHORIZED, "bad token"); }
+    json_ok(&serde_json::to_string(&state.lfg.lock().unwrap().voice.recent).unwrap())
+}
+
+async fn handle_voice_evidence(State(state): State<AppState>, headers: HeaderMap, body: String) -> Response {
+    if !is_authorized(&headers) { return json_error(StatusCode::UNAUTHORIZED, "bad token"); }
+    let mut event: crate::voice::Event = match serde_json::from_str(&body) {
+        Ok(e) => e, Err(_) => return json_error(StatusCode::BAD_REQUEST, "bad evidence"),
+    };
+    if !matches!(event.kind.as_str(), "ban" | "connect_denied" | "ban_requested" | "claim_requested" | "owner" | "moderation_failed") || event.evidence.is_empty() {
+        return json_error(StatusCode::BAD_REQUEST, "unsupported evidence");
+    }
+    if event.timestamp_ms == 0 { event.timestamp_ms = now_ms(); }
+    let mut s = state.lfg.lock().unwrap();
+    if event.kind == "owner" && s.voice.current.channel_id.as_deref() == Some(&event.channel_id) {
+        s.voice.current.owner_id = event.user_id.clone();
+        s.voice.current.owner_evidence = Some(event.evidence.clone());
+    }
+    match s.voice.record(event) {
+        Ok(()) => json_ok(r#"{"ok":true}"#),
+        Err(e) => { s.voice.storage_error = Some(e.to_string()); json_error(StatusCode::INTERNAL_SERVER_ERROR, "voice history write failed") },
+    }
+}
+
+/// Shared by browser and TUI; never target a nickname or a stale roster row.
+pub fn moderate_voice(s: &mut LfgState, channel: &str, user: Option<String>, operation: &str) -> Result<()> {
+    anyhow::ensure!(s.voice.current.channel_id.as_deref() == Some(channel) && now_ms().saturating_sub(s.voice.current.observed_at_ms) <= 60_000, "voice roster is stale or channel changed");
+    anyhow::ensure!(matches!(operation, "ban" | "claim" | "troll"), "unknown moderation operation");
+    if operation != "claim" {
+        let id = user.as_deref().context("select a voice member")?;
+        anyhow::ensure!(id != s.voice.current.me_id && s.voice.current.members.iter().any(|m| m.user_id == id), "target is yourself or has left voice");
+    }
+    if operation == "troll" {
+        let id = user.unwrap();
+        let flagged = s.voice.flags.get(&id).is_some_and(|f| f.troll);
+        s.voice.record(crate::voice::Event { event_id: format!("flag:{}:{}", id, now_ms()), kind: if flagged { "troll_clear" } else { "troll_flag" }.into(),
+            channel_id: channel.into(), user_id: Some(id.clone()), actor_id: Some(s.voice.current.me_id.clone()), owner_id: s.voice.current.owner_id.clone(), me_id: s.voice.current.me_id.clone(),
+            evidence: "manual user flag".into(), timestamp_ms: now_ms(), duration_ms: None, member: s.voice.current.members.iter().find(|m| m.user_id == id).cloned() })?;
+    } else {
+        s.enqueue_action(LfgActionKind::ModerateVoice { channel_id: channel.into(), user_id: if operation == "claim" { None } else { user }, operation: operation.into() });
+    }
+    Ok(())
+}
+
+async fn handle_voice_moderate(State(state): State<AppState>, headers: HeaderMap, body: String) -> Response {
+    if !is_authorized(&headers) { return json_error(StatusCode::UNAUTHORIZED, "bad token"); }
+    #[derive(Deserialize)] struct Request { channel_id: String, user_id: Option<String>, operation: String }
+    let request: Request = match serde_json::from_str(&body) { Ok(r) => r, Err(_) => return json_error(StatusCode::BAD_REQUEST, "bad moderation request") };
+    let result = moderate_voice(&mut state.lfg.lock().unwrap(), &request.channel_id, request.user_id, &request.operation);
+    match result {
+        Ok(()) => { let _ = state.notify_tx.send(()); json_ok(r#"{"ok":true}"#) },
+        Err(_) => json_error(StatusCode::CONFLICT, "target left, roster stale, or invalid operation"),
+    }
 }
 
 async fn handle_voice_state(
@@ -1480,6 +1609,62 @@ mod tests {
     async fn body_json(resp: Response) -> serde_json::Value {
         let bytes = axum::body::to_bytes(resp.into_body(), 1 << 20).await.unwrap();
         serde_json::from_slice(&bytes).unwrap()
+    }
+
+    fn voice_req(path: &str, session: &str, body: serde_json::Value) -> Request<Body> {
+        Request::builder().method("POST").uri(path)
+            .header("authorization", format!("Bearer {}", LFG_AUTH_TOKEN))
+            .header("x-bnet-session", session).body(Body::from(body.to_string())).unwrap()
+    }
+
+    #[tokio::test]
+    async fn live_voice_socket_authenticates_and_streams_roster_and_flags() {
+        use futures_util::{SinkExt, StreamExt};
+        let (app, shared, _tx) = test_app();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap(); });
+        let bad = tokio_tungstenite::connect_async(format!("ws://{}/voice/live?token=wrong&session=ws", address)).await;
+        assert!(matches!(bad, Err(tokio_tungstenite::tungstenite::Error::Http(response)) if response.status() == StatusCode::UNAUTHORIZED));
+        let (mut socket, _) = tokio_tungstenite::connect_async(format!("ws://{}/voice/live?token={}&session=ws", address, LFG_AUTH_TOKEN)).await.unwrap();
+        let snapshot = serde_json::json!({"channel_id":"vc", "me_id":"me", "members":[{"user_id":"other","nickname":"Nick", "speaking":true}]}).to_string();
+        socket.send(tokio_tungstenite::tungstenite::Message::Text(snapshot.clone())).await.unwrap();
+        let first: serde_json::Value = serde_json::from_str(socket.next().await.unwrap().unwrap().to_text().unwrap()).unwrap();
+        assert_eq!(first["current"]["members"][0]["speaking"], true);
+        moderate_voice(&mut shared.lock().unwrap(), "vc", Some("other".into()), "troll").unwrap();
+        socket.send(tokio_tungstenite::tungstenite::Message::Text(snapshot)).await.unwrap();
+        let second: serde_json::Value = serde_json::from_str(socket.next().await.unwrap().unwrap().to_text().unwrap()).unwrap();
+        assert_eq!(second["flags"]["other"]["troll"], true);
+        socket.close(None).await.unwrap();
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn roster_uses_primary_tab_and_moderation_rejects_stale_or_departed_targets() {
+        let (app, shared, _tx) = test_app();
+        {
+            let mut s = shared.lock().unwrap();
+            s.register_session("primary".into(), "".into());
+            s.register_session("secondary".into(), "".into());
+            s.sessions.get_mut("secondary").unwrap().registered_at = 0;
+        }
+        let snapshot = serde_json::json!({"channel_id":"vc", "me_id":"me", "members":[{"user_id":"other","nickname":"Nick"}]});
+        let ignored = body_json(app.clone().oneshot(voice_req("/voice/roster", "secondary", snapshot.clone())).await.unwrap()).await;
+        assert_eq!(ignored["ignored"], true);
+        assert!(shared.lock().unwrap().voice.current.channel_id.is_none());
+        assert_eq!(app.clone().oneshot(voice_req("/voice/roster", "primary", snapshot)).await.unwrap().status(), StatusCode::OK);
+        let request = serde_json::json!({"channel_id":"vc", "user_id":"other", "operation":"ban"});
+        assert_eq!(app.clone().oneshot(voice_req("/voice/moderate", "primary", request.clone())).await.unwrap().status(), StatusCode::OK);
+        {
+            let mut s = shared.lock().unwrap();
+            assert!(matches!(&s.action_queue[0].kind, LfgActionKind::ModerateVoice { user_id: Some(id), .. } if id == "other"));
+            s.voice.current.members.clear();
+        }
+        assert_eq!(app.clone().oneshot(voice_req("/voice/moderate", "primary", request.clone())).await.unwrap().status(), StatusCode::CONFLICT);
+        shared.lock().unwrap().voice.current.observed_at_ms = 0;
+        assert_eq!(app.clone().oneshot(voice_req("/voice/moderate", "primary", serde_json::json!({"channel_id":"vc", "operation":"claim"}))).await.unwrap().status(), StatusCode::CONFLICT);
+        let no_auth = Request::builder().uri("/voice/history").body(Body::empty()).unwrap();
+        assert_eq!(app.oneshot(no_auth).await.unwrap().status(), StatusCode::UNAUTHORIZED);
     }
 
     #[tokio::test]

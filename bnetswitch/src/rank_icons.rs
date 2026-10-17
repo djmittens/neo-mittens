@@ -52,7 +52,7 @@ use crate::term_caps::{GraphicsProto, TermCaps};
 ///
 /// Terminals that don't report a pixel size return zeros; 8x16 is the
 /// classic VGA cell and only affects icon scaling, never input handling.
-fn detect_font_size() -> (u16, u16) {
+pub(crate) fn detect_font_size() -> (u16, u16) {
     const FALLBACK: (u16, u16) = (8, 16);
     match crossterm::terminal::window_size() {
         Ok(ws) if ws.width > 0 && ws.height > 0 && ws.columns > 0 && ws.rows > 0 => {

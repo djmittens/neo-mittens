@@ -1,0 +1,8 @@
+# Ghostty — only settings that differ from the defaults.
+# Full option list: ghostty +show-config --default --docs
+font-family = "FiraCode Nerd Font"
+font-style = "Retina"
+font-size = 12
+background-opacity = 0.85
+focus-follows-mouse = true
+shell-integration-features = cursor,no-sudo,title

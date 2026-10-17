@@ -17,9 +17,11 @@
 //!   1. Environment-variable signatures (KITTY_WINDOW_ID, TERM_PROGRAM,
 //!      WEZTERM_EXECUTABLE, etc.) — instant, no I/O.
 //!   2. TERM string heuristics ("xterm-kitty", "foot", "wezterm").
-//!   3. Active probe: send a Kitty graphics query escape sequence and
-//!      read the response with a short timeout. Only used as a last
-//!      resort because it requires raw mode and a TTY.
+//!   3. Outer-terminal signatures preserved through tmux, such as
+//!      GHOSTTY_RESOURCES_DIR. tmux replaces TERM and TERM_PROGRAM in panes.
+//!
+//! No active terminal probe: reading query responses from stdin can steal
+//! keyboard input from the TUI, especially through tmux.
 //!
 //! ## tmux passthrough
 //!
@@ -76,22 +78,15 @@ impl TermCaps {
     /// Detect once. Safe to call before raw-mode setup; doesn't touch
     /// the terminal beyond reading env vars.
     pub fn detect() -> Self {
-        // User opt-out (helpful when terminal LIES about support, e.g.
-        // some vague xterm-256color forks claim more than they deliver).
-        if env::var("BNETSWITCH_NO_GRAPHICS").ok().as_deref() == Some("1") {
-            return Self {
-                graphics: GraphicsProto::None,
-                in_tmux: env::var("TMUX").is_ok(),
-                has_tty: is_tty(),
-            };
+        Self::from_env(|name| env::var(name).ok(), is_tty())
+    }
+
+    fn from_env(lookup: impl Fn(&str) -> Option<String>, has_tty: bool) -> Self {
+        Self {
+            graphics: detect_graphics(&lookup),
+            in_tmux: lookup("TMUX").is_some(),
+            has_tty,
         }
-
-        let in_tmux = env::var("TMUX").is_ok();
-        let has_tty = is_tty();
-
-        let graphics = detect_graphics();
-
-        Self { graphics, in_tmux, has_tty }
     }
 
     /// True if we should attempt image rendering at all. Graphics
@@ -117,27 +112,37 @@ impl TermCaps {
 
 /// Cheap signature-based detection. Order matters: more specific signals
 /// first, fallthroughs last.
-fn detect_graphics() -> GraphicsProto {
+fn detect_graphics(lookup: &impl Fn(&str) -> Option<String>) -> GraphicsProto {
+    if lookup("BNETSWITCH_NO_GRAPHICS").as_deref() == Some("1") {
+        return GraphicsProto::None;
+    }
+    let present = |name| lookup(name).is_some_and(|value| !value.is_empty());
+    let term_program = lookup("TERM_PROGRAM").unwrap_or_default();
+    // Explicit terminal identity wins over potentially inherited hints.
+    match term_program.as_str() {
+        "ghostty" | "WezTerm" => return GraphicsProto::Kitty,
+        "iTerm.app" => return GraphicsProto::ITerm2,
+        "Apple_Terminal" | "Alacritty" | "alacritty" => return GraphicsProto::None,
+        _ => {}
+    }
+
     // Kitty itself sets KITTY_WINDOW_ID and TERM=xterm-kitty.
-    if env::var("KITTY_WINDOW_ID").is_ok() {
+    if present("KITTY_WINDOW_ID") {
         return GraphicsProto::Kitty;
     }
-    let term = env::var("TERM").unwrap_or_default();
+    let term = lookup("TERM").unwrap_or_default();
     if term == "xterm-kitty" || term.starts_with("xterm-ghostty") {
         return GraphicsProto::Kitty;
     }
 
-    let term_program = env::var("TERM_PROGRAM").unwrap_or_default();
-    match term_program.as_str() {
-        // Ghostty implements the Kitty protocol fully.
-        "ghostty" => return GraphicsProto::Kitty,
-        // WezTerm prefers Kitty over Sixel when both supported.
-        "WezTerm" => return GraphicsProto::Kitty,
-        // iTerm2 has its own inline-images protocol (Cmd+Inline-Image).
-        "iTerm.app" => return GraphicsProto::ITerm2,
-        // Apple Terminal: no graphics support
-        "Apple_Terminal" => return GraphicsProto::None,
-        _ => {}
+    // tmux sets TERM=tmux-256color and TERM_PROGRAM=tmux even when its
+    // session environment contains TERM_PROGRAM=ghostty. Ghostty's resource
+    // and binary directories survive in pane environments and identify the
+    // outer terminal without querying stdin or changing tmux's TERM.
+    if (term_program.is_empty() || term_program == "tmux")
+        && (present("GHOSTTY_RESOURCES_DIR") || present("GHOSTTY_BIN_DIR"))
+    {
+        return GraphicsProto::Kitty;
     }
 
     // foot supports Sixel when launched with the right flag.
@@ -149,21 +154,20 @@ fn detect_graphics() -> GraphicsProto {
 
     // Konsole 22.04+ supports Kitty graphics. KONSOLE_VERSION env may
     // hint, but absent that, TERM=xterm-256color tells us nothing.
-    if env::var("KONSOLE_VERSION").is_ok() {
+    if present("KONSOLE_VERSION") {
         return GraphicsProto::Kitty;
     }
 
     // Alacritty: explicitly does NOT support any image protocol.
     // ALACRITTY_LOG / ALACRITTY_WINDOW_ID env vars set when running.
-    if env::var("ALACRITTY_LOG").is_ok() || env::var("ALACRITTY_WINDOW_ID").is_ok() {
+    if present("ALACRITTY_LOG") || present("ALACRITTY_WINDOW_ID") {
         return GraphicsProto::None;
     }
 
     // We could do an active probe here (send graphics query, parse
     // response with timeout). It's unreliable in tmux without
     // passthrough configured, and it costs a stdin read in raw mode.
-    // For now, signature detection is sufficient — terminals that
-    // support graphics universally set distinguishable env vars.
+    // Unknown terminal signatures use the Unicode fallback.
     GraphicsProto::None
 }
 
@@ -186,18 +190,107 @@ mod tests {
         let _ = caps.supports_images();
     }
 
-    /// Opt-out env var forces None regardless of other signals.
+    fn caps_for(vars: &[(&str, &str)], has_tty: bool) -> TermCaps {
+        TermCaps::from_env(
+            |name| {
+                vars.iter()
+                    .find(|(key, _)| *key == name)
+                    .map(|(_, value)| value.to_string())
+            },
+            has_tty,
+        )
+    }
+
+    #[test]
+    fn ghostty_inside_tmux_uses_preserved_resource_signature() {
+        let caps = caps_for(
+            &[
+                ("TERM", "tmux-256color"),
+                ("TERM_PROGRAM", "tmux"),
+                ("TMUX", "/tmp/tmux-1000/default,5316,2"),
+                ("GHOSTTY_RESOURCES_DIR", "/usr/share/ghostty"),
+                ("GHOSTTY_BIN_DIR", "/usr/bin"),
+            ],
+            true,
+        );
+        assert_eq!(caps.graphics, GraphicsProto::Kitty);
+        assert!(caps.in_tmux);
+        assert!(caps.supports_images());
+        assert_eq!(caps.summary(), "kitty-graphics, tmux");
+    }
+
+    #[test]
+    fn ghostty_bin_signature_and_direct_terminal_identity_are_supported() {
+        assert_eq!(
+            caps_for(
+                &[("TERM_PROGRAM", "tmux"), ("GHOSTTY_BIN_DIR", "/usr/bin")],
+                true
+            )
+            .graphics,
+            GraphicsProto::Kitty
+        );
+        assert_eq!(
+            caps_for(&[("TERM_PROGRAM", "ghostty")], true).graphics,
+            GraphicsProto::Kitty
+        );
+        assert_eq!(
+            caps_for(&[("TERM", "xterm-ghostty")], true).graphics,
+            GraphicsProto::Kitty
+        );
+    }
+
+    #[test]
+    fn unknown_tmux_and_empty_signatures_do_not_claim_graphics_support() {
+        let caps = caps_for(
+            &[
+                ("TERM", "tmux-256color"),
+                ("TERM_PROGRAM", "tmux"),
+                ("GHOSTTY_RESOURCES_DIR", ""),
+                ("GHOSTTY_BIN_DIR", ""),
+            ],
+            true,
+        );
+        assert_eq!(caps.graphics, GraphicsProto::None);
+        assert!(!caps.supports_images());
+    }
+
+    #[test]
+    fn explicit_unsupported_terminal_overrides_inherited_ghostty_signature() {
+        let caps = caps_for(
+            &[
+                ("TERM_PROGRAM", "Alacritty"),
+                ("GHOSTTY_RESOURCES_DIR", "/usr/share/ghostty"),
+            ],
+            true,
+        );
+        assert_eq!(caps.graphics, GraphicsProto::None);
+    }
+
+    #[test]
+    fn piped_output_still_disables_images() {
+        let caps = caps_for(
+            &[
+                ("TERM_PROGRAM", "tmux"),
+                ("GHOSTTY_RESOURCES_DIR", "/usr/share/ghostty"),
+            ],
+            false,
+        );
+        assert_eq!(caps.graphics, GraphicsProto::Kitty);
+        assert!(!caps.supports_images());
+    }
+
+    /// Test without mutating process-wide environment shared by parallel tests.
     #[test]
     fn opt_out_env_disables_graphics() {
-        let prev = env::var("BNETSWITCH_NO_GRAPHICS").ok();
-        // SAFETY: tests are single-threaded by default in cargo unless
-        // user passes --test-threads=N. We restore env at end.
-        unsafe { env::set_var("BNETSWITCH_NO_GRAPHICS", "1"); }
-        let caps = TermCaps::detect();
+        let caps = caps_for(
+            &[
+                ("BNETSWITCH_NO_GRAPHICS", "1"),
+                ("TERM_PROGRAM", "ghostty"),
+                ("GHOSTTY_RESOURCES_DIR", "/usr/share/ghostty"),
+            ],
+            true,
+        );
         assert_eq!(caps.graphics, GraphicsProto::None);
-        match prev {
-            Some(v) => unsafe { env::set_var("BNETSWITCH_NO_GRAPHICS", v); },
-            None => unsafe { env::remove_var("BNETSWITCH_NO_GRAPHICS"); },
-        }
+        assert!(!caps.supports_images());
     }
 }

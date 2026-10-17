@@ -49,11 +49,14 @@
   changed_when: false
   failed_when: false
 
+# zram (archinstall's default swap) has no UUID and can't hold a hibernate image
 - name: Resolve resume UUID from swap source
-  ansible.builtin.command: blkid -s UUID -o value {{ swap_show.stdout_lines[0] }}
+  ansible.builtin.command: blkid -s UUID -o value {{ swap_partitions[0] }}
+  vars:
+    swap_partitions: "{{ swap_show.stdout_lines | reject('match', '^/dev/zram') | list }}"
   register: resume_uuid_lookup
   changed_when: false
-  when: swap_show.stdout_lines | length > 0
+  when: swap_show.stdout_lines | reject('match', '^/dev/zram') | list | length > 0
 
 - name: Set resume_uuid fact
   ansible.builtin.set_fact:
@@ -80,19 +83,75 @@
     msg: "{{ effective_cmdline }}"
 
 # ----------------------------------------------------------------------
+# systemd-boot takes the whole cmdline from us (GRUB adds root= itself),
+# so keep the boot-critical tokens the system is running with -- root=,
+# rootflags=subvol=@, rw, ... -- and drop the ones this role manages.
+# ----------------------------------------------------------------------
+- name: Read running kernel cmdline
+  ansible.builtin.command: cat /proc/cmdline
+  register: proc_cmdline
+  changed_when: false
+  when: bootloader == 'systemd-boot'
+
+- name: Build systemd-boot cmdline
+  ansible.builtin.set_fact:
+    sdboot_cmdline: >-
+      {{
+        (proc_cmdline.stdout.split()
+          | reject('match', '^(BOOT_IMAGE|initrd)=')
+          | reject('match', '^(' + (managed_keys | map('regex_escape') | join('|')) + ')(=|$)')
+          | list
+          + [effective_cmdline]) | join(' ')
+      }}
+  vars:
+    managed_keys: "{{ kernel_cmdline_tokens | map('regex_replace', '=.*$', '') | list + ['resume'] }}"
+  when: bootloader == 'systemd-boot'
+
+- name: Show systemd-boot cmdline
+  ansible.builtin.debug:
+    msg: "{{ sdboot_cmdline }}"
+  when: bootloader == 'systemd-boot'
+
+# /etc/kernel/cmdline is only read when building unified kernel images;
+# plain loader entries carry their own `options` line.
+- name: Detect unified kernel images
+  ansible.builtin.stat:
+    path: /etc/kernel/cmdline
+  register: kernel_cmdline_file
+  when: bootloader == 'systemd-boot'
+
+# ----------------------------------------------------------------------
 # Apply cmdline based on bootloader.
 # ----------------------------------------------------------------------
-- name: Write /etc/kernel/cmdline (systemd-boot)
+- name: Write /etc/kernel/cmdline (systemd-boot, UKI)
   ansible.builtin.copy:
-    content: "{{ effective_cmdline }}\n"
+    content: "{{ sdboot_cmdline }}\n"
     dest: /etc/kernel/cmdline
     owner: root
     group: root
     mode: "0644"
     backup: true
   become: true
-  when: bootloader == 'systemd-boot'
+  when: bootloader == 'systemd-boot' and kernel_cmdline_file.stat.exists
   notify: regenerate initramfs
+
+- name: Find systemd-boot loader entries
+  ansible.builtin.find:
+    paths: /boot/loader/entries
+    patterns: "*.conf"
+  register: sdboot_entries
+  become: true
+  when: bootloader == 'systemd-boot' and not kernel_cmdline_file.stat.exists
+
+- name: Write cmdline into loader entries (systemd-boot, no UKI)
+  ansible.builtin.lineinfile:
+    path: "{{ item.path }}"
+    regexp: '^options\s'
+    line: "options {{ sdboot_cmdline }}"
+    backup: true
+  loop: "{{ sdboot_entries.files | default([]) }}"
+  become: true
+  when: bootloader == 'systemd-boot' and not kernel_cmdline_file.stat.exists
 
 - name: Update GRUB_CMDLINE_LINUX_DEFAULT (GRUB)
   ansible.builtin.lineinfile:

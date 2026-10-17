@@ -598,6 +598,9 @@ link_symlink "$SCRIPT_DIR/tmux/tmux.conf" "$HOME/.tmux.conf"
 # 10b) Link kitty config (if present in repo)
 link_symlink "$SCRIPT_DIR/kitty" "$HOME/.config/kitty"
 
+# 10c) Link Ghostty config (if present in repo)
+link_symlink "$SCRIPT_DIR/ghostty" "$HOME/.config/ghostty"
+
 # 11) Ensure TPM + plugins (Catppuccin via TPM in tmux.conf)
 ensure_tpm
 ensure_tmux_tpm_block

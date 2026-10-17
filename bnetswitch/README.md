@@ -57,7 +57,99 @@ Accounts marked **banned** are shown in red with strikethrough and a
 `(BANNED)` tag; bnetswitch refuses to launch Overwatch for them and asks for
 confirmation before switching into one.
 
+## Discord voice companion
+
+With the bnetswitch LFG userscript **v0.13.3+** running in Discord web,
+joining an Overwatch Discord voice channel from either Discord or the TUI
+automatically splits the bnetswitch view and opens a browser companion sidebar.
+The bridge uses your existing Discord web voice session.
+Existing participants are hydrated from Discord's loaded voice-state store,
+with rendered voice rows as a partial fallback. Gateway events then maintain
+membership as people join and leave; scrolling a row away does not remove it.
+
+The roster shows server nicknames, Discord IDs in parentheses, avatars,
+observed time in the channel, and green speaking highlights. TUI avatars use
+the same Kitty/Sixel/iTerm2 support as rank icons; other terminals show a glyph.
+Speaking detection reads Discord's rendered voice indicators: users whose
+indicators are not rendered cannot reliably be highlighted.
+
+| TUI (Tab focuses voice sidebar) | Browser | Action |
+|---|---|---|
+| j/k or arrows | Click a member | Select a member |
+| b | Alt+B / Ban selected | Request a VC ban |
+| c | Alt+C / Claim VC | Request channel ownership |
+| t | Alt+T / Flag troll | Toggle a persistent personal troll marker |
+| h | Recent voice history | View recent events |
+| Esc / Tab | — | Return focus to the main view |
+
+Ban/claim controls read the server's
+[LFG interface](https://discord.com/channels/94882524378968064/1192075868609183754)
+and submit its real button/dropdown component interactions in the background,
+without navigating your current chat, scrolling, or clicking visible controls.
+The bot's dropdown response is read from gateway messages or Discord's cached
+messages, including ephemeral responses. Bans select **Discord IDs**, never a
+nickname guess; claims select the current VC's ID. Missing session/component
+metadata, unmatched dropdown options, rejected requests, or a departed target
+produce an error rather than switching the UI to the interface channel.
+The existing shortcuts are unchanged. Server permissions and the LFG bot decide
+whether the request is accepted; "request sent" still means submitted, not a
+confirmed ban/claim. The live background flow needs an authenticated bot check.
+
+Persistent badges distinguish **BANNED BY ME**, **BANNED ME**, **TROLL**, and
+**BAN REQUESTED (unconfirmed)**. Bot confirmation is currently recognized from
+explicit Owner / Voice Channel embed fields, Banned User / Banned By fields,
+or messages of the form `@actor banned @target from #channel` with Discord
+mentions. Other bot response formats require adapting the parser to a real
+payload. A member CONNECT-deny permission change is logged with an unknown
+actor. A disconnect alone is not recorded as a ban, and an owner is not
+automatically identified as the banner. **Exact attribution is available only
+when Discord/the bot supplies evidence identifying the actor.**
+
+History and avatar snapshots live under
+`~/.local/share/bnetswitch/voice/` (or `$XDG_DATA_HOME/bnetswitch/voice/`):
+
+- `history.jsonl`: append-only joins, leaves, observed durations, ownership
+  evidence, moderation requests/failures, confirmed bans, and personal flags.
+- `history.snapshot.json`: latest periodic roster checkpoint for restart recovery.
+- `avatars/*.png`: cached observed avatar versions, retained after users leave.
+
+Durations start when the bridge first observes a member, not necessarily their
+actual Discord join time. Outages/restarts create observation-gap records ending
+at the last observation, so offline time is not counted. History endpoints show
+the latest 200 events; the JSONL file retains the full log. The browser sidebar
+stays available after disconnecting so you can inspect evidence immediately.
+Only the elected primary browser tab supplies the roster and executes actions.
+Live voice updates use a persistent loopback WebSocket to avoid creating a
+Tampermonkey request for every speaker transition; browsers that block it fall
+back to throttled HTTP updates. `bnetswitchVoiceDiagnose()` in Discord's browser
+console reports the roster and visible interface/dropdown IDs for troubleshooting.
+
+Build/restart bnetswitch and let the userscript loader apply the update (or
+update the main userscript from `http://127.0.0.1:7172/bnetswitch-lfg.user.js`).
+The loader waits until you leave voice before reloading.
+
+Verification:
+
+```bash
+cargo test                      # from bnetswitch/
+node --test userscripts/bnetswitch-voice.test.cjs  # from repository root
+```
+
 ## Configuration
+
+### Terminal images (Ghostty + tmux)
+
+Inside tmux, `TERM=tmux-256color` and `TERM_PROGRAM=tmux` are normal.
+bnetswitch also recognizes Ghostty through `GHOSTTY_RESOURCES_DIR` or
+`GHOSTTY_BIN_DIR`, which the tmux config propagates to new panes. Keep
+`set -g allow-passthrough on` enabled so Kitty graphics reach Ghostty.
+
+Run `bnetswitch term-info` in the same pane to inspect detection. Ghostty
+inside tmux should report `kitty-graphics, tmux` and `Inline images: enabled`.
+Redirected/piped output disables image rendering, as does
+`BNETSWITCH_NO_GRAPHICS=1`. Terminal capability queries do not consume stdin.
+
+### Application config
 
 bnetswitch stores its own config at `~/.config/bnetswitch/config.toml`:
 

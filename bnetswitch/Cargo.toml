@@ -18,7 +18,7 @@ ureq = { version = "2", default-features = false, features = ["json", "tls"] }
 # Reading Lutris game config files (YAML). serde_norway is the maintained
 # fork of the unmaintained serde_yaml crate.
 serde_norway = "0.9"
-axum = { version = "0.7", features = ["macros"] }
+axum = { version = "0.7", features = ["macros", "ws"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "sync", "time"] }
 tokio-stream = { version = "0.1", features = ["sync"] }
 async-stream = "0.3"
@@ -39,3 +39,5 @@ ratatui-image = { version = "8", default-features = false, features = ["crosster
 # real server binds a fixed port (LFG_PORT) which is usually already taken
 # by the running bnetswitch, so tests must not bind anything.
 tower = { version = "0.5", features = ["util"] }
+tokio-tungstenite = "0.24"
+futures-util = { version = "0.3", features = ["sink"] }
