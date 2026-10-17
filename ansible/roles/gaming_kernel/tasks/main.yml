@@ -1,6 +1,7 @@
 ---
 # gaming_kernel role
-# Manages /etc/kernel/cmdline (systemd-boot) and /etc/modprobe.d/nvidia-perf.conf.
+# Manages the kernel cmdline, /etc/modprobe.d/nvidia-perf.conf and the
+# MT7925 Wi-Fi suspend hook.
 # Triggers initramfs regen via handler.
 
 # ----------------------------------------------------------------------
@@ -179,3 +180,17 @@
     backup: true
   become: true
   notify: regenerate initramfs
+
+# ----------------------------------------------------------------------
+# MediaTek MT7925 Wi-Fi hangs suspend/resume unless its driver is detached
+# first. systemd runs every executable in /etc/systemd/system-sleep with
+# pre/post around each sleep.
+# ----------------------------------------------------------------------
+- name: Install MT7925 suspend hook
+  ansible.builtin.copy:
+    src: mt7925-ignore.sh
+    dest: /etc/systemd/system-sleep/mt7925-ignore.sh
+    owner: root
+    group: root
+    mode: "0755"
+  become: true

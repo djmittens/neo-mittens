@@ -17,14 +17,18 @@ avahi
 awww
 base
 base-devel
+bc
 blender
 blueman
+bluetui
 bluez
 bluez-utils
 brightnessctl
+btop
 btrfs-progs
 buildah
 calibre
+cantarell-fonts
 celluloid
 cgdb
 clang
@@ -44,6 +48,7 @@ dnsmasq
 dosfstools
 duckdb
 e2fsprogs
+editline
 efibootmgr
 ethtool
 exfatprogs
@@ -70,6 +75,7 @@ greetd
 greetd-tuigreet
 grim
 gst-libav
+gst-plugin-pipewire
 gst-plugins-bad
 gst-plugins-good
 gst-plugins-ugly
@@ -79,6 +85,7 @@ gvfs-mtp
 hypridle
 hyprland
 hyprpaper
+hyprpicker
 imv
 inetutils
 jq
@@ -93,6 +100,8 @@ lib32-mangohud
 lib32-nvidia-utils
 lib32-ocl-icd
 libbacktrace
+libpulse
+libva-nvidia-driver
 libxnvctrl
 linux
 linux-firmware
@@ -127,6 +136,7 @@ nwg-look
 obs-studio
 openjdk21-src
 openssh
+papirus-icon-theme
 pavucontrol
 pcmanfm-qt
 perf
@@ -138,7 +148,6 @@ pipewire-pulse
 playerctl
 podman
 polkit-gnome
-pulsemixer
 python-certifi
 python-colorthief
 python-pipx
@@ -156,6 +165,7 @@ s-nail
 sof-firmware
 speech-dispatcher
 spirv-headers
+starship
 steam
 strace
 sudo
@@ -168,6 +178,8 @@ texinfo
 tree
 tree-sitter-cli
 ttf-firacode-nerd
+ttf-jetbrains-mono-nerd
+ttf-roboto
 udiskie
 unzip
 usbutils
@@ -188,6 +200,7 @@ which
 wine-staging
 winetricks
 wireless-regdb
+wiremix
 wireplumber
 wireshark-cli
 wl-clipboard
@@ -197,8 +210,10 @@ wlsunset
 wofi
 wpa_supplicant
 wqy-microhei
+wtype
 xdg-desktop-portal-gtk
 xdg-desktop-portal-hyprland
+xdg-terminal-exec
 xdg-user-dirs
 xorg-xwayland
 yazi

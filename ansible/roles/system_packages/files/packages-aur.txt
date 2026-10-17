@@ -10,9 +10,12 @@ lib32-giflib
 lib32-libxslt
 lib32-mpg123
 lib32-openal
+matcha-gtk-theme
 nsight-graphics
 openai-codex-bin
+opencode-bin
 pacseek
+phinger-cursors
 poweralertd
 pureref
 python312

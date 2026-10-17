@@ -278,8 +278,8 @@
         "󰕾"
       ]
     },
-    "on-click": "volume mute",
-    "on-click-middle": "pavucontrol",
+    "on-click": "wpctl set-mute @DEFAULT_AUDIO_SINK@ toggle",
+    "on-click-middle": "ghostty -e wiremix",
     "on-scroll-up": "pactl set-sink-volume @DEFAULT_SINK@ +5%",
     "on-scroll-down": "pactl set-sink-volume @DEFAULT_SINK@ -5%",
     "smooth-scrolling-threshold": 1
@@ -316,7 +316,7 @@
     "format-disconnected": "󰖪",
     "format-linked": "󰈁",
     "tooltip": false,
-    "on-click": "pgrep -x rofi &>/dev/null && notify-send rofi || networkmanager_dmenu"
+    "on-click": "ghostty -e nmtui"
   },
   "network#speed": {
     "format": " {bandwidthDownBits} ",
@@ -327,7 +327,7 @@
     "tooltip-format-ethernet": "{ifname} 󰈀 \n{ipaddr} | {frequency} MHz{icon} ",
     "tooltip-format-disconnected": "Not Connected to any type of Network",
     "tooltip": true,
-    "on-click": "pgrep -x rofi &>/dev/null && notify-send rofi || networkmanager_dmenu"
+    "on-click": "ghostty -e nmtui"
   },
   "bluetooth": {
     "format-on": "",
@@ -338,7 +338,7 @@
     "tooltip-format-connected": "{controller_alias}\t{controller_address}\n\n{num_connections} connected\n\n{device_enumerate}",
     "tooltip-format-enumerate-connected": "{device_alias}\t{device_address}",
     "tooltip-format-enumerate-connected-battery": "{device_alias}\t{device_address}\t{device_battery_percentage}%",
-    "on-click": "rofi-bluetooth -config ~/.config/rofi/menu.d/network.rasi -i"
+    "on-click": "ghostty -e bluetui"
   },
   "bluetooth#status": {
     "format-on": "",
@@ -350,7 +350,7 @@
     "tooltip-format-connected": "{controller_alias}\t{controller_address}\n\n{num_connections} connected\n\n{device_enumerate}",
     "tooltip-format-enumerate-connected": "{device_alias}\t{device_address}",
     "tooltip-format-enumerate-connected-battery": "{device_alias}\t{device_address}\t{device_battery_percentage}%",
-    "on-click": "rofi-bluetooth -config ~/.config/rofi/menu.d/network.rasi -i"
+    "on-click": "ghostty -e bluetui"
   },
   "battery": {
     "rotate": 270,
